@@ -34,9 +34,7 @@ NIGHT = -10.0
 BASE = datetime(2026, 7, 1, 23, 0, 0)
 
 
-def _cal_engine(
-    chans: list[Channel], *, tun: Tunables | None = None, calibrations=None
-) -> Engine:
+def _cal_engine(chans: list[Channel], *, tun: Tunables | None = None, calibrations=None) -> Engine:
     """A night-time engine with the room occupied and a settled dark sensor."""
     eng = Engine(
         closed_config(chans, lux_active_day=100.0),
@@ -247,9 +245,7 @@ def test_other_rooms_unaffected_during_sweep() -> None:
     other = RoomConfig(
         room_id="other",
         channels=(ChannelConfig("o", band=Band.PRIMARY, fixed_ct=2700),),
-        profile=Profile(
-            out_active_day={Band.PRIMARY: 0.5}, out_active_evening={Band.PRIMARY: 0.3}
-        ),
+        profile=Profile(out_active_day={Band.PRIMARY: 0.5}, out_active_evening={Band.PRIMARY: 0.3}),
     )
     two = EngineConfig(rooms=(*cfg.rooms, other))
     eng = Engine(two, InitialSnapshot(sun_elevation=NIGHT, occupancy={"lab": True, "other": True}))

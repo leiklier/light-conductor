@@ -130,9 +130,7 @@ def test_stale_fallback_and_recovery_are_slew_bounded() -> None:
     """§3.5/§8.2: losing then regaining the sensor produces only slew-bounded
     moves — no output jump at the open-loop <-> closed-loop switchover."""
     chans = [Channel("c", gain=180.0)]
-    cfg = closed_config(
-        chans, lux_active_day=100.0, out_active_day={Band.PRIMARY: 0.4}
-    )
+    cfg = closed_config(chans, lux_active_day=100.0, out_active_day={Band.PRIMARY: 0.4})
     eng = booted_engine(cfg, sun=20.0)
     plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 40.0)
     _run(plant, START, 60)  # closed-loop steady

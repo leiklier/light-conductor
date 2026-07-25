@@ -80,10 +80,7 @@ def _settle_seconds(tun: Tunables) -> float:
 
 def is_stale(est: EstimatorState, now: datetime, tun: Tunables) -> bool:
     """Whether the lux sensor is unavailable/stale (rule 3.5)."""
-    return (
-        est.last_report_at is None
-        or (now - est.last_report_at).total_seconds() > tun.lux_stale
-    )
+    return est.last_report_at is None or (now - est.last_report_at).total_seconds() > tun.lux_stale
 
 
 def note_own_command(est: EstimatorState, now: datetime) -> None:
@@ -99,8 +96,9 @@ def invalidate_pending(est: EstimatorState) -> None:
     est.pending_settle_at = None
 
 
-def record_step(est: EstimatorState, l_before: float | None, base_delta: float, now: datetime,
-                tun: Tunables) -> None:
+def record_step(
+    est: EstimatorState, l_before: float | None, base_delta: float, now: datetime, tun: Tunables
+) -> None:
     """Arm an online-gain observation for a just-emitted feed-forward step (3.4).
 
     ``base_delta`` is the predicted ΔL of the step at ``gain_mult == 1``. A
@@ -362,4 +360,3 @@ def should_correct(
         est.error_sustain_until = None
         return True, None
     return False, est.error_sustain_until
-

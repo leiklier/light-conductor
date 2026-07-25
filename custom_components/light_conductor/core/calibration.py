@@ -86,9 +86,7 @@ def begin(
     tun: Tunables,
 ) -> None:
     """Open a sweep: snapshot the world, turn everything off, settle (rule 4.4)."""
-    prior_light = {
-        cid: (cs.commanded_b, cs.commanded_ct, cs.on) for cid, cs in rs.channels.items()
-    }
+    prior_light = {cid: (cs.commanded_b, cs.commanded_ct, cs.on) for cid, cs in rs.channels.items()}
     rs.cal = CalibrationSession(
         channel_order=tuple(c.channel_id for c in room.channels),
         phase=CalPhase.SETTLE_OFF,
