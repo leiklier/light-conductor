@@ -395,6 +395,23 @@ def test_plateau_schedules_next_clock_boundary() -> None:
     assert review(out2) == at(1, 6, 0)  # morning_start
 
 
+def test_boundary_instant_wake_enters_ramp() -> None:
+    """§2.3 (N1): a review landing in the boundary minute itself (where the
+    clock ramp still reads as plateau) must reschedule one minute inside the
+    ramp — not skip to the boundary half a day away."""
+    day = Engine(apartment(), InitialSnapshot(sun_elevation=DAY_SUN))
+    day.handle(ReviewTick(), at(1, 16, 0))  # boot (grace)
+    on_boundary = day.handle(ReviewTick(), at(1, 20, 0))  # E still 0.0 here
+    assert review(on_boundary) == at(1, 20, 1)  # one minute into the ramp
+    in_ramp = day.handle(ReviewTick(), at(1, 20, 1))  # now 0 < E < 1
+    assert review(in_ramp) == at(1, 20, 6)  # circadian_tick (300 s) cadence
+
+    night = Engine(apartment(), InitialSnapshot(sleep=True))  # E_clock rules
+    night.handle(ReviewTick(), at(1, 2, 0))  # boot (grace)
+    on_morning = night.handle(ReviewTick(), at(1, 6, 0, 30))  # mid boundary minute
+    assert review(on_morning) == at(1, 6, 1)
+
+
 def test_night_path_expiry_uses_night_fade() -> None:
     """§6.2 (F6): the night episode fades out over night_fade (10 s), not the
     sleep_fade (4 s) used when sleep first engages."""

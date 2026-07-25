@@ -256,6 +256,13 @@ class Engine:
         minute = now.hour * 60 + now.minute
         bounds = sorted({tun.evening_start_min, tun.morning_start_min})
         for b in bounds:
+            if b == minute:
+                # Within the boundary minute the clock ramp still evaluates to
+                # its plateau value (seconds are truncated), so waking here
+                # must land one minute inside the ramp — not half a day away.
+                return now.replace(
+                    hour=b // 60, minute=b % 60, second=0, microsecond=0
+                ) + timedelta(minutes=1)
             if b > minute:
                 return now.replace(hour=b // 60, minute=b % 60, second=0, microsecond=0)
         b = bounds[0]  # wrap to the earliest boundary tomorrow
