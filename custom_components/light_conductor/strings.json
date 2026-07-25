@@ -1,0 +1,16 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Light Conductor",
+        "description": "Name this Light Conductor hub. Rooms and settings are configured afterwards under Options.",
+        "data": {
+          "name": "Name"
+        },
+        "data_description": {
+          "name": "Display name for this Light Conductor hub."
+        }
+      }
+    }
+  }
+}

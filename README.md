@@ -30,3 +30,17 @@ Status: design phase. See `docs/ENGINE_SPEC.md` (normative),
 Behavioral changes ship as `vX.Y.Z-beta.N` pre-releases and soak on the live
 install before being promoted unchanged to stable. Same policy as
 sonos-conductor.
+
+## Development
+
+```sh
+uv sync           # pinned to the production HA version
+uv run pytest     # pure-core scenario tests + full HA e2e tests
+uv run ruff check .
+uv run ruff format --check .
+```
+
+The `core/` package must never import `homeassistant` — enforced by ruff
+(TID251) and a poisoned-import test (`tests/test_purity.py`). Code and tests
+cite the spec's rule numbers; if behavior and spec disagree, one of them is a
+bug.
