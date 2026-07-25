@@ -241,14 +241,18 @@ otherwise; sofakrok keeps a low glow when occupied, 0 when not; gang dims).
 TV ending re-evaluates roles — rooms *restore* (the legacy gang light that
 stayed dimmed forever now recovers).
 
-6.4 **Away.** `anyone_home is False` ⇒ every room OFF, including balkong
-(tunable `balkong_when_away`, default off). `None`/unavailable fails safe as
-home (consistent with sonos-conductor 1.8). Arrival re-evaluates immediately;
+6.4 **Away.** `anyone_home is False` ⇒ every indoor room OFF. Outdoor rooms
+keep their dusk background (6.5) as presence simulation while the
+`away_lighting` switch (§10, restorable, default on) is on; switch off ⇒
+outdoor rooms go dark on away too. `None`/unavailable fails safe as home
+(consistent with sonos-conductor 1.8). Arrival re-evaluates immediately;
 no flash: normal fades apply.
 
 6.5 **Balkong (outdoor room).** A room may be flagged `outdoor`. It ignores
 presence and runs: ON at `E ≥ outdoor_on_threshold` (dusk) at
-`out_background` warm CT; OFF when sleep turns on or away per 6.4. Its
+`out_background` warm CT; OFF when sleep turns on, and on away per 6.4
+(background only while away — the occupational switch is ignored until
+someone is home). Its
 `occupational` switch (exposed entity, §10) raises it to `out_active_evening`
 at a slightly cooler CT while on — "sitting outside" vs "ambient backdrop".
 
@@ -333,6 +337,8 @@ resulting state lands inside echo tolerance.
 - `switch.light_conductor_enabled` — master enable; off = observe only
   (no commands; ledger and estimator keep running).
 - `switch.light_conductor_<room>_occupational` — only for outdoor rooms (6.5).
+- `switch.light_conductor_away_lighting` — outdoor presence simulation while
+  away (6.4), restorable, default on.
 - Per room diagnostics: `sensor.<room>_role` (enum), `sensor.<room>_natural_lux`
   (measurement, publish-gated: 5-point buckets + ≥ 10 s interval — recorder
   discipline per presence-conductor lesson), `sensor.<room>_target_lux`,
@@ -384,7 +390,6 @@ override latches (not restored — cleared on restart).
 | ct_min_delta | 100 K | 5.4 |
 | sleep_fade / night_hold / night_fade | 4 s / 600 s / 10 s | 6.1, 6.2 |
 | outdoor_on_threshold | 0.7 | 6.5 |
-| balkong_when_away | off | 6.4 |
 | gain_range_stops / gain_reset | 1.0 / on | 7.1, 7.3 |
 | slew_step / slew_interval / slew_step_empty | 0.1 / 1.0 s / 0.25 | 8.2 |
 | min_delta / min_write_interval / max_inflight | 0.03 / 1.0 s / 3 | 8.3 |

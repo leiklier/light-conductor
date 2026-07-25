@@ -161,17 +161,19 @@ entity PR; diagnostics platform carries the full engine state on demand.
   Plejd device-settings writes (dim speed) — roadmap.
 - Scene support (`scene.tv_kveld` is half-broken today; TV mode subsumes it).
 
-## Open questions for user review
+## Open questions — RESOLVED (user, 2026-07-25)
 
-- **Q1 (D8):** master dimmer neutral point — 50 % (can boost above
-  automation) or 100 % (dim-only)?
-- **Q2 (D9):** balkong while away — really fully off, or keep dusk
-  background as presence simulation?
-- **Q3 (D10):** night-path set and levels copied from the legacy script —
-  keep kjøkken downlights at 20 % (brightest path element) or unify lower?
-- **Q4 (D6):** should kjøkken benkebelysning stay evening-locked-out
-  (legacy behavior via boost band), or be allowed dimly in the evening now
-  that curves are calibrated?
-- **Q5 (D4):** appetite for deploying a Plejd fork via HACS (custom repo
-  shadowing the upstream integration), or upstream-PRs-only and live with
-  0.21.3 quirks meanwhile?
+- **Q1 (D8):** master dimmer neutral at 50 % — confirmed (boost possible).
+- **Q2 (D9):** balkong keeps dusk background as presence simulation while
+  away, controllable via a restorable `away_lighting` switch (default on).
+  Spec 6.4/6.5 updated; `balkong_when_away` tunable replaced by the switch.
+- **Q3 (D10):** night-path levels stay as copied from the legacy script.
+- **Q4 (D6):** delegated — decision: **keep the evening lockout.** The
+  boost band exists for task light (food prep), which is orthogonal to the
+  cozy-evening goal; calibrated curves fix the pop, not the aesthetics.
+  Revisitable via the `boost_evening_max` tunable without code changes.
+- **Q5 (D4):** Plejd fork deployed via HACS custom repo — approved.
+
+**Process (user, 2026-07-25):** all PRs before the first deployment may be
+reviewed and merged at Claude's discretion; releases/deployment still get
+explicit sign-off.
