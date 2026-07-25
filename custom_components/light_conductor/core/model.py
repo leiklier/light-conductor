@@ -37,17 +37,6 @@ class Role(StrEnum):
     TV = "tv"
 
 
-#: Role priority (higher wins when several qualify), rule 1.2.
-ROLE_PRIORITY: dict[Role, int] = {
-    Role.OFF: 0,
-    Role.BACKGROUND: 1,
-    Role.ADJACENT: 2,
-    Role.ACTIVE: 3,
-    Role.TV: 4,
-    Role.NIGHT_PATH: 5,
-}
-
-
 class Activity(StrEnum):
     """Rich activity classification (presence-conductor room_activity, §1.1)."""
 
@@ -279,9 +268,10 @@ class EngineState:
     # Master gain (rule 7).
     master_on: bool = True
     master_pct: float = 50.0
-    #: Whether the morning neutral-drift has already fired for this cycle
-    #: (rule 7.3); reset when we next leave the morning window.
-    gain_drift_done: bool = False
+    #: Circadian factor at the previous recompute (rule 7.3): neutral drift is
+    #: edge-triggered on the E>0 -> E==0 morning transition, so booting at
+    #: midday never clobbers a restored gain. ``None`` until the first review.
+    last_e: float | None = None
     started: bool = False
     start_at: datetime | None = None
     rooms: dict[str, RoomState] = field(default_factory=dict)

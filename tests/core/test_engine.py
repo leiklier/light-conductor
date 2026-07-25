@@ -28,9 +28,9 @@ from custom_components.light_conductor.core.events import (
     VacationChanged,
 )
 from custom_components.light_conductor.core.model import Activity, InitialSnapshot, Role
-from custom_components.light_conductor.core.plan import SetChannel
+from custom_components.light_conductor.core.plan import SetChannel, TurnOffChannel
 
-from .helpers import apartment, at, diag, offs, sets
+from .helpers import apartment, at, diag, offs, review, sets
 
 DAY_SUN = 20.0
 NIGHT_SUN = -8.0
@@ -347,3 +347,81 @@ def test_read_surface() -> None:
     eng = _engine()
     assert eng.circadian_factor(at(1, 22, 30)) == 1.0
     assert eng.room_state("gang").role is Role.OFF
+
+
+# --- review-round-1 fixes ------------------------------------------------
+
+
+def test_boot_midday_preserves_restored_gain() -> None:
+    """§7.3 (F1): booting at midday (E==0) must not clobber a restored gain;
+    neutral drift is edge-triggered and still fires on the next morning edge."""
+    eng = Engine(apartment(), InitialSnapshot(sun_elevation=DAY_SUN, master_pct=90.0))
+    eng.handle(ReviewTick(), at(1, 12, 0))  # E == 0 at boot
+    assert eng.state.master_pct == 90.0  # not reset to neutral
+    eng.handle(ReviewTick(), at(1, 12, 5))
+    assert eng.state.master_pct == 90.0
+    # A genuine morning edge (evening E>0 -> next-day E==0) drifts to neutral.
+    eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))
+    eng.handle(ReviewTick(), at(1, 22, 1))
+    eng.handle(SunElevationChanged(DAY_SUN), at(2, 12, 0))
+    assert eng.state.master_pct == 50.0
+
+
+def test_overridden_room_schedules_vacancy_release() -> None:
+    """§9.2 (F2): a held override still schedules the vacancy-hold expiry, so an
+    OFF-worthy room releases at hold end with no other events (not after 4 h)."""
+    eng = _engine()
+    eng.handle(PresenceChanged("kontor", True), at(1, 20, 0))  # vacancy:off room, ACTIVE
+    eng.handle(ForeignChange("kontor_taklys", 0.9), at(1, 20, 1))
+    assert eng.state.rooms["kontor"].overridden
+    out = eng.handle(PresenceChanged("kontor", False), at(1, 20, 2))  # vacate: 90 s hold
+    rev = review(out)
+    assert rev == at(1, 20, 3, 30)  # 90 s hold from 20:02, not the 4 h timeout
+    eng.handle(ReviewTick(), rev)
+    assert not eng.state.rooms["kontor"].overridden  # released at hold expiry
+
+
+def test_plateau_schedules_next_clock_boundary() -> None:
+    """§2.3 (F3): at a circadian plateau the engine schedules the next clock-ramp
+    boundary itself, so it can start the 20:00 / 06:00 ramps without sun events."""
+    day = Engine(apartment(), InitialSnapshot(sun_elevation=DAY_SUN))
+    day.handle(ReviewTick(), at(1, 16, 0))  # boot (grace)
+    out = day.handle(ReviewTick(), at(1, 16, 1))  # E == 0 plateau, past grace
+    assert review(out) == at(1, 20, 0)  # evening_start
+
+    night = Engine(apartment(), InitialSnapshot(sleep=True))  # sun unknown -> E_clock rules
+    night.handle(ReviewTick(), at(1, 2, 0))  # boot (grace)
+    out2 = night.handle(ReviewTick(), at(1, 2, 1))  # E == 1 plateau, past grace
+    assert review(out2) == at(1, 6, 0)  # morning_start
+
+
+def test_night_path_expiry_uses_night_fade() -> None:
+    """§6.2 (F6): the night episode fades out over night_fade (10 s), not the
+    sleep_fade (4 s) used when sleep first engages."""
+    eng = _engine()
+    eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 23, 0))
+    eng.handle(SleepChanged(True), at(1, 23, 1))
+    eng.handle(NightTriggerFired(), at(1, 23, 2))  # sofakrok lit at night output
+    expired = eng.handle(ReviewTick(), at(1, 23, 13))  # > night_hold after the trigger
+    fades = [
+        c for c in expired if isinstance(c, TurnOffChannel) and c.channel_id == "sofakrok_taklys"
+    ]
+    assert fades and fades[0].ramp_seconds == 10.0
+
+
+def test_role_arbitration_through_engine() -> None:
+    """§1.2 (F9): the engine resolves competing roles — NIGHT_PATH > TV > ACTIVE."""
+    # Night beats a room that is simultaneously occupied and TV-eligible.
+    eng = _engine()
+    eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 23, 0))
+    eng.handle(PresenceChanged("sofakrok", True), at(1, 23, 0, 30))  # ACTIVE
+    eng.handle(TvChanged(True), at(1, 23, 0, 45))  # TV-eligible
+    eng.handle(SleepChanged(True), at(1, 23, 1))
+    eng.handle(NightTriggerFired(), at(1, 23, 2))
+    assert eng.state.rooms["sofakrok"].role is Role.NIGHT_PATH
+
+    # Awake: TV beats plain ACTIVE presence.
+    eng2 = _engine()
+    eng2.handle(PresenceChanged("spisebord", True), at(1, 20, 0))
+    eng2.handle(TvChanged(True), at(1, 20, 1))
+    assert eng2.state.rooms["spisebord"].role is Role.TV

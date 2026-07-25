@@ -210,20 +210,21 @@ class Engine:
         evening = e >= tun.evening_cap_threshold
         g = gain.multiplier(s, tun)
 
-        # Night-path hold expiry (rule 6.2).
+        # Night-path hold expiry (rule 6.2). Its rooms fade out over night_fade.
+        night_expiring = False
         if s.night_active and s.night_hold_until is not None:
             if now >= s.night_hold_until:
                 s.night_active = False
                 s.night_hold_until = None
+                night_expiring = True
             else:
                 plan.review_at(s.night_hold_until)
 
-        # Morning neutral drift (rule 7.3): fire once when we reach full day.
-        if e == 0.0 and not s.gain_drift_done:
+        # Morning neutral drift (rule 7.3): edge-triggered on the E>0 -> E==0
+        # morning transition, so booting at midday never resets a restored gain.
+        if s.last_e is not None and s.last_e > 0.0 and e == 0.0:
             gain.relax_to_neutral(s, tun)
-            s.gain_drift_done = True
-        elif evening:
-            s.gain_drift_done = False
+        s.last_e = e
 
         # Pass 1: advance every room's FSM so adjacency reads settled state.
         for room in self.config.rooms:
@@ -232,14 +233,34 @@ class Engine:
 
         diags: list[RoomDiagnostics] = []
         for room in self.config.rooms:
-            diags.append(self._reconcile_room(room, now, e, evening, g, living, plan))
+            diags.append(
+                self._reconcile_room(room, now, e, evening, g, living, night_expiring, plan)
+            )
 
-        if 0.0 < e < 1.0 and s.enabled:  # circadian is drifting: revisit soon (rule 2.3)
-            plan.review_at(now + timedelta(seconds=tun.circadian_tick))
+        # Circadian self-scheduling (rule 2.3): follow the ramp with a tick, and
+        # from a plateau schedule the next clock-ramp boundary so the engine can
+        # start the 20:00 / 06:00 ramps itself without waiting on sun events.
+        if s.enabled:
+            if 0.0 < e < 1.0:
+                plan.review_at(now + timedelta(seconds=tun.circadian_tick))
+            else:
+                plan.review_at(self._next_clock_boundary(now))
         if self._in_grace(now) and s.start_at is not None:
             plan.review_at(s.start_at + timedelta(seconds=tun.startup_grace))
 
         return plan.finalize(tuple(diags), s.master_pct, s.master_on, s.enabled)
+
+    def _next_clock_boundary(self, now: datetime) -> datetime:
+        """The next local evening_start / morning_start instant after ``now`` (rule 2.3)."""
+        tun = self.tun
+        minute = now.hour * 60 + now.minute
+        bounds = sorted({tun.evening_start_min, tun.morning_start_min})
+        for b in bounds:
+            if b > minute:
+                return now.replace(hour=b // 60, minute=b % 60, second=0, microsecond=0)
+        b = bounds[0]  # wrap to the earliest boundary tomorrow
+        nxt = now + timedelta(days=1)
+        return nxt.replace(hour=b // 60, minute=b % 60, second=0, microsecond=0)
 
     def _reconcile_room(
         self,
@@ -249,6 +270,7 @@ class Engine:
         evening: bool,
         g: float,
         living: bool,
+        night_expiring: bool,
         plan: Plan,
     ) -> RoomDiagnostics:
         s, tun = self.state, self.tun
@@ -258,7 +280,7 @@ class Engine:
         base = roles.base_role(
             rs, room.shape, room.profile.vacancy, neighbour_active, living, evening
         )
-        res = modes.resolve(room, rs, s, e, tun)
+        res = modes.resolve(room, rs, s, e, tun, night_expiring)
         off_worthy = base is Role.OFF and not rs.self_active
 
         # Override arbitration (rule 9): mode hard-offs and night path win.
@@ -270,7 +292,12 @@ class Engine:
             elif override.should_release(rs, s, off_worthy, now, tun):
                 override.release(rs)
             else:
+                # Still adjusting nothing, but keep both clocks alive: the
+                # timeout AND the vacancy-hold expiry that will make the room
+                # OFF-worthy and release the latch (F2 — otherwise release could
+                # wait up to override_timeout in a quiet house).
                 plan.review_at(override.override_review(rs, now, tun))
+                plan.review_at(roles.next_review(rs, now))
                 return self._diag(room, rs, rs.role)
 
         # Resolve per-band outputs (funnel order, rule 8.1).

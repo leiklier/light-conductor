@@ -14,7 +14,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from .model import (
-    ROLE_PRIORITY,
     Activity,
     Role,
     RoomShape,
@@ -154,6 +153,11 @@ def _step_presence(rs: RoomState, now: datetime, tun: Tunables, hold_seconds: fl
     # freeze; a room that was already inactive just follows the normal
     # adjacency/background path (its blindness must not suppress a
     # neighbour-driven role).
+    if rs.blind_steps >= _MAX_BLIND_STEPS:
+        # Bottomed out at OFF: stop scheduling reviews forever (F7).
+        rs.blind_freeze_until = None
+        rs.self_active = False
+        return
     if not was_active and rs.blind_steps == 0:
         rs.blind_freeze_until = None
         rs.self_active = False
@@ -168,6 +172,8 @@ def _step_presence(rs: RoomState, now: datetime, tun: Tunables, hold_seconds: fl
     if rs.blind_steps >= 1:
         rs.last_active_end = rs.last_active_end or now
         rs.self_active = False
+    if rs.blind_steps >= _MAX_BLIND_STEPS:
+        rs.blind_freeze_until = None  # reached OFF; no more demotion reviews (F7)
 
 
 # --- role resolution -----------------------------------------------------
@@ -224,6 +230,8 @@ _DEMOTION_LADDER: tuple[Role, ...] = (
     Role.BACKGROUND,
     Role.OFF,
 )
+#: Blind steps at which a room has demoted all the way to OFF (rule 1.8).
+_MAX_BLIND_STEPS: int = len(_DEMOTION_LADDER) - 1
 
 
 def lower(role: Role, steps: int) -> Role:
@@ -242,8 +250,3 @@ def next_review(rs: RoomState, now: datetime) -> datetime | None:
         if t is not None and t > now
     ]
     return min(candidates) if candidates else None
-
-
-def took_priority(a: Role, b: Role) -> Role:
-    """The higher-priority of two roles (rule 1.2)."""
-    return a if ROLE_PRIORITY[a] >= ROLE_PRIORITY[b] else b

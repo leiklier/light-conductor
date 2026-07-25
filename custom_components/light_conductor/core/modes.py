@@ -45,9 +45,19 @@ def is_away(state: EngineState) -> bool:
 
 
 def resolve(
-    room: RoomConfig, rs: RoomState, state: EngineState, e: float, tun: Tunables
+    room: RoomConfig,
+    rs: RoomState,
+    state: EngineState,
+    e: float,
+    tun: Tunables,
+    night_expiring: bool = False,
 ) -> RoomResolution | None:
-    """Mode verdict for ``room``, or ``None`` for the normal role path."""
+    """Mode verdict for ``room``, or ``None`` for the normal role path.
+
+    ``night_expiring`` is set for the one recompute in which the night-path
+    episode ends, so its rooms fade out over ``night_fade`` (rule 6.2) rather
+    than the ``sleep_fade`` used when sleep first engages (rule 6.1).
+    """
     if is_away(state):
         # Everyone gone: every indoor room OFF (rule 6.4). Outdoor rooms keep
         # their dusk background as presence simulation while away_lighting is
@@ -68,8 +78,11 @@ def resolve(
                 fade=tun.night_fade,
                 suppress_override=True,  # rule 9.1
             )
-        # Sleep with no night-path role: OFF (rule 6.1).
-        return RoomResolution(Role.OFF, off=True, fade=tun.sleep_fade)
+        # Sleep with no night-path role: OFF. A night-path room whose episode
+        # just expired fades over night_fade (rule 6.2); otherwise sleep_fade
+        # (rule 6.1).
+        fade = tun.night_fade if (room.night_path and night_expiring) else tun.sleep_fade
+        return RoomResolution(Role.OFF, off=True, fade=fade)
 
     if room.shape is RoomShape.OUTDOOR:
         return _outdoor(room, rs, e, tun)

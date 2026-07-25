@@ -116,6 +116,21 @@ def test_fully_blind_active_room_demotes_gradually() -> None:
     assert _blind_role(rs) is Role.BACKGROUND
 
 
+def test_blind_room_stops_reviewing_once_off() -> None:
+    """§1.8 (F7): a permanently-blind room bottoms out at OFF and stops
+    scheduling reviews forever."""
+    rs = RoomState()
+    roles.ingest_presence(rs, True, None, at(1, 12, 0))
+    _step(rs, at(1, 12, 0))
+    roles.ingest_presence(rs, None, None, at(1, 12, 1))  # fully blind, no fallback
+    _step(rs, at(1, 12, 4))  # §1.8 freeze begins
+    _step(rs, at(1, 12, 11))  # three holds later -> demoted to OFF
+    assert _blind_role(rs) is Role.OFF
+    assert roles.next_review(rs, at(1, 12, 11)) is None  # no further reviews
+    _step(rs, at(1, 13, 0))  # still blind, still OFF, still silent
+    assert roles.next_review(rs, at(1, 13, 0)) is None
+
+
 def test_vacancy_off_room_goes_straight_off() -> None:
     """§1.4: a vacancy:off room (kontor) demotes to OFF, ignoring adjacency."""
     role = roles.demoted_role(RoomShape.PRESENCE, Vacancy.OFF, True, True, True)
@@ -166,10 +181,9 @@ def test_presence_room_trigger_keeps_active() -> None:
     assert rs.self_active
 
 
-def test_priority_ordering() -> None:
-    """§1.2: NIGHT_PATH > TV > ACTIVE > ADJACENT > BACKGROUND > OFF."""
-    assert roles.took_priority(Role.NIGHT_PATH, Role.TV) is Role.NIGHT_PATH
-    assert roles.took_priority(Role.TV, Role.ACTIVE) is Role.TV
-    assert roles.took_priority(Role.ADJACENT, Role.BACKGROUND) is Role.ADJACENT
+def test_demotion_ladder() -> None:
+    """§1.4/1.8: `lower` steps down the ACTIVE->OFF ladder, saturating at OFF."""
+    assert roles.lower(Role.ACTIVE, 1) is Role.ADJACENT
     assert roles.lower(Role.ACTIVE, 3) is Role.OFF
-    assert roles.lower(Role.TV, 1) is Role.TV  # not on the ladder
+    assert roles.lower(Role.ACTIVE, 9) is Role.OFF  # saturates
+    assert roles.lower(Role.TV, 1) is Role.TV  # mode roles are not on the ladder

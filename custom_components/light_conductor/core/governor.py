@@ -70,6 +70,16 @@ def plan_channel(
     q_flux = max(flux.flux(cid, channel.dim_floor), min(max_flux, q_flux))
     goal_b_q = flux.command_for_flux(cid, q_flux)
 
+    # Off is off (rule 8.6): a positive goal that quantizes to nothing (e.g.
+    # dim_floor 0 + a sub-grid level) must turn off, never emit level 0 (F8).
+    if goal_b_q <= 0.0 or q_flux <= 0.0:
+        if cs.on:
+            cur = flux.flux(cid, cs.commanded_b)
+            plan.turn_off(cid, _ramp_seconds(cur, 0.0, slew, tun, fade))
+            cs.on = False
+            cs.commanded_b = 0.0
+        return
+
     cur_flux = flux.flux(cid, cs.commanded_b) if cs.on else 0.0
     crossing_on = not cs.on
     delta = abs(q_flux - cur_flux)

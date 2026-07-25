@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from math import sqrt
+
 from custom_components.light_conductor.core import governor
 from custom_components.light_conductor.core.model import (
     ChannelConfig,
@@ -63,20 +65,52 @@ def test_min_delta_skips_tiny_moves() -> None:
     assert plan.commands == []
 
 
-def test_slew_rate_bounded_active_vs_empty() -> None:
-    """§8.2: ramp is sized so flux rate <= slew bound; empty rooms slew faster."""
+def test_slew_ramp_numeric_active_and_empty() -> None:
+    """§8.2: ramp_seconds = flux_step / slew * interval — concrete values.
+
+    A flux step of 0.5 at slew_step 0.1 / interval 1.0 must ramp over exactly
+    5.0 s while ACTIVE; the same step at slew_step_empty 0.25 must ramp over
+    2.0 s. (min_delta 0.05 keeps flux 0.5 exactly on the quantization grid.)"""
+    from dataclasses import replace
+
+    tun = replace(TUN, min_delta=0.05, slew_step=0.1, slew_interval=1.0, slew_step_empty=0.25)
     photo = _photo()
-    for active, step in ((True, TUN.slew_step), (False, TUN.slew_step_empty)):
-        cs = ChannelState()
-        cmd = _plan(cs, active, 1.0).commands[0]
-        assert isinstance(cmd, SetChannel)
-        flux_delta = photo.flux("c", cmd.level)
-        rate = flux_delta / cmd.ramp_seconds
-        assert rate <= step / TUN.slew_interval + 1e-9
-    # Empty ramp is quicker than the active ramp for the same move.
-    active_ramp = _plan(ChannelState(), True, 1.0).commands[0].ramp_seconds
-    empty_ramp = _plan(ChannelState(), False, 1.0).commands[0].ramp_seconds
-    assert empty_ramp < active_ramp
+    goal_b = sqrt(0.5)  # b**2 curve => flux 0.5
+
+    active = Plan()
+    governor.plan_channel(active, CH, ChannelState(), True, goal_b, None, photo, tun)
+    assert active.commands[0].ramp_seconds == 5.0  # 0.5 / 0.1 * 1.0
+
+    empty = Plan()
+    governor.plan_channel(empty, CH, ChannelState(), False, goal_b, None, photo, tun)
+    assert empty.commands[0].ramp_seconds == 2.0  # 0.5 / 0.25 * 1.0
+
+
+def test_slew_ramp_scales_linearly_with_step() -> None:
+    """§8.2 (mutation-sensitive): halving the flux step halves ramp_seconds."""
+    from dataclasses import replace
+
+    tun = replace(TUN, min_delta=0.05, slew_step=0.1, slew_interval=1.0)
+    photo = _photo()
+    big = Plan()
+    governor.plan_channel(big, CH, ChannelState(), True, sqrt(0.5), None, photo, tun)
+    small = Plan()
+    governor.plan_channel(small, CH, ChannelState(), True, sqrt(0.25), None, photo, tun)
+    # Steps 0.5 and 0.25 -> ramps 5.0 and 2.5; ratio matches the step ratio.
+    assert big.commands[0].ramp_seconds / small.commands[0].ramp_seconds == 2.0
+
+
+def test_zero_dim_floor_quantizes_to_off() -> None:
+    """§8.6 (F8): a positive goal that quantizes to nothing turns off, never
+    emits SetChannel(level=0)."""
+    ch = ChannelConfig("c", fixed_ct=2700, dim_floor=0.0)
+    photo = RoomPhotometry(RoomConfig("r", (ch,), Profile()))
+    cs = ChannelState(commanded_b=0.5, on=True)
+    plan = Plan()
+    governor.plan_channel(plan, ch, cs, True, 0.01, None, photo, TUN)  # flux 1e-4 -> grid 0
+    assert isinstance(plan.commands[0], TurnOffChannel)
+    assert not any(isinstance(c, SetChannel) for c in plan.commands)
+    assert not cs.on
 
 
 def test_ct_min_delta_gate() -> None:
