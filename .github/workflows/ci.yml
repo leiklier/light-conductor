@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The steps below guard on the files they check existing, so the
+# stacked bring-up PRs (docs -> core -> adapter) stay green while the
+# integration is assembled. The guards are no-ops on a complete tree.
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+      - name: Ruff lint
+        run: uv run ruff check .
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+      - name: Run tests
+        if: ${{ hashFiles('tests/**/*.py') != '' }}
+        run: uv run pytest -q --cov --cov-report=term-missing
+
+  hassfest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master
+        if: ${{ hashFiles('custom_components/*/manifest.json') != '' }}
+
+  hacs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hacs/action@main
+        if: ${{ hashFiles('custom_components/*/manifest.json') != '' }}
+        with:
+          category: integration
+          # Not (yet) in the home-assistant/brands repo — expected for a
+          # personal custom integration installed via custom repository.
+          ignore: brands
