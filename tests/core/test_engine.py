@@ -1,0 +1,349 @@
+"""Engine scenarios — the legacy behaviours from docs/DISCOVERY.md, end to end.
+
+The engine is seeded, booted past the startup grace (rule 11.1), then driven
+with stamped events. Each test cites the rule(s) and the legacy behaviour it
+reproduces or deliberately fixes.
+"""
+
+from __future__ import annotations
+
+from custom_components.light_conductor.core.engine import Engine
+from custom_components.light_conductor.core.events import (
+    ActivityChanged,
+    ForeignChange,
+    HomeChanged,
+    LuxReport,
+    MasterGainChanged,
+    MasterPowerChanged,
+    NightTriggerFired,
+    OccupationalChanged,
+    PresenceChanged,
+    ReviewTick,
+    SetAwayLighting,
+    SetEnabled,
+    SleepChanged,
+    SunElevationChanged,
+    TriggerFired,
+    TvChanged,
+    VacationChanged,
+)
+from custom_components.light_conductor.core.model import Activity, InitialSnapshot, Role
+from custom_components.light_conductor.core.plan import SetChannel
+
+from .helpers import apartment, at, diag, offs, sets
+
+DAY_SUN = 20.0
+NIGHT_SUN = -8.0
+
+
+def _engine(snapshot: InitialSnapshot | None = None) -> Engine:
+    """A booted engine: the first event arms startup grace; callers act later."""
+    eng = Engine(apartment(), snapshot)
+    eng.handle(SunElevationChanged(DAY_SUN), at(1, 18, 0))
+    return eng
+
+
+# --- §2/§4: kitchen evening accent survival -----------------------------
+
+
+def test_kitchen_evening_accent_survives_boost_off() -> None:
+    """§2.4/§4.5: at dusk the boost band (benkebelysning) locks out and only the
+    accent downlights survive — the legacy kitchen-off-after-sunset behaviour."""
+    eng = _engine()
+    # Daytime occupancy: taklys + downlights + benke all lit.
+    day = sets(eng.handle(PresenceChanged("kjokken", True), at(1, 18, 1)))
+    assert {"kjokken_downlights", "kjokken_taklys", "kjokken_benke"} <= set(day)
+
+    # Full evening (sun down): downlights survive, taklys + benke go off.
+    cmds = eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))
+    assert "kjokken_downlights" in sets(cmds)
+    assert {"kjokken_taklys", "kjokken_benke"} <= offs(cmds)
+    assert not eng.state.rooms["kjokken"].channels["kjokken_benke"].on
+    # The surviving accent is warm (evening CT + dim-to-warm, rules 5.1/5.3).
+    assert sets(cmds)["kjokken_downlights"].ct <= 2500
+
+
+# --- §6.3: spisebord TV ladder ------------------------------------------
+
+
+def test_spisebord_tv_ladder_occupied_then_empty() -> None:
+    """§6.3: TV output is 15 % occupied / 5 % empty (spisebord ladder)."""
+    eng = _engine()
+    eng.handle(PresenceChanged("spisebord", True), at(1, 20, 0))
+    occ = eng.handle(TvChanged(True), at(1, 20, 1))
+    assert eng.state.rooms["spisebord"].role is Role.TV
+    assert "spisebord_taklys" in sets(occ)  # TV glow commanded
+    occ_target = diag(occ, "spisebord").target_output  # ~0.15
+
+    # Room empties (hold expires): drop to the empty TV glow, still TV role.
+    eng.handle(PresenceChanged("spisebord", False), at(1, 20, 3))
+    empty = eng.handle(ReviewTick(), at(1, 20, 6))
+    assert eng.state.rooms["spisebord"].role is Role.TV
+    assert diag(empty, "spisebord").target_output < occ_target  # 15 % -> 5 % ladder
+
+
+# --- §6.3: gang TV dim + restore (the deliberate fix) -------------------
+
+
+def test_gang_tv_dim_then_restores_after_tv_off() -> None:
+    """§6.3: gang dims to 5 % during TV and *restores* when TV ends — the legacy
+    gang light that stayed dimmed forever now recovers."""
+    eng = _engine()
+    eng.handle(PresenceChanged("sofakrok", True), at(1, 21, 0))  # living area active
+    dim = sets(eng.handle(TvChanged(True), at(1, 21, 1)))
+    assert eng.state.rooms["gang"].role is Role.TV
+    assert "gang_taklys" in dim
+    dimmed_level = eng.state.rooms["gang"].channels["gang_taklys"].commanded_b
+
+    # TV ends: gang re-evaluates to its corridor role (sofakrok still active =>
+    # ADJACENT) and brightens away from the 5 % TV dim.
+    restore = sets(eng.handle(TvChanged(False), at(1, 21, 30)))
+    assert eng.state.rooms["gang"].role is Role.ADJACENT
+    assert eng.state.rooms["gang"].channels["gang_taklys"].commanded_b > dimmed_level
+    assert "gang_taklys" in restore
+
+
+# --- §6.2: night path episode -------------------------------------------
+
+
+def test_night_path_episode_and_expiry() -> None:
+    """§6.2: sleep + night trigger lights the night-path set warm and dim, holds
+    night_hold, then fades out (everything else stays off)."""
+    eng = _engine()
+    eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 23, 0))
+    eng.handle(SleepChanged(True), at(1, 23, 1))  # all off
+    lit = eng.handle(NightTriggerFired(), at(1, 23, 2))
+    s = sets(lit)
+    assert eng.state.rooms["sofakrok"].role is Role.NIGHT_PATH
+    assert "sofakrok_taklys" in s and "gang_taklys" in s
+    assert s["kjokken_downlights"].ct == 2200  # forced warm (rule 6.2)
+    # Non-night room (kontor) stays off.
+    assert eng.state.rooms["kontor"].role is Role.OFF
+
+    # Episode holds, then expires after night_hold (600 s) -> everything off.
+    held = eng.handle(ReviewTick(), at(1, 23, 5))
+    assert "sofakrok_taklys" not in offs(held)  # still lit within the hold
+    expired = eng.handle(ReviewTick(), at(1, 23, 13))  # > 10 min after the trigger
+    assert not eng.state.night_active
+    assert "sofakrok_taklys" in offs(expired)
+
+
+# --- §6.4: away turns the house off --------------------------------------
+
+
+def test_away_turns_house_off() -> None:
+    """§6.4: anyone_home False => every managed room OFF."""
+    eng = _engine()
+    eng.handle(PresenceChanged("kjokken", True), at(1, 20, 0))
+    eng.handle(PresenceChanged("sofakrok", True), at(1, 20, 0))
+    eng.handle(ReviewTick(), at(1, 20, 1))
+    gone = eng.handle(HomeChanged(False), at(1, 20, 2))
+    for room in ("kjokken", "sofakrok", "gang", "spisebord"):
+        assert eng.state.rooms[room].role is Role.OFF
+    assert "kjokken_taklys" in offs(gone)
+
+
+# --- §7: master gain scaling + morning neutral drift --------------------
+
+
+def test_master_gain_scales_and_drifts_neutral_at_morning() -> None:
+    """§7.1/§7.3: 100 % gain raises output (by day, below the evening cap); the
+    gain then drifts back to neutral by the next morning."""
+    eng = _engine()  # daytime: no evening cap to swallow the boost
+    neutral = sets(eng.handle(PresenceChanged("kontor", True), at(1, 18, 1)))["kontor_taklys"].level
+    boosted = sets(eng.handle(MasterGainChanged(100.0), at(1, 18, 2)))["kontor_taklys"].level
+    assert boosted > neutral  # gain > 1 raised the un-capped daytime output
+    assert eng.state.master_pct == 100.0
+
+    # Into the evening (resets the drift latch), then next morning full day.
+    eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))
+    eng.handle(ReviewTick(), at(1, 22, 1))
+    eng.handle(SunElevationChanged(DAY_SUN), at(2, 8, 0))
+    eng.handle(ReviewTick(), at(2, 12, 0))  # full day E == 0 -> neutral drift
+    assert eng.state.master_pct == 50.0
+
+
+def test_master_off_kills_indoor_keeps_outdoor() -> None:
+    """§7.2: master light off fades indoor rooms off; balkong (outdoor) is exempt."""
+    eng = _engine()
+    eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))  # balkong dusk-on
+    eng.handle(PresenceChanged("sofakrok", True), at(1, 22, 1))
+    eng.handle(ReviewTick(), at(1, 22, 2))
+    off = eng.handle(MasterPowerChanged(False), at(1, 22, 3))
+    assert "sofakrok_taklys" in offs(off)
+    assert eng.state.rooms["balkong"].channels["balkong_taklys"].on  # outdoor survives
+
+
+def test_away_keeps_outdoor_until_away_lighting_off() -> None:
+    """§6.4: away keeps balkong's dusk backdrop; the away-lighting switch off
+    darkens it too."""
+    eng = _engine()
+    eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))  # balkong dusk-on
+    eng.handle(ReviewTick(), at(1, 22, 1))
+    eng.handle(HomeChanged(False), at(1, 22, 2))
+    assert eng.state.rooms["balkong"].channels["balkong_taklys"].on  # presence sim
+    dark = eng.handle(SetAwayLighting(False), at(1, 22, 3))
+    assert "balkong_taklys" in offs(dark)
+
+
+# --- §9: override latch + release ---------------------------------------
+
+
+def test_override_latches_then_releases_on_away() -> None:
+    """§9.1/§9.2: a foreign change latches the room; away releases the latch."""
+    eng = _engine()
+    eng.handle(PresenceChanged("kontor", True), at(1, 20, 0))
+    eng.handle(ReviewTick(), at(1, 20, 1))
+
+    # Someone spins the wall rotary to 90 %: latch + adopt, engine stops adjusting.
+    eng.handle(ForeignChange("kontor_taklys", 0.9, wall_event=True), at(1, 20, 2))
+    assert eng.state.rooms["kontor"].overridden
+    quiet = eng.handle(ReviewTick(), at(1, 20, 3))
+    assert "kontor_taklys" not in sets(quiet)  # not fighting the manual level
+    assert eng.state.rooms["kontor"].channels["kontor_taklys"].commanded_b == 0.9
+
+    # Leaving home releases the override and the hard-off wins.
+    gone = eng.handle(HomeChanged(False), at(1, 20, 4))
+    assert not eng.state.rooms["kontor"].overridden
+    assert "kontor_taklys" in offs(gone)
+
+
+def test_override_suspended_by_night_path() -> None:
+    """§9.1: night path suspends an override (safety path wins)."""
+    eng = _engine()
+    eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 23, 0))
+    eng.handle(PresenceChanged("sofakrok", True), at(1, 23, 0, 30))  # occupied, not OFF-worthy
+    eng.handle(ForeignChange("sofakrok_taklys", 0.9), at(1, 23, 1))
+    assert eng.state.rooms["sofakrok"].overridden
+    eng.handle(SleepChanged(True), at(1, 23, 2))
+    lit = eng.handle(NightTriggerFired(), at(1, 23, 3))
+    assert eng.state.rooms["sofakrok"].role is Role.NIGHT_PATH
+    assert "sofakrok_taklys" in sets(lit)  # night path drives it, override suspended
+
+
+# --- §1.7: corridor via triggers ----------------------------------------
+
+
+def test_corridor_trigger_pulses_and_expires() -> None:
+    """§1.7: a trigger pulses the gang corridor ACTIVE for trigger_hold, then off."""
+    eng = _engine()
+    lit = eng.handle(TriggerFired("gang"), at(1, 23, 0))
+    assert eng.state.rooms["gang"].role is Role.ACTIVE
+    assert "gang_taklys" in sets(lit)
+    off = eng.handle(ReviewTick(), at(1, 23, 6))  # > 300 s trigger_hold
+    assert eng.state.rooms["gang"].role is Role.OFF
+    assert "gang_taklys" in offs(off)
+
+
+# --- §8.2: evening-cap smoothness ---------------------------------------
+
+
+def test_evening_drift_never_exceeds_slew() -> None:
+    """§8.2: pure circadian drift produces no output step above the slew bound.
+
+    An occupied living room is driven through the whole evening descent; every
+    emitted move must be sized so its flux-relative rate <= slew_step/slew_interval."""
+    eng = _engine()
+    eng.handle(PresenceChanged("sofakrok", True), at(1, 19, 30))
+    tun = eng.tun
+    bound = tun.slew_step / tun.slew_interval  # ACTIVE room => slew_step
+    cs = eng.state.rooms["sofakrok"].channels["sofakrok_taklys"]
+    seen = False
+    for minute in range(0, 210, 5):  # 19:31 -> 23:01
+        hh, mm = divmod(31 + minute, 60)
+        prev_flux = cs.commanded_b**2  # the engine's ledger before this move
+        cmds = eng.handle(ReviewTick(), at(1, 19 + hh, mm))
+        for c in cmds:
+            if isinstance(c, SetChannel) and c.channel_id == "sofakrok_taklys":
+                rate = abs(c.level**2 - prev_flux) / c.ramp_seconds
+                assert rate <= bound + 1e-9, f"step rate {rate} exceeds slew bound {bound}"
+                seen = True
+    assert seen  # the drift actually moved the light
+
+
+# --- §11: seeding & startup ----------------------------------------------
+
+
+def test_seed_adopts_levels_without_flash() -> None:
+    """§11.1: existing levels are adopted as ledger baselines; startup grace
+    suppresses convergence writes so a restart never flashes the lights."""
+    snap = InitialSnapshot(
+        sun_elevation=DAY_SUN,
+        occupancy={"kjokken": True},
+        channels={"kjokken_taklys": (0.45, 2700), "kjokken_downlights": (0.45, 3000)},
+    )
+    eng = Engine(apartment(), snap)
+    # First event within the 30 s grace: no channel writes (no flash).
+    boot = eng.handle(ReviewTick(), at(1, 18, 0, 10))
+    assert not any(isinstance(c, SetChannel) for c in boot)
+    assert eng.state.rooms["kjokken"].channels["kjokken_taklys"].commanded_b == 0.45
+    # After the grace, the engine converges divergent channels (benke was not
+    # in the seed, so it is driven to its ACTIVE goal).
+    after = eng.handle(ReviewTick(), at(1, 18, 1))
+    assert any(isinstance(c, SetChannel) for c in after)
+
+
+def test_observe_only_when_disabled() -> None:
+    """§10: master enable off => observe only, no channel commands, FSM still runs."""
+    eng = _engine(InitialSnapshot(sun_elevation=DAY_SUN, enabled=False))
+    cmds = eng.handle(PresenceChanged("kjokken", True), at(1, 20, 0))
+    assert eng.state.rooms["kjokken"].self_active  # FSM keeps tracking
+    assert not any(isinstance(c, SetChannel) for c in cmds)  # but no writes
+    # Re-enabling resumes writing.
+    on = eng.handle(SetEnabled(True), at(1, 20, 1))
+    assert any(isinstance(c, SetChannel) for c in on)
+
+
+def test_sleep_off_restores_and_relaxes_gain() -> None:
+    """§6.1/§7.3: sleep-off re-enables normal evaluation and drifts gain neutral."""
+    eng = _engine()
+    eng.handle(MasterGainChanged(90.0), at(1, 23, 0))
+    eng.handle(SleepChanged(True), at(1, 23, 1))
+    eng.handle(NightTriggerFired(), at(1, 23, 2))
+    assert eng.state.night_active
+    eng.handle(SleepChanged(False), at(1, 23, 3))
+    assert not eng.state.night_active  # night episode cleared
+    assert eng.state.master_pct == 50.0  # neutral drift on the sleep-off edge
+
+
+def test_activity_sets_episode_peak_and_scales_hold() -> None:
+    """§1.3: an ACTIVE room's activity feeds the episode peak used for holds."""
+    eng = _engine()
+    eng.handle(PresenceChanged("kjokken", True), at(1, 20, 0))
+    eng.handle(ActivityChanged("kjokken", Activity.SETTLED), at(1, 20, 1))
+    assert eng.state.rooms["kjokken"].episode_peak is Activity.SETTLED
+
+
+def test_vacation_acts_as_away() -> None:
+    """§6.6: vacation on applies the away rules regardless of presence."""
+    eng = _engine()
+    eng.handle(PresenceChanged("kjokken", True), at(1, 20, 0))
+    eng.handle(ReviewTick(), at(1, 20, 1))
+    gone = eng.handle(VacationChanged(True), at(1, 20, 2))
+    assert eng.state.rooms["kjokken"].role is Role.OFF
+    assert "kjokken_taklys" in offs(gone)
+
+
+def test_occupational_switch_raises_balkong() -> None:
+    """§6.5: the occupational switch lifts the outdoor room to the sitting level."""
+    eng = _engine()
+    eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))  # dusk-on
+    ambient = diag(eng.handle(ReviewTick(), at(1, 22, 1)), "balkong").target_output
+    sitting = diag(
+        eng.handle(OccupationalChanged("balkong", True), at(1, 22, 2)), "balkong"
+    ).target_output
+    assert sitting > ambient
+
+
+def test_lux_report_and_unknown_channel_are_harmless() -> None:
+    """§3 seam / §10.4: a lux report is ignored open-loop; unknown ids are no-ops."""
+    eng = _engine()
+    eng.handle(LuxReport("kjokken", 42.0), at(1, 20, 0))  # ignored, no crash
+    eng.handle(ForeignChange("does_not_exist", 0.5), at(1, 20, 1))  # unknown channel
+    assert not eng.state.rooms["kjokken"].overridden
+
+
+def test_read_surface() -> None:
+    eng = _engine()
+    assert eng.circadian_factor(at(1, 22, 30)) == 1.0
+    assert eng.room_state("gang").role is Role.OFF
