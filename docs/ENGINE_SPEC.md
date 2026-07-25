@@ -111,7 +111,13 @@ from `sun_high_deg` (default +10°) to `sun_low_deg` (default −4°), and
 ramp-down toward bedtime even in Nordic summer when the sun sets late; the
 sun term darkens winter afternoons. No hard steps: E is continuous and
 evaluated on a coarse schedule (≤ 1 change per `circadian_tick`, default
-300 s) so it never causes visible jumps by itself.
+300 s) so it never causes visible jumps by itself. The engine self-schedules
+its own re-evaluations: while E is inside a ramp it reviews every
+`circadian_tick`, and from a plateau (E = 0 or 1) it schedules the next
+clock-ramp boundary (the next local `evening_start`/`morning_start`) so it can
+start the 20:00 and 06:00 clock ramps unprompted. Entry into the *sun* ramp
+additionally relies on the adapter's `SunElevationChanged` events (push cadence
+~1–2 min); the clock term needs no external cadence.
 
 2.4 **Evening cap.** In addition to interpolation, `E ≥ evening_cap_threshold`
 imposes the profile's `evening_output_cap` on normalized channel output
@@ -297,12 +303,20 @@ quantizer → dim floor → ledger. No other code path writes to lights.
 8.2 **Slew limiting.** Output moves toward its goal in steps ≤
 `slew_step` flux-relative per `slew_interval` (defaults 0.1 / 1.0 s) while
 the room is ACTIVE (occupied eyes present); role demotions and empty rooms may
-step `slew_step_empty` (0.25). Transitions the actuator can't do natively are
-software ramps emitted by the engine as timed step plans.
+step `slew_step_empty` (0.25). The engine does **not** emit intermediate
+steps: it emits a *single* command per changed channel carrying the goal and a
+**mandatory** `ramp_seconds` sized so the move's flux-relative rate does not
+exceed the slew bound. Executing that ramp is the adapter's job — via the
+Plejd fork's native transition support, or software stepping below the engine
+where the actuator has none. `ramp_seconds` is never optional; a 0 duration
+means "as fast as the actuator allows".
 
 8.3 **Write economy.** A channel is commanded only when the quantized goal
 differs from the ledger's last commanded value by ≥ `min_delta` (flux-relative
-0.03) or crosses on/off. Rate limit ≥ `min_write_interval` (1.0 s) per
+0.03) or crosses on/off. Quantization is two-stage: the engine quantizes on
+the `min_delta` flux grid (~33 perceptual levels), and the adapter owns the
+final device-resolution quantization (e.g. Plejd's 255-step brightness) when
+it renders the command. Rate limit ≥ `min_write_interval` (1.0 s) per
 channel, latest-value-wins coalescing. Site-wide concurrent command cap
 `max_inflight` (default 3) respects the single-gateway BLE bottleneck.
 
