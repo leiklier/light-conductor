@@ -385,6 +385,7 @@ override latches (not restored — cleared on restart).
 | morning_start / morning_full | 06:00 / 07:30 | 2.3 |
 | circadian_tick | 300 s | 2.3 |
 | evening_output_cap | profile (0.3 living) | 2.4 |
+| evening_cap_threshold | 0.5 | 2.4 |
 | write_blank | 5 s | 3.2 |
 | tau_lux_up / tau_lux_down | 30 s / 60 s | 3.2 |
 | night_prior_deg / tau_night_prior | −6° / 600 s | 3.3 |
