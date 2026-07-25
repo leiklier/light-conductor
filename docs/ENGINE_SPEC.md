@@ -129,7 +129,13 @@ chasing its own output.
 
 3.1 **Model.** `L = N + Σ_i g_i·f_i(b_i) + ε` per room: `L` measured lux,
 `b_i` commanded normalized output of channel i, `f_i` the channel's relative
-flux curve (§4.2), `g_i` the calibrated lux gain at the sensor.
+flux curve (§4.2), `g_i` the calibrated lux gain at the sensor. `g_i` is
+strictly an observation model: sensors sit in idiosyncratic spots (under a
+speaker, behind a curtain, next to one particular lamp), so per-channel gains
+in the same room can differ by orders of magnitude and say nothing about a
+channel's contribution to the room as experienced — they are never used for
+aesthetic allocation (§4.5). Target tiers `T` are therefore sensor-relative
+per room, tuned per profile, and never comparable across rooms.
 
 3.2 **Estimate.** `N̂ = clamp(L_filt − Â, 0, ∞)` where `L_filt` is the
 measured lux after (a) a **write blanking window**: samples arriving within
@@ -191,8 +197,12 @@ taklys), `boost` (only at high demand, e.g. benkebelysning). Demand `D` (lux
 to produce) fills bands in order; each band saturates before the next engages,
 with `band_overlap` (default 0.15) cross-fade so engagement is never a pop —
 this replaces the legacy `base > 62` benkebelysning step and the
-`0.8x − 50` mapping. Within a band, channels share proportionally to their
-calibrated gains. A `boost` band additionally requires `E < boost_evening_max`
+`0.8x − 50` mapping. Within a band, channels share according to their
+configured `weight` (default equal) — **never** their calibrated sensor
+gains: gain is an observation model (§3.1), a function of where the sensor
+happens to sit, not of how much a channel lights the room (e.g. the kjøkken
+sensor sits next to benkebelysning; its gain dwarfs the taklys gain without
+the light being aesthetically dominant). A `boost` band additionally requires `E < boost_evening_max`
 (benkebelysning stays off in the evening, matching legacy kitchen-off
 behavior where only the accent band survives sunset).
 
