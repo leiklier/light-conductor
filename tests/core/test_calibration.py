@@ -1,0 +1,386 @@
+"""Calibration sweep proofs against the synthetic plant (ENGINE_SPEC §4.4).
+
+The sweep runs the production :class:`Engine` state machine against a plant
+with known true gains and curves, and proves: gain recovery within tolerance,
+a transactional commit, every abort path restoring prior state exactly, the
+start gate, and the persistence contract (§4.4/rule 5).
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+from custom_components.light_conductor.core.engine import Engine
+from custom_components.light_conductor.core.events import (
+    ForeignChange,
+    LuxReport,
+    PresenceChanged,
+    ReviewTick,
+    SleepChanged,
+    StartCalibration,
+    SunElevationChanged,
+)
+from custom_components.light_conductor.core.model import (
+    Band,
+    InitialSnapshot,
+    RoomCalibration,
+)
+from custom_components.light_conductor.core.plan import CalibrationResult
+from custom_components.light_conductor.core.tunables import Tunables
+
+from .plant import Channel, Plant, closed_config
+
+NIGHT = -10.0
+BASE = datetime(2026, 7, 1, 23, 0, 0)
+
+
+def _cal_engine(
+    chans: list[Channel], *, tun: Tunables | None = None, calibrations=None
+) -> Engine:
+    """A night-time engine with the room occupied and a settled dark sensor."""
+    eng = Engine(
+        closed_config(chans, lux_active_day=100.0),
+        InitialSnapshot(sun_elevation=NIGHT, occupancy={"lab": True}),
+        tunables=tun,
+        calibrations=calibrations,
+    )
+    eng.handle(SunElevationChanged(NIGHT), BASE)
+    eng.handle(PresenceChanged("lab", True), BASE + timedelta(seconds=40))
+    # A few dark samples so the estimator is fresh + stable (can_start gate).
+    t = BASE + timedelta(seconds=50)
+    for _ in range(5):
+        eng.handle(LuxReport("lab", 0.0), t)
+        t = t + timedelta(seconds=2)
+    return eng
+
+
+def _drive_sweep(
+    eng: Engine, plant: Plant, start: datetime, ticks: int = 200
+) -> list[CalibrationResult]:
+    """Feed the plant's true lux each second until the sweep finishes."""
+    results: list[CalibrationResult] = []
+    t = start
+    for _ in range(ticks):
+        cmds = plant.tick(t)
+        results.extend(c for c in cmds if isinstance(c, CalibrationResult))
+        if eng.state.rooms["lab"].cal is None and results:
+            break
+        t = t + timedelta(seconds=1)
+    return results
+
+
+# --- (g) gain recovery + transactional commit ---------------------------
+
+
+def test_sweep_recovers_gains_within_tolerance() -> None:
+    """§4.4: the sweep recovers each channel's true gain and commits."""
+    chans = [
+        Channel("acc", gain=120.0, band=Band.ACCENT),
+        Channel("pri", gain=60.0, band=Band.PRIMARY),
+    ]
+    eng = _cal_engine(chans)
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 0.0)
+
+    start = BASE + timedelta(seconds=70)
+    eng.handle(StartCalibration("lab"), start)
+    results = _drive_sweep(eng, plant, start + timedelta(seconds=1))
+
+    assert len(results) == 1 and results[0].ok
+    assert results[0].reason == "ok"
+    cal = eng.calibration_of("lab")
+    assert abs(cal.gains["acc"] - 120.0) / 120.0 < 0.05
+    assert abs(cal.gains["pri"] - 60.0) / 60.0 < 0.05
+    # Full coverage on both channels.
+    assert dict(results[0].coverage) == {"acc": 1.0, "pri": 1.0}
+    # The room is now marked calibrated (photometry committed).
+    assert eng._photo["lab"].calibrated
+
+
+def test_sweep_recovers_a_nonlinear_curve() -> None:
+    """§4.4/§4.2: a non-square-law channel's curve is measured, not assumed."""
+    chans = [Channel("c", gain=100.0, band=Band.PRIMARY, curve=lambda b: b**3)]
+    eng = _cal_engine(chans)
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 0.0)
+    start = BASE + timedelta(seconds=70)
+    eng.handle(StartCalibration("lab"), start)
+    _drive_sweep(eng, plant, start + timedelta(seconds=1))
+    photo = eng._photo["lab"]
+    # At b=0.5 a cubic curve gives 0.125 relative flux (square-law would be 0.25).
+    assert abs(photo.flux("c", 0.5) - 0.125) < 0.03
+
+
+# --- start gate (rule 4.4) ----------------------------------------------
+
+
+def test_rejected_when_sun_too_high() -> None:
+    """§4.4: a sweep is rejected unless sun elevation < night_prior_deg."""
+    chans = [Channel("c", gain=100.0)]
+    eng = Engine(
+        closed_config(chans, lux_active_day=100.0),
+        InitialSnapshot(sun_elevation=15.0, occupancy={"lab": True}),
+    )
+    eng.handle(SunElevationChanged(15.0), BASE)
+    eng.handle(LuxReport("lab", 50.0), BASE + timedelta(seconds=2))
+    out = eng.handle(StartCalibration("lab"), BASE + timedelta(seconds=4))
+    results = [c for c in out if isinstance(c, CalibrationResult)]
+    assert results and not results[0].ok and results[0].reason == "sun_too_high"
+    assert eng.state.rooms["lab"].cal is None
+
+
+def test_rejected_when_sensor_stale() -> None:
+    """§4.4: a sweep needs a fresh, stable sensor."""
+    chans = [Channel("c", gain=100.0)]
+    eng = Engine(
+        closed_config(chans, lux_active_day=100.0),
+        InitialSnapshot(sun_elevation=NIGHT, occupancy={"lab": True}),
+    )
+    eng.handle(SunElevationChanged(NIGHT), BASE)  # never fed a lux report
+    out = eng.handle(StartCalibration("lab"), BASE + timedelta(seconds=4))
+    results = [c for c in out if isinstance(c, CalibrationResult)]
+    assert results and results[0].reason == "sensor_stale"
+
+
+# --- transactional aborts restore prior state (rule 4.4) -----------------
+
+
+def test_abort_on_foreign_change_restores_prior_light() -> None:
+    """§4.4: a foreign change aborts and restores the exact pre-sweep lights."""
+    chans = [Channel("acc", gain=120.0, band=Band.ACCENT), Channel("pri", gain=60.0)]
+    eng = _cal_engine(chans)
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 0.0)
+    # Give the room a distinctive pre-sweep light state to restore to.
+    rs = eng.state.rooms["lab"]
+    rs.channels["pri"].commanded_b = 0.42
+    rs.channels["pri"].on = True
+
+    start = BASE + timedelta(seconds=70)
+    eng.handle(StartCalibration("lab"), start)
+    # Advance a couple of dwells, then a foreign change lands mid-sweep.
+    t = start + timedelta(seconds=1)
+    for _ in range(6):
+        plant.tick(t)
+        t = t + timedelta(seconds=1)
+    assert rs.cal is not None  # still sweeping
+    out = eng.handle(ForeignChange("pri", 0.9), t)
+    results = [c for c in out if isinstance(c, CalibrationResult)]
+    assert results and not results[0].ok and results[0].reason == "foreign_change"
+    assert rs.cal is None
+    # Prior calibration restored: still uncalibrated (never committed).
+    assert not eng._photo["lab"].calibrated
+    # Prior light state restored exactly (pri back to 0.42).
+    assert abs(rs.channels["pri"].commanded_b - 0.42) < 1e-9
+
+
+def test_abort_on_sleep_restores_and_stays_uncalibrated() -> None:
+    """§4.4: a sleep hard-off aborts the sweep transactionally."""
+    chans = [Channel("c", gain=100.0)]
+    eng = _cal_engine(chans)
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 0.0)
+    start = BASE + timedelta(seconds=70)
+    eng.handle(StartCalibration("lab"), start)
+    t = start + timedelta(seconds=1)
+    for _ in range(4):
+        plant.tick(t)
+        t = t + timedelta(seconds=1)
+    out = eng.handle(SleepChanged(True), t)
+    results = [c for c in out if isinstance(c, CalibrationResult)]
+    assert results and results[0].reason == "mode_off"
+    assert eng.state.rooms["lab"].cal is None
+    assert not eng._photo["lab"].calibrated
+
+
+def test_abort_on_missing_samples() -> None:
+    """§4.4: a dwell that elapses with no lux sample aborts (missing_samples)."""
+    chans = [Channel("c", gain=100.0)]
+    eng = _cal_engine(chans)
+    start = BASE + timedelta(seconds=70)
+    eng.handle(StartCalibration("lab"), start)
+    # Drive past the settle dwell with review ticks only (no lux) — the sensor
+    # is still fresh (< lux_stale) but the dwell collected nothing.
+    out = eng.handle(ReviewTick(), start + timedelta(seconds=5))
+    results = [c for c in out if isinstance(c, CalibrationResult)]
+    assert results and not results[0].ok and results[0].reason == "missing_samples"
+    assert eng.state.rooms["lab"].cal is None
+
+
+def test_abort_restores_a_previous_calibration() -> None:
+    """§4.4: aborting a re-calibration rolls back to the earlier calibration."""
+    chans = [Channel("c", gain=100.0)]
+    eng = _cal_engine(chans)
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 0.0)
+    # First sweep succeeds.
+    start = BASE + timedelta(seconds=70)
+    eng.handle(StartCalibration("lab"), start)
+    _drive_sweep(eng, plant, start + timedelta(seconds=1))
+    first = eng.calibration_of("lab")
+    assert eng._photo["lab"].calibrated
+
+    # Second sweep starts then aborts on a foreign change.
+    t2 = start + timedelta(seconds=200)
+    for _ in range(3):  # refresh the sensor for the start gate
+        eng.handle(LuxReport("lab", 0.0), t2)
+        t2 = t2 + timedelta(seconds=2)
+    eng.handle(StartCalibration("lab"), t2)
+    t = t2 + timedelta(seconds=1)
+    for _ in range(4):
+        plant.tick(t)
+        t = t + timedelta(seconds=1)
+    eng.handle(ForeignChange("c", 0.9), t)
+    # Rolled back to the first calibration exactly, still calibrated.
+    assert eng._photo["lab"].calibrated
+    back = eng.calibration_of("lab")
+    assert back.gains["c"] == first.gains["c"]
+
+
+def test_other_rooms_unaffected_during_sweep() -> None:
+    """§4.4: a sweep suspends only its own room; others keep running."""
+    chans = [Channel("c", gain=100.0)]
+    cfg = closed_config(chans, lux_active_day=100.0)
+    # Two-room config: reuse closed_config room plus an open-loop room.
+    from custom_components.light_conductor.core.model import (
+        ChannelConfig,
+        EngineConfig,
+        Profile,
+        RoomConfig,
+    )
+
+    other = RoomConfig(
+        room_id="other",
+        channels=(ChannelConfig("o", band=Band.PRIMARY, fixed_ct=2700),),
+        profile=Profile(
+            out_active_day={Band.PRIMARY: 0.5}, out_active_evening={Band.PRIMARY: 0.3}
+        ),
+    )
+    two = EngineConfig(rooms=(*cfg.rooms, other))
+    eng = Engine(two, InitialSnapshot(sun_elevation=NIGHT, occupancy={"lab": True, "other": True}))
+    eng.handle(SunElevationChanged(NIGHT), BASE)
+    t = BASE + timedelta(seconds=50)
+    for _ in range(5):
+        eng.handle(LuxReport("lab", 0.0), t)
+        t = t + timedelta(seconds=2)
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 0.0)
+    eng.handle(StartCalibration("lab"), t)
+    # Mid-sweep, the other room is still controlled (its light commanded).
+    tt = t + timedelta(seconds=1)
+    plant.tick(tt)
+    assert eng.state.rooms["lab"].cal is not None
+    assert eng.state.rooms["other"].channels["o"].on  # unaffected
+
+
+# --- start-gate branches + edge cases (rule 4.4) -------------------------
+
+
+def test_can_start_branches() -> None:
+    """§4.4: every rejection reason of the start gate."""
+    from custom_components.light_conductor.core import calibration
+    from custom_components.light_conductor.core.model import (
+        ChannelConfig,
+        EngineState,
+        EstimatorState,
+        Profile,
+        RoomConfig,
+        RoomState,
+    )
+
+    tun = Tunables()
+    now = BASE
+    room = RoomConfig(
+        room_id="r",
+        channels=(ChannelConfig("c", fixed_ct=2700),),
+        profile=Profile(),
+        has_lux_sensor=True,
+    )
+    no_sensor = RoomConfig(room_id="r", channels=room.channels, profile=Profile())
+    rs = RoomState()
+    st = EngineState(sun_elevation=NIGHT)
+
+    assert calibration.can_start(rs, no_sensor, st, now, tun) == "no_lux_sensor"
+    from custom_components.light_conductor.core.model import CalibrationSession
+
+    rs.cal = CalibrationSession(channel_order=("c",))
+    assert calibration.can_start(rs, room, st, now, tun) == "already_calibrating"
+    rs.cal = None
+    assert calibration.can_start(rs, room, EngineState(sleep=True), now, tun) == "mode_off"
+    high = EngineState(sun_elevation=10.0)
+    assert calibration.can_start(rs, room, high, now, tun) == "sun_too_high"
+    assert calibration.can_start(rs, room, st, now, tun) == "sensor_stale"
+    rs.est = EstimatorState(last_report_at=now, l_filt=None)
+    assert calibration.can_start(rs, room, st, now, tun) == "lux_unstable"
+    rs.est = EstimatorState(last_report_at=now, l_filt=0.0)
+    assert calibration.can_start(rs, room, st, now, tun) == ""  # all clear
+
+
+def test_ingest_lux_no_session_is_noop() -> None:
+    """§4.4: a lux sample with no running sweep is harmless."""
+    from custom_components.light_conductor.core import calibration
+    from custom_components.light_conductor.core.model import RoomState
+
+    rs = RoomState()
+    calibration.ingest_lux(rs, 10.0, BASE, Tunables())  # no rs.cal -> no-op
+
+
+def test_abort_on_sensor_going_stale_mid_sweep() -> None:
+    """§4.4: the sensor ageing out mid-sweep aborts (sensor_stale)."""
+    chans = [Channel("c", gain=100.0)]
+    eng = _cal_engine(chans)
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 0.0)
+    start = BASE + timedelta(seconds=70)
+    eng.handle(StartCalibration("lab"), start)
+    # Run a few dwells feeding lux, then stop and jump past lux_stale (120 s).
+    t = start + timedelta(seconds=1)
+    for _ in range(8):
+        plant.tick(t)
+        t = t + timedelta(seconds=1)
+    assert eng.state.rooms["lab"].cal is not None
+    out = eng.handle(ReviewTick(), t + timedelta(seconds=130))
+    results = [c for c in out if isinstance(c, CalibrationResult)]
+    assert results and results[0].reason == "sensor_stale"
+
+
+def test_dead_channel_gets_zero_gain_default_curve() -> None:
+    """§4.4: a channel that produces no measurable light gets gain 0, no crash."""
+    chans = [Channel("dead", gain=0.0, band=Band.PRIMARY)]
+    eng = _cal_engine(chans)
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 0.0)
+    start = BASE + timedelta(seconds=70)
+    eng.handle(StartCalibration("lab"), start)
+    results = _drive_sweep(eng, plant, start + timedelta(seconds=1))
+    assert results and results[0].ok
+    assert eng.calibration_of("lab").gains["dead"] == 0.0
+
+
+# --- persistence contract (rule 5) --------------------------------------
+
+
+def test_calibration_roundtrips_and_validates() -> None:
+    """Rule 5: calibration is plain data; from_dict round-trips; matches guards."""
+    cal = RoomCalibration(
+        room_id="lab",
+        gains={"a": 12.0, "b": 3.5},
+        curves={"a": ((0.0, 0.0), (1.0, 1.0)), "b": ((0.0, 0.0), (0.5, 0.2), (1.0, 1.0))},
+    )
+    restored = RoomCalibration.from_dict(cal.to_dict())
+    assert restored.gains == cal.gains
+    assert restored.curves == cal.curves
+    assert restored.matches(("a", "b"))
+    assert not restored.matches(("a", "c"))  # channel-set mismatch
+
+
+def test_persisted_calibration_loads_when_channels_match() -> None:
+    """Rule 5: a matching persisted calibration loads and marks the room calibrated."""
+    chans = [Channel("c", gain=100.0)]
+    cfg = closed_config(chans, lux_active_day=100.0)
+    cal = RoomCalibration("lab", gains={"c": 77.0}, curves={"c": ((0.0, 0.0), (1.0, 1.0))})
+    eng = Engine(cfg, calibrations={"lab": cal})
+    assert eng._photo["lab"].calibrated
+    assert eng._photo["lab"].gain("c") == 77.0
+
+
+def test_persisted_calibration_ignored_on_channel_mismatch() -> None:
+    """Rule 5: a mismatched calibration is dropped; the room stays uncalibrated."""
+    chans = [Channel("c", gain=100.0)]
+    cfg = closed_config(chans, lux_active_day=100.0)
+    bad = RoomCalibration("lab", gains={"WRONG": 77.0}, curves={"WRONG": ((0.0, 0.0), (1.0, 1.0))})
+    eng = Engine(cfg, calibrations={"lab": bad})
+    assert not eng._photo["lab"].calibrated
+    assert eng._photo["lab"].gain("c") == 100.0  # config default, not the bad 77

@@ -247,6 +247,9 @@ class RoomState:
     overridden: bool = False
     override_since: datetime | None = None
     channels: dict[str, ChannelState] = field(default_factory=dict)
+    # Closed-loop estimator (§3) and calibration sweep (§4.4).
+    est: EstimatorState = field(default_factory=lambda: EstimatorState())
+    cal: CalibrationSession | None = None
 
 
 @dataclass(slots=True)
@@ -314,6 +317,135 @@ class FluxModel(Protocol):
     def flux(self, channel_id: str, b: float) -> float: ...
 
     def command_for_flux(self, channel_id: str, f: float) -> float: ...
+
+
+class PhotometricModel(FluxModel, Protocol):
+    """Flux conversions plus the calibrated lux gain (rules 3.1, 4.5).
+
+    The estimator and calibration modules need the observation model
+    (``gain``) on top of the flux curve, but must not import
+    :mod:`photometry`; :class:`~.photometry.RoomPhotometry` satisfies this
+    structurally, so it is passed in as this protocol (house discipline).
+    """
+
+    def gain(self, channel_id: str) -> float: ...
+
+
+# ---------------------------------------------------------------------------
+# Estimator & calibration state (§3, §4.4)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class EstimatorState:
+    """Per-room closed-loop estimator state (ENGINE_SPEC §3).
+
+    All time-derived quantities advance only through event timestamps
+    (rule 0). ``None`` filter/report stamps mean "no sample yet" — the room
+    then runs open-loop (rule 3.5) until the first fresh :class:`LuxReport`.
+    """
+
+    #: Asymmetric-low-pass filtered lux ``L_filt`` (rule 3.2); None until seed.
+    l_filt: float | None = None
+    #: Artificial estimate ``Â`` filtered with the *same* low-pass as ``L_filt``
+    #: so both lag together — the residual ``L_filt - Â_filt`` then stays
+    #: consistent through an own-command transient instead of spiking (3.2).
+    a_filt: float = 0.0
+    #: Published natural-light estimate ``N̂`` (rule 3.2/3.3).
+    n_hat: float = 0.0
+    #: Online per-room scalar gain multiplier, bounded [0.5, 2.0] (rule 3.4).
+    gain_mult: float = 1.0
+    #: Last lux sample arrival (any sample, incl. blanked) — staleness (3.5).
+    last_report_at: datetime | None = None
+    #: Last sample folded into ``l_filt`` — the low-pass ``dt`` source (3.2).
+    last_filt_at: datetime | None = None
+    #: Last own channel command in the room — the write-blank window (3.2a).
+    last_own_command_at: datetime | None = None
+    #: When the sustained control error may be acted on — the deadband must
+    #: stay violated until this instant before a correction lands (rule 3.6).
+    #: A role/mode edge re-bases it to the shortened ``error_sustain_fast``.
+    error_sustain_until: datetime | None = None
+    # --- online gain-refinement pending step (rule 3.4) -------------------
+    #: ``L_filt`` captured when a feed-forward step was emitted.
+    pending_l_before: float | None = None
+    #: Predicted ΔL of that step at ``gain_mult == 1`` (calibrated gains only).
+    pending_base_delta: float | None = None
+    #: When the step is deemed settled and the observation may be taken.
+    pending_settle_at: datetime | None = None
+    #: Cleared the moment a second own command lands inside the settle window
+    #: (a non-quiet window never updates the gain, rule 3.4).
+    pending_valid: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RoomCalibration:
+    """Persisted photometric calibration for one room (ENGINE_SPEC §4.4).
+
+    Plain data bound to the room's channel set: ``gains`` is ``g_i`` (lux at
+    the sensor at full output) and ``curves`` is the per-channel relative-flux
+    piecewise ``(b, flux)`` points ``f_i``. The adapter stores :meth:`to_dict`;
+    :meth:`from_dict` validates on load and :meth:`matches` guards the
+    channel-set contract (rule 5 of the estimator brief).
+    """
+
+    room_id: str
+    gains: Mapping[str, float]
+    curves: Mapping[str, tuple[tuple[float, float], ...]]
+
+    def matches(self, channel_ids: tuple[str, ...]) -> bool:
+        """Whether this calibration is bound to exactly ``channel_ids``."""
+        ids = set(channel_ids)
+        return set(self.gains) == ids and set(self.curves) == ids
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "room_id": self.room_id,
+            "gains": dict(self.gains),
+            "curves": {cid: [list(p) for p in pts] for cid, pts in self.curves.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> RoomCalibration:
+        gains = {str(k): float(v) for k, v in dict(data["gains"]).items()}  # type: ignore[arg-type]
+        curves = {
+            str(cid): tuple((float(b), float(f)) for b, f in pts)  # type: ignore[misc]
+            for cid, pts in dict(data["curves"]).items()  # type: ignore[arg-type]
+        }
+        return cls(room_id=str(data["room_id"]), gains=gains, curves=curves)
+
+
+class CalPhase(StrEnum):
+    """Calibration sweep phase (rule 4.4)."""
+
+    SETTLE_OFF = "settle_off"  # all channels off, waiting for the room to settle
+    DWELL = "dwell"  # one channel at one level, collecting lux
+    DONE = "done"  # terminal (result emitted, session torn down)
+
+
+@dataclass(slots=True)
+class CalibrationSession:
+    """In-flight calibration sweep for one room (rule 4.4).
+
+    Transactional: ``prior_cal`` / ``prior_light`` snapshot the pre-sweep
+    world so any abort restores it exactly. ``measurements[cid][level]`` is the
+    settled lux recorded for a channel at a commanded level.
+    """
+
+    channel_order: tuple[str, ...]
+    phase: CalPhase = CalPhase.SETTLE_OFF
+    channel_index: int = 0
+    level_index: int = 0
+    deadline: datetime | None = None
+    samples: list[float] = field(default_factory=list)
+    measurements: dict[str, dict[float, float]] = field(default_factory=dict)
+    off_baseline: float | None = None
+    prior_cal: RoomCalibration | None = None
+    #: Whether the room was already calibrated before this sweep (rollback flag).
+    prior_calibrated: bool = False
+    #: cid -> (commanded_b, commanded_ct, on) captured at sweep start.
+    prior_light: dict[str, tuple[float, int | None, bool]] = field(default_factory=dict)
+    #: Set by a foreign change in the room — the next step aborts (rule 4.4).
+    foreign: bool = False
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,0 +1,182 @@
+"""A synthetic room ("plant") that drives the real Engine closed-loop.
+
+The plant owns the *ground truth* the engine cannot see: a natural-light
+trajectory ``N(t)`` and, per channel, a true lux gain and true flux curve at
+the sensor. At each tick it computes the true illuminance from the engine's
+currently commanded outputs, quantizes it like a real sensor, and feeds it
+back as a :class:`~.events.LuxReport` — so the engine regulates against a
+world with its own gains and curves, exactly as in the field.
+
+This is the harness behind the §3/§4.5 proofs: convergence, anti-hunting,
+write-blanking, the night prior, online-gain learning, stale fallback, and
+calibration recovery all run the production :class:`Engine` against it.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from itertools import pairwise
+
+from custom_components.light_conductor.core.engine import Engine
+from custom_components.light_conductor.core.events import LuxReport
+from custom_components.light_conductor.core.model import (
+    Band,
+    ChannelConfig,
+    EngineConfig,
+    InitialSnapshot,
+    Profile,
+    RoomConfig,
+    Vacancy,
+)
+from custom_components.light_conductor.core.plan import SetChannel
+
+CT_RANGE = (2200, 4000)
+
+
+def square_law(b: float) -> float:
+    return b * b
+
+
+@dataclass
+class Channel:
+    """Ground-truth photometry for one channel.
+
+    ``gain`` is the true lux at full output; ``model_gain`` is what the engine
+    is told (its calibrated gain). Equal ⇒ calibrated; ``model_gain=1`` (the
+    default config gain) with a large ``gain`` ⇒ an uncalibrated room.
+    """
+
+    channel_id: str
+    gain: float  # true lux at the sensor at full output
+    band: Band = Band.PRIMARY
+    curve: Callable[[float], float] = square_law
+    weight: float = 1.0
+    model_gain: float | None = None  # None ⇒ calibrated to the true gain
+
+    @property
+    def engine_gain(self) -> float:
+        return self.gain if self.model_gain is None else self.model_gain
+
+    def lux(self, b: float) -> float:
+        return self.gain * self.curve(max(0.0, min(1.0, b)))
+
+
+@dataclass
+class Plant:
+    """Drives one closed-loop room of an :class:`Engine`."""
+
+    engine: Engine
+    room_id: str
+    channels: list[Channel]
+    n_of_t: Callable[[datetime], float]
+    quant: float = 1.0  # sensor quantization (lux)
+    noise: Callable[[datetime], float] = lambda _now: 0.0
+    #: Recorded (time, {cid: commanded_b}) after every tick, for assertions.
+    history: list[tuple[datetime, dict[str, float]]] = field(default_factory=list)
+    commands: list[object] = field(default_factory=list)
+
+    def true_lux(self, now: datetime) -> float:
+        rs = self.engine.state.rooms[self.room_id]
+        art = sum(ch.lux(rs.channels[ch.channel_id].commanded_b) for ch in self.channels)
+        return max(0.0, self.n_of_t(now) + art)
+
+    def sample(self, now: datetime) -> float:
+        raw = self.true_lux(now) + self.noise(now)
+        return max(0.0, round(raw / self.quant) * self.quant)
+
+    def tick(self, now: datetime, lux: float | None = None) -> list[object]:
+        """Feed one lux sample (defaults to the quantized true lux) + recompute."""
+        value = self.sample(now) if lux is None else lux
+        cmds = self.engine.handle(LuxReport(self.room_id, value), now)
+        self.commands.extend(cmds)
+        rs = self.engine.state.rooms[self.room_id]
+        snap = {c.channel_id: rs.channels[c.channel_id].commanded_b for c in self.channels}
+        self.history.append((now, snap))
+        return cmds
+
+    def run(self, start: datetime, seconds: float, dt: float = 2.0) -> None:
+        """Tick every ``dt`` seconds for ``seconds`` of simulated time."""
+        t = start
+        end = start + timedelta(seconds=seconds)
+        while t <= end:
+            self.tick(t)
+            t = t + timedelta(seconds=dt)
+
+    # -- command analysis --------------------------------------------------
+
+    def sets_for(self, cmds: list[object], cid: str) -> list[SetChannel]:
+        return [c for c in cmds if isinstance(c, SetChannel) and c.channel_id == cid]
+
+    def reversals(self, cid: str) -> int:
+        """Command-direction reversals for a channel across the whole run (§3.6b).
+
+        Counts sign changes in successive *commanded* level deltas — the
+        anti-hunting metric.
+        """
+        levels = [snap[cid] for _t, snap in self.history]
+        directions: list[int] = []
+        for a, b in pairwise(levels):
+            if abs(b - a) > 1e-6:
+                directions.append(1 if b > a else -1)
+        return sum(1 for x, y in pairwise(directions) if x != y)
+
+
+def closed_config(
+    channels: list[Channel],
+    *,
+    lux_active_day: float = 120.0,
+    lux_active_evening: float = 60.0,
+    lux_background: float = 10.0,
+    lux_max: float = 1000.0,
+    evening_output_cap: float = 1.0,
+    out_active_day: dict[Band, float] | None = None,
+    room_id: str = "lab",
+) -> EngineConfig:
+    """A single presence-driven room with a lux sensor (closed-loop, §2.1).
+
+    ``out_active_day`` provides open-loop tables (§4.6) used as the seamless
+    stale-sensor fallback (§3.5); omitted ⇒ empty (falls back to off).
+    """
+    return EngineConfig(
+        rooms=(
+            RoomConfig(
+                room_id=room_id,
+                channels=tuple(
+                    ChannelConfig(
+                        c.channel_id,
+                        band=c.band,
+                        fixed_ct=None if c.band is Band.ACCENT else 2700,
+                        ct_range=CT_RANGE if c.band is Band.ACCENT else None,
+                        weight=c.weight,
+                        gain=c.engine_gain,
+                    )
+                    for c in channels
+                ),
+                profile=Profile(
+                    vacancy=Vacancy.DIM,
+                    lux_active_day=lux_active_day,
+                    lux_active_evening=lux_active_evening,
+                    lux_background=lux_background,
+                    lux_max=lux_max,
+                    evening_output_cap=evening_output_cap,
+                    out_active_day=out_active_day or {},
+                    out_active_evening=out_active_day or {},
+                ),
+                has_lux_sensor=True,
+            ),
+        )
+    )
+
+
+def booted_engine(config: EngineConfig, *, sun: float, room_id: str = "lab") -> Engine:
+    """An engine booted past the startup grace with the room occupied (ACTIVE)."""
+    from custom_components.light_conductor.core.events import PresenceChanged, SunElevationChanged
+
+    eng = Engine(config, InitialSnapshot(sun_elevation=sun, occupancy={room_id: True}))
+    # First event arms the startup grace; step past it before measuring.
+    base = datetime(2026, 7, 1, 12, 0, 0)
+    eng.handle(SunElevationChanged(sun), base)
+    eng.handle(PresenceChanged(room_id, True), base + timedelta(seconds=40))
+    return eng

@@ -172,11 +172,25 @@ class SetAwayLighting(Event):
 
 @dataclass(frozen=True, slots=True)
 class LuxReport(Event):
-    """A room lux-sensor reading (rule 3). Placeholder for the estimator PR.
+    """A room lux-sensor reading (rule 3).
 
-    Stored on the room but ignored while the room runs open-loop; the field
-    is the seam where closed-loop control reads measured illuminance.
+    Drives the closed-loop estimator (§3) for rooms with ``has_lux_sensor``,
+    and feeds the calibration collector while a sweep is running (§4.4). A
+    ``None`` lux means the sensor went unavailable (staleness, rule 3.5).
     """
 
     room_id: str
     lux: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class StartCalibration(Event):
+    """Request a photometric calibration sweep for a room (rule 4.4).
+
+    The adapter wires this to the ``button.<room>_record_light_response``
+    press (§10). Rejected unless sun elevation < ``night_prior_deg`` and the
+    room's lux is stable (rule 4.4); the engine emits a
+    :class:`~.plan.CalibrationResult` either way.
+    """
+
+    room_id: str
