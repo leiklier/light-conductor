@@ -30,6 +30,12 @@ soverom garderobeskap (z2m IKEA driver), Apollo/UniFi RGB LEDs.
   kjøkken 0/147/23 (night ~0), kontor 0/55/8 (night ~0), sofakrok 0/17/4.5
   (night 2.4 — TV/grow-light glow), spisebord 0/540/118 (night ~0.1).
   Spisebord's sensor sits close to its lamp: 68 lx at brightness 20/255.
+  **Sensor placement (user, 2026-07-25) is idiosyncratic per room:** sofakrok
+  sensor sits beneath a Sonos speaker directly under the light; spisebord's is
+  wedged between a curtain and the wall; kjøkken's is right next to
+  benkebelysning (its per-channel feedback gain presumably dwarfs taklys's).
+  Per-channel calibration (spec §4.4) is therefore mandatory, and sensor gains
+  must never drive aesthetic allocation (spec §3.1/§4.5).
 - Presence: presence-conductor v0.5.3+ per-room
   `binary_sensor.presence_conductor_<room>_room_occupancy` / `_room_motion` /
   `_room_settled`, `sensor.presence_conductor_<room>_room_activity`,
