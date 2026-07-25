@@ -147,7 +147,10 @@ per room, tuned per profile, and never comparable across rooms.
 measured lux after (a) a **write blanking window**: samples arriving within
 `write_blank` (default 5 s) after any own channel command in the room are
 excluded, and (b) an asymmetric low-pass (rise `tau_lux_up` 30 s, fall
-`tau_lux_down` 60 s) — clouds are minutes, not seconds.
+`tau_lux_down` 60 s) — clouds are minutes, not seconds. `Â` in this residual
+is passed through the *same* low-pass as `L` (both lag together), so the
+residual stays consistent through an own-command transient instead of spiking
+when `Â` jumps ahead of the still-settling measurement.
 
 3.3 **Night prior.** While sun elevation < `night_prior_deg` (default −6°),
 N̂ relaxes toward 0 with `tau_night_prior` (600 s). Street lighting etc. can
