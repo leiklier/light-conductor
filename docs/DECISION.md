@@ -1,0 +1,177 @@
+# Light Conductor — Decision Record
+
+Architecture Decision Record for the light-conductor HACS integration.
+Companion to ENGINE_SPEC.md (normative). Discovery data in DISCOVERY.md.
+
+## D1. Scope & shape
+
+One HACS integration (`light_conductor`, repo `leiklier/light-conductor`)
+replacing ~10 lighting automations + 3 scripts on the live instance. Mirrors
+the conductor family: pure core with no HA imports (CI-enforced), numbered
+ENGINE_SPEC, single-writer controller with echo ledger, uv +
+pytest-homeassistant-custom-component pinned to the production HA version,
+ruff/pytest/hassfest/HACS CI, beta→stable release channels, merges/releases
+only with explicit user approval.
+
+Config topology: **one config entry = the whole home** (like sonos-conductor),
+with rooms as options-flow sections. Rooms/channels/sensors are opaque ids —
+nothing hardcoded to this apartment.
+
+## D2. Regulate lux, not brightness
+
+Legacy automations map lux→brightness% linearly per room with hard trigger
+thresholds; the light's own contribution feeds back into the sensor, causing
+the reported "cutting in and out". Decision: where a room has a lux sensor,
+the control variable is **illuminance at the sensor**, with the room's own
+artificial contribution modeled and subtracted (ENGINE_SPEC §3). The natural
+light estimate drives a feed-forward correction with deadband + sustain —
+never an incremental chase.
+
+Why feed-forward instead of a PI loop: the actuator is lossy (Plejd writes can
+drop silently) and the sensor is slow/deduped (~1 Hz, ESPHome-filtered). A
+model-predicted setpoint lands in one write and tolerates dropped commands;
+an integrator would wind up against them.
+
+## D3. Photometric calibration per room
+
+7-day recorder statistics show the rooms are photometrically incomparable
+(spisebord daylight peaks 540 lx; sofakrok midday average is 7.6 lx; the
+spisebord sensor reads 68 lx from its own lamp at brightness 20/255 — gain
+~50× stronger than sofakrok's). One formula cannot serve them. Decision: a
+per-room night calibration sweep (button, like presence-conductor's
+RecordBaseline) measures each channel's lux gain and dimming curve at the
+sensor; the estimator refines a bounded scalar online. Uncalibrated rooms run
+with a square-law default curve so the integration is useful out of the box.
+
+This also replaces the hand-tuned `set_benkebelysning_brightness` mapping
+(`0.8x − 50`) and the kitchen `base > 62` step with measured curves + banded
+allocation (§4.5) — no more visible pops at band boundaries.
+
+## D4. Plejd: fork with targeted fixes; conductor assumes a lossy actuator
+
+Code review of hass_plejd 0.21.3 / pyplejd 0.21.3 (full findings in
+DISCOVERY.md §Plejd) found: no transition support at all (`transition:` args
+in the legacy automations were silently stripped by HA), writes silently
+dropped while disconnected, staleness-blind `connected` property, state
+updated from command echo with true reconciliation only every 3 min,
+all-or-nothing availability, and an unconditional double-connect + 5 s sleep
+on every reconnect. But the protocol assets (mesh crypto, auth, opcodes,
+firmware quirks) are sound and upstream is alive.
+
+Decision: **do not rewrite; do not block on the fork.**
+1. v1 of light-conductor treats Plejd as a lossy fire-and-forget actuator:
+   coalesced latest-wins writes, ≥1 s/channel spacing, ≤3 in flight,
+   software ramps, skip-when-unavailable, quiet re-reconcile on recovery
+   (ENGINE_SPEC §8). The closed loop self-corrects dropped writes.
+2. A parallel workstream forks `pyplejd`/`hass_plejd` with small
+   upstreamable patches: `is_connected` liveness, surfaced write failures +
+   retry, BLEDevice refresh + RSSI decay, opt-in double-connect, native
+   software transitions, and group-address writes (room-atomic updates —
+   the addressing data is already parsed upstream). Patches PR'd upstream;
+   fork installed via HACS custom repo meanwhile.
+
+The user's `set_plejd_brightness` script logic was verified correct except:
+its `transition` field is a no-op (integration lacks the feature), and a
+kelvin-only call (no `brightness_pct`) would turn the light off. Its
+CT-before-brightness ordering is real and is adopted as spec rule 5.4.
+
+## D5. Presence: presence-conductor first, template sensors as fallback
+
+Primary per-room inputs are `binary_sensor.presence_conductor_<room>_room_occupancy`
++ `sensor.presence_conductor_<room>_room_activity`; global
+`binary_sensor.presence_conductor_anyone_home`. The legacy template sensors
+(`binary_sensor.<room>_occupancy` over raw radar zones) become fallback
+occupancy entities, used when the primary is blind (blind ≠ absent).
+Activity scales vacancy holds (passing 0.3×, settled 4×) — a pass-by no
+longer commits a room to full lighting hold. Gang/soverom/bad have no
+sensing; gang runs as a corridor (adjacency + evening + night path), soverom
+stays door-triggered (`binary_sensor.soverom_dor`). The kontor WMS-01 PIR
+(`binary_sensor.kontor_pir_sensor`) joins kontor's fallback list.
+
+## D6. Follow-me smoothing via roles, not per-neighbour ladders
+
+Legacy encoded neighbour-specific brightness ladders (sofakrok active → 50 %,
+kjøkken → cap 12, kontor → cap 6…). Decision: collapse to
+ACTIVE/ADJACENT/BACKGROUND tiers with per-room profiles: living-group rooms
+(`vacancy: dim`) never drop below BACKGROUND while the living area is in use
+(15-min memory), kontor (`vacancy: off`) goes dark after its hold. Tier
+changes ramp in flux-relative steps sized by whether the room is occupied —
+"subtle adjustments in the living room, full off in kontor" becomes
+configuration, not code.
+
+## D7. Circadian shaping is continuous
+
+Legacy: `hour ≥ 18` ⇒ cap 30 %. Decision: a continuous circadian factor
+E = max(sun-elevation ramp, clock ramp 20:00→22:30, reversed 06:00→07:30)
+interpolating lux targets, output caps, and CT (3300 K→2400 K, dim-to-warm
+floor 2200 K). At most one circadian-driven adjustment per 5 min, so the
+evening descent is a slow drift, never a visible step. Kelvin blending keeps
+tunable-white channels within 300 K of fixed-2700 K channels whenever both
+are lit (D-spec §5.2) — mixed rooms must read as one scene.
+
+## D8. Master gain as a HomeKit dimmer, neutral at 50 %
+
+`light.light_conductor_master`: exponential gain, 50 % = ×1, 100 % = ×2,
+0⁺ = ×0.5; off = all managed indoor lighting off (restorable). Gain drifts
+back to neutral each morning (a "dimmer tonight" nudge should not permanently
+darken the house). Mirrors the Sonos master-volume mental model. **Open
+question for review (Q1):** is boost-above-automation wanted, or should
+100 % = neutral (dim-only master)? Neutral-at-50 chosen provisionally
+because the user asked for "relative to what the automations would do",
+which implies both directions.
+
+## D9. Balkong is an outdoor room, not presence-driven
+
+DWN-02 tunable group. Dusk-on at background warm CT, off at sleep-on; away ⇒
+off (tunable, default off, per requirement "when nobody is home all lights
+stay off"). An `occupational` switch raises to sitting-outside level/CT.
+No lux sensor outside — open-loop tables with the circadian factor.
+
+## D10. Night path built in
+
+The `input_boolean.night_movement` + two automations move into the engine:
+sleep on + (soverom door edge | living-room presence/pass-by) ⇒ NIGHT_PATH
+for the configured set at fixed dim warm outputs (defaults copied from
+`script.night_path_lighting_on`: sofakrok 4 %, gang 5 %, spisebord 1 %,
+downlights 20 % @ 2200 K), hold 10 min restartable. The input_boolean is
+retired after migration (grow-conductor already has its own trigger input).
+
+## D11. Manual control is respected via an override latch
+
+Any non-echo change (wall rotary, HomeKit, voice) latches the room:
+conductor adopts the observed state and stops adjusting until vacancy at
+OFF-tier, sleep, away, or 4 h. Wall-controller `event.*` entities count as
+manual even when the resulting level matches ours. This generalizes the
+legacy "only turn on if currently off" guards, and fixes their gap: legacy
+respected manual-on but fought manual dimming.
+
+## D12. Recorder discipline from day one
+
+Lessons from presence-conductor v0.5.2/0.5.3 applied as requirements:
+volatile values never in recorded attributes; measurement sensors publish
+through a quantize+rate-limit gate (5-lx buckets, ≥10 s); a recorder-
+discipline sweep test (zero state writes under churn) ships with the first
+entity PR; diagnostics platform carries the full engine state on demand.
+
+## D13. Not in scope (v1)
+
+- Soverom garderobeskap (zigbee, IKEA sensor-driven; its automation stays).
+- Apollo/UniFi RGB indicator lights.
+- Presence simulation on vacation; rotary-delta master control;
+  Plejd device-settings writes (dim speed) — roadmap.
+- Scene support (`scene.tv_kveld` is half-broken today; TV mode subsumes it).
+
+## Open questions for user review
+
+- **Q1 (D8):** master dimmer neutral point — 50 % (can boost above
+  automation) or 100 % (dim-only)?
+- **Q2 (D9):** balkong while away — really fully off, or keep dusk
+  background as presence simulation?
+- **Q3 (D10):** night-path set and levels copied from the legacy script —
+  keep kjøkken downlights at 20 % (brightest path element) or unify lower?
+- **Q4 (D6):** should kjøkken benkebelysning stay evening-locked-out
+  (legacy behavior via boost band), or be allowed dimly in the evening now
+  that curves are calibrated?
+- **Q5 (D4):** appetite for deploying a Plejd fork via HACS (custom repo
+  shadowing the upstream integration), or upstream-PRs-only and live with
+  0.21.3 quirks meanwhile?
