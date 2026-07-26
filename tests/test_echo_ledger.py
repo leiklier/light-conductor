@@ -57,3 +57,15 @@ def test_corridor_late_tail_near_target_echo_far_foreign(monkeypatch) -> None:
     clock[0] = 1008.0  # past the corridor, within the final-value echo TTL
     assert led.consume("x", 0.6, None) is True  # late completion near target → echo
     assert led.consume("x", 0.1, None) is False  # far from target → foreign
+
+
+def test_long_fade_final_echo_outlives_corridor(monkeypatch) -> None:
+    """A sleep_fade/night_fade-length ramp (4-10 s) must not expire its
+    final-value echo before the corridor deadline: a completion report just
+    past the deadline is an echo, not a spurious override."""
+    clock = [1000.0]
+    monkeypatch.setattr(ctrl, "_monotonic", lambda: clock[0])
+    led = ctrl.EchoLedger(ttl=3.0)  # the PRODUCTION TTL, not the test default
+    led.record_envelope("x", 0.5, 0.0, 8.0)  # deadline = 1000 + 8 + 4 = 1012
+    clock[0] = 1012.5  # corridor expired; plain 3 s TTL would have died at 1003
+    assert led.consume("x", 0.0, None) is True

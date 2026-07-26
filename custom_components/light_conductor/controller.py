@@ -216,8 +216,10 @@ class EchoLedger:
         self._entries: dict[str, deque[_Echo]] = {}
         self._envelopes: dict[str, _Envelope] = {}
 
-    def record(self, entity_id: str, level: float | None, ct: int | None) -> None:
-        deadline = _monotonic() + self._ttl
+    def record(
+        self, entity_id: str, level: float | None, ct: int | None, ttl: float | None = None
+    ) -> None:
+        deadline = _monotonic() + (self._ttl if ttl is None else ttl)
         q = self._entries.setdefault(entity_id, deque())
         if level is not None:
             q.append(_Echo(level=level, ct=None, deadline=deadline))
@@ -233,7 +235,11 @@ class EchoLedger:
         self._envelopes[entity_id] = _Envelope(
             frm=from_level, to=to_level, start=start, ramp=ramp, deadline=start + ramp + margin
         )
-        self.record(entity_id, to_level, None)
+        # The final-value echo must OUTLIVE the corridor: with the plain TTL a
+        # 4-10 s fade (sleep_fade, night_fade) expires it before the deadline,
+        # and a completion report just past the deadline would latch a
+        # spurious override.
+        self.record(entity_id, to_level, None, ttl=ramp + margin + self._ttl)
 
     def consume(self, entity_id: str, level: float | None, ct: int | None) -> bool:
         """True if this observation matches (and consumes) a recorded command."""
