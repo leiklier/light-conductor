@@ -258,6 +258,7 @@ EDITABLE_TUNABLES: tuple[str, ...] = (
     "circadian_tick",
     "evening_cap_threshold",
     "lux_stale",
+    "calibration_dwell",
     "night_hold",
     "night_fade",
     "sleep_fade",
