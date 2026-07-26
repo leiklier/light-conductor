@@ -13,6 +13,7 @@ from pytest_homeassistant_custom_component.common import (
     async_mock_service,
 )
 
+from custom_components.light_conductor import controller as lc_controller
 from custom_components.light_conductor.const import CONF_TUNABLES, DOMAIN
 
 from .adapter import entity_id_for, options, room, set_light, setup_entry
@@ -46,52 +47,59 @@ async def test_transition_vs_stepping(hass: HomeAssistant) -> None:
     assert calls["light.b"]["brightness"] < 255  # ramp in progress
 
 
-async def test_echo_then_foreign_override(hass: HomeAssistant) -> None:
+async def _partial_fade_setup(hass, monkeypatch):
+    """Set up a room whose ACTIVE output is pinned to 0.5 (circadian-independent).
+
+    A fake monotonic clock lets the corridor front advance deterministically.
+    Returns (controller, overridden_entity_id, clock, envelope).
+    """
+    clock = [1000.0]
+    monkeypatch.setattr(lc_controller, "_monotonic", lambda: clock[0])
     set_light(hass, "light.a", transition=True)
     hass.states.async_set("binary_sensor.pa", "off")
-    entry = await setup_entry(hass, options([room("a", ["light.a"], presence="binary_sensor.pa")]))
+    entry = await setup_entry(
+        hass, options([room("a", ["light.a"], presence="binary_sensor.pa", max_output=0.5)])
+    )
     async_mock_service(hass, "light", "turn_on")
     controller = hass.data[DOMAIN][entry.entry_id]
-    overridden = entity_id_for(hass, entry, "a_overridden")
 
     hass.states.async_set("binary_sensor.pa", "on")
     await hass.async_block_till_done()
-    cs = controller.engine.room_state("a").channels["light.a"]
-    commanded = round(cs.commanded_b * 255)
+    env = controller._echo._envelopes["light.a"]
+    assert env.to <= 0.6  # bounded well below full (F1 blocker-A: no 255-in-band flake)
+    return controller, entity_id_for(hass, entry, "a_overridden"), clock, env
 
-    # Device echoes our own command back → consumed, no override.
-    set_light(hass, "light.a", "on", brightness=commanded, transition=True)
+
+async def test_echo_then_foreign_override(hass: HomeAssistant, monkeypatch) -> None:
+    controller, overridden, clock, env = await _partial_fade_setup(hass, monkeypatch)
+
+    # Our own command completes near target → consumed, no override.
+    clock[0] = env.start + env.ramp
+    set_light(hass, "light.a", "on", brightness=round(env.to * 255), transition=True)
     await hass.async_block_till_done()
     assert hass.states.get(overridden).state == "off"
 
-    # A foreign change OUTSIDE the fade envelope (yanked to full) → override.
+    # A foreign change well outside the corridor (yanked to full) → override.
     set_light(hass, "light.a", "on", brightness=255, transition=True)
     await hass.async_block_till_done()
     assert hass.states.get(overridden).state == "on"
     assert controller.engine.room_state("a").overridden is True
 
 
-async def test_transition_fade_reports_no_override(hass: HomeAssistant) -> None:
-    """Intermediate mesh reports during a native fade must NOT latch (F1)."""
-    set_light(hass, "light.a", transition=True)
-    hass.states.async_set("binary_sensor.pa", "off")
-    entry = await setup_entry(hass, options([room("a", ["light.a"], presence="binary_sensor.pa")]))
-    async_mock_service(hass, "light", "turn_on")
-    controller = hass.data[DOMAIN][entry.entry_id]
-    overridden = entity_id_for(hass, entry, "a_overridden")
+async def test_transition_fade_reports_no_override(hass: HomeAssistant, monkeypatch) -> None:
+    """Reports tracking the fade front must NOT latch; an off-front yank does (F1)."""
+    _controller, overridden, clock, env = await _partial_fade_setup(hass, monkeypatch)
 
-    hass.states.async_set("binary_sensor.pa", "on")
-    await hass.async_block_till_done()
-    target = round(controller.engine.room_state("a").channels["light.a"].commanded_b * 255)
-
-    # A rising fade trajectory that ends at the commanded target — all inside
-    # the [0, target] envelope, so none may latch.
-    for frac in (0.2, 0.5, 0.8, 1.0):
-        set_light(hass, "light.a", "on", brightness=max(1, round(target * frac)), transition=True)
+    # Reports that track the moving front over the whole fade — all echoes.
+    for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+        clock[0] = env.start + frac * env.ramp
+        front = env.front(clock[0])
+        set_light(hass, "light.a", "on", brightness=max(1, round(front * 255)), transition=True)
         await hass.async_block_till_done()
     assert hass.states.get(overridden).state == "off"
 
-    # A wall dial yanks to full mid-fade — outside the envelope ⇒ override.
+    # A wall dial yanks to full at the end of the fade — off the front ⇒ override.
+    clock[0] = env.start + env.ramp
     set_light(hass, "light.a", "on", brightness=255, transition=True)
     await hass.async_block_till_done()
     assert hass.states.get(overridden).state == "on"
@@ -189,3 +197,27 @@ async def test_unload_is_clean(hass: HomeAssistant) -> None:
     assert controller._unsubs == []
     assert controller._review_cancel is None
     assert controller._task is None
+
+
+async def test_unload_mid_burst_is_clean(hass: HomeAssistant) -> None:
+    """Unloading with a pending + rate-limited write must not fire post-unload (F1.2)."""
+    set_light(hass, "light.a", transition=True)
+    entry = await setup_entry(hass, options([room("a", ["light.a"])]))
+    turn_on = async_mock_service(hass, "light", "turn_on")
+    writer = hass.data[DOMAIN][entry.entry_id]._writer("light.a")
+
+    writer.set_channel(0.5, None, 0.0)  # first flushes immediately
+    await hass.async_block_till_done()
+    writer.set_channel(0.6, None, 0.0)  # spacing-limited → rate timer armed
+    writer.set_channel(0.7, None, 0.0)  # pending
+    assert writer._rate_cancel is not None
+    before = len(turn_on)
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    # No armed timers, and advancing time fires no stray write after unload.
+    assert writer._rate_cancel is None
+    assert writer._step_cancel is None
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=2))
+    await hass.async_block_till_done()
+    assert len(turn_on) == before

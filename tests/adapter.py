@@ -65,11 +65,18 @@ def room(
     fallback: list[str] | None = None,
     vacancy: str = "dim",
     channels: list[dict] | None = None,
+    max_output: float | None = None,
 ) -> dict[str, Any]:
     chans = channels or [
         {"entity": e, "band": "primary", "weight": 1.0, "fixed_ct": 2700, "dim_floor": 0.02}
         for e in lights
     ]
+    # ``max_output`` pins day == evening == cap so the ACTIVE output is the same
+    # at any time of day — tests that assert on the commanded level stay
+    # circadian-independent (no wall-clock flakiness).
+    active_day = 1.0 if max_output is None else max_output
+    active_evening = 0.3 if max_output is None else max_output
+    cap = 0.3 if max_output is None else max_output
     r: dict[str, Any] = {
         CONF_ROOM_ID: room_id,
         CONF_NAME: room_id.title(),
@@ -77,10 +84,10 @@ def room(
         CONF_CHANNELS: chans,
         CONF_PROFILE: {
             "vacancy": vacancy,
-            "active_day_output": 1.0,
-            "active_evening_output": 0.3,
+            "active_day_output": active_day,
+            "active_evening_output": active_evening,
             "background_output": 0.08,
-            "evening_output_cap": 0.3,
+            "evening_output_cap": cap,
             "night_output": 0.05,
             "tv_output": 0.15,
             "tv_output_empty": 0.0,
