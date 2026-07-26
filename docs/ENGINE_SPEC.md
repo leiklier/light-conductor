@@ -164,7 +164,21 @@ calibrated gains. Per-channel calibration only changes via §4.4 recalibration.
 
 3.5 **Sensor trust.** Lux sensor unavailable/stale (> `lux_stale` 120 s) ⇒
 room falls back to open-loop tables (§4.6) at the same role tier; recovery is
-seamless because both paths share the §8 funnel.
+seamless because both paths share the §8 funnel. **Closed-loop control also
+requires a trustworthy gain model**: a room enters closed-loop only when it is
+`calibrated` (§4.4) *or* has completed the first-night bootstrap; otherwise it
+runs open-loop (safe by construction — an unknown gain cannot drive it dark or
+into hunting). **First-night bootstrap:** while an uncalibrated lux-sensor room
+runs open-loop, the estimator observes each own commanded step in *shadow* —
+armed on the **observed** `ΔL ≥ deadband_abs` (not the model-predicted delta,
+which is structurally tiny when the gain is under-modelled) — and records the
+room-level ratio `ΔL / Δflux`. After `bootstrap_min_obs` (default 3) such
+observations it commits a room-scalar gain `= median(ratios) × bootstrap_margin`
+(default 1.5) over the default `b²` curves and flips to closed-loop. The margin
+deliberately **over**-models the gain: an over-modelled gain gives loop gain
+< 1 (a stable undershoot that converges), whereas under-modelling gives loop
+gain > 1 (the hunting regime) — so "conservative" means erring high. The
+bootstrap gain is per-run (not persisted); a restart re-learns it.
 
 3.6 **Anti-hunting invariant.** The closed loop may not oscillate: control
 error uses a **deadband** — no action while `|T' − (N̂ + Â)| <
@@ -197,8 +211,9 @@ lux is stable. Sweeps each channel alone: off → each of
 (4 s) per level, recording lux. Produces `g_i` and `f_i` points per channel;
 commits transactionally (all-or-nothing, like presence-conductor 3.3), fires
 a result event, and marks the room `calibrated`. Uncalibrated rooms run
-closed-loop with the default curve and a conservative gain estimated from the
-first night the lights run (bounded influence via 3.4).
+open-loop until the first-night bootstrap (§3.5) has learned a conservative
+room-scalar gain over the default curve, then enter closed-loop with bounded
+influence; a full sweep later replaces that estimate with per-channel `g_i`/`f_i`.
 
 4.5 **Allocation bands.** A room's channels are ordered into bands:
 `accent` (fills first, e.g. kjøkken downlights), `primary` (main body, e.g.
@@ -407,6 +422,7 @@ override latches (not restored — cleared on restart).
 | tau_lux_up / tau_lux_down | 30 s / 60 s | 3.2 |
 | night_prior_deg / tau_night_prior | −6° / 600 s | 3.3 |
 | gain_learn_rate | 0.1 | 3.4 |
+| bootstrap_min_obs / bootstrap_margin | 3 / 1.5 | 3.5, 4.4 |
 | lux_stale | 120 s | 3.5 |
 | deadband_abs / deadband_rel | 5 lx / 0.15 | 3.6 |
 | error_sustain / error_sustain_fast | 20 s / 2 s | 3.6 |
