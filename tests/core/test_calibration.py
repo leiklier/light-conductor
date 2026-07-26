@@ -76,6 +76,32 @@ def _drive_sweep(
 # --- (g) gain recovery + transactional commit ---------------------------
 
 
+def test_sweep_commit_resets_bootstrap_gain(  # N1 regression
+) -> None:
+    """N1: a committed sweep supersedes the bootstrap scalar. gain_mult is an
+    ABSOLUTE gain over default curves while bootstrapping (~true gain x margin);
+    left in place over freshly measured gains it acts as a huge multiplier and
+    parks the room stably dim."""
+    chans = [Channel("pri", gain=180.0, band=Band.PRIMARY)]
+    eng = _cal_engine(chans)
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 0.0)
+
+    est = eng.state.rooms["lab"].est
+    est.gain_mult = 270.0  # as left behind by a completed first-night bootstrap
+    est.bootstrap_confident = True
+    est.bootstrap_ratios.extend([179.0, 180.0, 181.0])
+
+    start = BASE + timedelta(seconds=70)
+    eng.handle(StartCalibration("lab"), start)
+    results = _drive_sweep(eng, plant, start + timedelta(seconds=1))
+    assert len(results) == 1 and results[0].ok
+
+    assert est.gain_mult == 1.0
+    assert not est.bootstrap_confident
+    assert not est.bootstrap_ratios
+    assert eng._photo["lab"].calibrated
+
+
 def test_sweep_recovers_gains_within_tolerance() -> None:
     """§4.4: the sweep recovers each channel's true gain and commits."""
     chans = [

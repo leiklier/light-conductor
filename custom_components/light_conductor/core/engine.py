@@ -293,6 +293,13 @@ class Engine:
                         room.room_id, outcome.calibration.gains, outcome.calibration.curves
                     )
                 )
+                # Measured gains supersede any bootstrap/refined multiplier.
+                # The bootstrap gain_mult is an ABSOLUTE room scalar over the
+                # default gains; carrying it into the bounded-multiplier role
+                # over freshly measured gains leaves the room stably dim (N1).
+                rs.est.gain_mult = 1.0
+                rs.est.bootstrap_confident = False
+                rs.est.bootstrap_ratios.clear()
             elif prior_cal is not None:  # abort: roll photometry back exactly
                 photo.apply_calibration(prior_cal)
                 photo.calibrated = prior_calibrated
