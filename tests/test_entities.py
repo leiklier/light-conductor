@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 from homeassistant.core import HomeAssistant, State
+from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import mock_restore_cache
 
-from custom_components.light_conductor.const import CONF_CALIBRATIONS, DOMAIN
+from custom_components.light_conductor.const import (
+    CONF_CALIBRATIONS,
+    CONF_SLEEP_ENTITY,
+    DOMAIN,
+)
 from custom_components.light_conductor.core.model import RoomCalibration
+from custom_components.light_conductor.core.plan import CalibrationResult
 from custom_components.light_conductor.event import EVENT_REJECTED
 
 from .adapter import entity_id_for, options, room, set_light, setup_entry
@@ -91,3 +97,32 @@ async def test_invalid_stored_calibration_discarded(hass: HomeAssistant) -> None
     controller = hass.data[DOMAIN][entry.entry_id]
     # Mismatch → room stays uncalibrated (default photometry).
     assert controller.engine._photo["k"].calibrated is False
+
+
+async def test_options_finish_preserves_runtime_calibration(hass: HomeAssistant) -> None:
+    """A calibration committed while the options flow is open survives finish (F5)."""
+    hass.states.async_set("sensor.klux", "40")
+    entry = await setup_entry(hass, options([room("k", ["light.k"], lux="sensor.klux")]))
+    controller = hass.data[DOMAIN][entry.entry_id]
+
+    # Open + edit the options flow (edits a non-runtime key).
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "globals"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_SLEEP_ENTITY: "binary_sensor.sleep"}
+    )
+
+    # Meanwhile the controller commits a calibration (runtime options write).
+    controller._exec_calibration(CalibrationResult("k", True, "ok", (("light.k", 1.0),)))
+    await hass.async_block_till_done()
+    assert "k" in entry.options[CONF_CALIBRATIONS]
+
+    # Finishing must not clobber the committed calibration with the stale snapshot.
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "finish"}
+    )
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert "k" in entry.options[CONF_CALIBRATIONS]
+    assert entry.options[CONF_SLEEP_ENTITY] == "binary_sensor.sleep"

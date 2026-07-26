@@ -77,6 +77,7 @@ from .const import (
     DEFAULT_TV_OUTPUT_EMPTY,
     DOMAIN,
     EDITABLE_TUNABLES,
+    RUNTIME_OPTION_KEYS,
     SHAPES,
     VACANCIES,
 )
@@ -559,4 +560,14 @@ class LightConductorOptionsFlow(OptionsFlow):
     # -- finish -------------------------------------------------------------
 
     async def async_step_finish(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        return self.async_create_entry(title="", data=self._options)
+        # Re-read runtime-owned keys (e.g. a calibration committed by the
+        # controller while this flow was open) and merge them over the edited
+        # snapshot so finishing never clobbers them (F5).
+        merged = dict(self._options)
+        current = self.config_entry.options
+        for key in RUNTIME_OPTION_KEYS:
+            if key in current:
+                merged[key] = current[key]
+            else:
+                merged.pop(key, None)
+        return self.async_create_entry(title="", data=merged)

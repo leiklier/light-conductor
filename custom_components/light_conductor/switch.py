@@ -43,8 +43,6 @@ async def async_setup_entry(
 class _RestoreSwitch(LightConductorEntity, SwitchEntity, RestoreEntity):
     """A restorable switch that re-submits its restored state on startup."""
 
-    _default_on = True
-
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
@@ -105,7 +103,6 @@ class OccupationalSwitch(_RestoreSwitch):
     """An outdoor room's 'sitting outside' switch (§6.5), default off."""
 
     _attr_translation_key = "occupational"
-    _default_on = False
 
     def __init__(self, controller: Controller, room_id: str, room_name: str) -> None:
         super().__init__(controller, f"{room_id}_occupational")
