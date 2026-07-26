@@ -1,0 +1,139 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Light Conductor",
+        "description": "Gi denne Light Conductor-huben et navn. Rom foreslås fra Home Assistant-områdene dine (lysene deres, lyssensor og presence-conductor-tilstedeværelse). Finjuster alt etterpå under Innstillinger.",
+        "data": {
+          "name": "Navn"
+        },
+        "data_description": {
+          "name": "Visningsnavn for denne Light Conductor-huben."
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Light Conductor er én hub for hele hjemmet; kun én oppføring er tillatt."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Light Conductor",
+        "description": "Konfigurer hele hjemmet.",
+        "menu_options": {
+          "globals": "Globale signaler",
+          "rooms": "Rom",
+          "tunables": "Innstillinger (avansert)",
+          "finish": "Lagre og avslutt"
+        }
+      },
+      "globals": {
+        "title": "Globale signaler",
+        "description": "Signaler for hele huset som deles av alle rom.",
+        "data": {
+          "sleep_entity": "Sovemodus",
+          "anyone_home_entity": "Noen hjemme",
+          "vacation_entity": "Feriemodus",
+          "presence_fallback_entities": "Reserve for tilstedeværelse hjemme",
+          "tv_entities": "TV-medieavspillere",
+          "night_trigger_entities": "Nattsti-utløsere",
+          "night_path_rooms": "Nattsti-rom"
+        }
+      },
+      "rooms": {
+        "title": "Rom",
+        "menu_options": {
+          "add_room": "Legg til rom",
+          "edit_room": "Rediger rom",
+          "remove_room": "Fjern rom",
+          "init": "Tilbake"
+        }
+      },
+      "add_room": {
+        "title": "Legg til rom",
+        "data": {
+          "room_id": "Rom-id",
+          "name": "Navn",
+          "shape": "Type",
+          "channels": "Lys"
+        }
+      },
+      "edit_room": {
+        "title": "Rediger rom",
+        "data": {
+          "room_id": "Rom"
+        }
+      },
+      "remove_room": {
+        "title": "Fjern rom",
+        "data": {
+          "room_id": "Rom"
+        }
+      },
+      "room_detail": {
+        "title": "Rom: {room}",
+        "data": {
+          "name": "Navn",
+          "shape": "Type",
+          "channels": "Lys",
+          "lux_sensor": "Lyssensor",
+          "presence_primary": "Primær tilstedeværelse",
+          "activity_sensor": "Aktivitetssensor",
+          "occupancy_fallback": "Reserve for tilstedeværelse",
+          "neighbours": "Naborom",
+          "wall_event_entities": "Veggbrytere",
+          "trigger_entities": "Utløsere (dør / passering)",
+          "living_group": "Oppholdsgruppe",
+          "tv_mode": "Deltar i TV-modus",
+          "vacancy": "Oppførsel ved tomt rom",
+          "active_day_output": "Aktiv utgang (dag)",
+          "active_evening_output": "Aktiv utgang (kveld)",
+          "background_output": "Bakgrunnsutgang",
+          "evening_output_cap": "Utgangstak om kvelden",
+          "night_output": "Nattsti-utgang",
+          "tv_output": "TV-utgang (opptatt)",
+          "tv_output_empty": "TV-utgang (tomt)"
+        }
+      },
+      "tunables": {
+        "title": "Innstillinger",
+        "description": "Motorkonstanter (spesifikasjon §12). La stå på standard med mindre du vet hvorfor."
+      }
+    }
+  },
+  "entity": {
+    "light": {
+      "master": { "name": "Hovedlys" }
+    },
+    "switch": {
+      "enabled": { "name": "Aktivert" },
+      "away_lighting": { "name": "Bortelys" },
+      "occupational": { "name": "Sitte ute" }
+    },
+    "sensor": {
+      "role": {
+        "name": "Rolle",
+        "state": {
+          "active": "Aktiv",
+          "adjacent": "Nabo",
+          "background": "Bakgrunn",
+          "off": "Av",
+          "night_path": "Nattsti",
+          "tv": "TV"
+        }
+      },
+      "natural_lux": { "name": "Naturlig lys" },
+      "target_lux": { "name": "Mållys" }
+    },
+    "binary_sensor": {
+      "overridden": { "name": "Overstyrt" }
+    },
+    "button": {
+      "record_light_response": { "name": "Registrer lysrespons" }
+    },
+    "event": {
+      "calibration": { "name": "Kalibrering" }
+    }
+  }
+}

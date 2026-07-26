@@ -1,0 +1,26 @@
+{
+  "entity": {
+    "light": {
+      "master": { "default": "mdi:tune-vertical" }
+    },
+    "switch": {
+      "enabled": { "default": "mdi:motion-sensor" },
+      "away_lighting": { "default": "mdi:home-export-outline" },
+      "occupational": { "default": "mdi:sofa-outline" }
+    },
+    "sensor": {
+      "role": { "default": "mdi:lightbulb-group-outline" },
+      "natural_lux": { "default": "mdi:weather-sunny" },
+      "target_lux": { "default": "mdi:target" }
+    },
+    "binary_sensor": {
+      "overridden": { "default": "mdi:gesture-tap-button" }
+    },
+    "button": {
+      "record_light_response": { "default": "mdi:ray-start-vertex-end" }
+    },
+    "event": {
+      "calibration": { "default": "mdi:tune" }
+    }
+  }
+}

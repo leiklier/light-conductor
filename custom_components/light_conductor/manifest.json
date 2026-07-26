@@ -14,5 +14,6 @@
     "custom_components.light_conductor"
   ],
   "requirements": [],
+  "single_config_entry": true,
   "version": "0.0.0"
 }
