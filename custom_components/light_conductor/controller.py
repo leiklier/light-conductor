@@ -483,6 +483,8 @@ class Controller:
         self._unsubs: list[CALLBACK_TYPE] = []
         self._review_cancel: CALLBACK_TYPE | None = None
         self._echo = EchoLedger(self.tun.echo_window)
+        #: Standing setpoint per channel — poll re-confirmations are not foreign.
+        self._last_commanded: dict[str, float] = {}
         self._sem = asyncio.Semaphore(self.tun.max_inflight)
         self._writers: dict[str, ChannelWriter] = {}
         self._write_tasks: set[asyncio.Task] = set()
@@ -771,6 +773,14 @@ class Controller:
             self._echo.record_envelope(entity_id, *envelope)
         else:
             self._echo.record(entity_id, level, ct)
+        # Persist the standing setpoint: integrations that poll true device
+        # state (Plejd: every ~3 min, as a float) re-report our own value long
+        # after the echo TTL — such re-confirmations must never read as
+        # foreign changes (they would latch a false override within minutes
+        # of every command).
+        target = envelope[1] if envelope is not None else level
+        if target is not None:
+            self._last_commanded[entity_id] = target
         service = SERVICE_TURN_OFF if turn_off else SERVICE_TURN_ON
         async with self._sem:  # §8.3 max_inflight concurrency cap
             await self.hass.services.async_call(
@@ -851,6 +861,11 @@ class Controller:
             return  # went unavailable — handled on recovery
         if self._echo.consume(entity_id, level, ct):
             return  # our own command echo (incl. an intermediate fade sample)
+        # Re-confirmation of the standing setpoint (e.g. Plejd's 3-min true-
+        # state poll re-reporting our value as a float): not a foreign change.
+        last = self._last_commanded.get(entity_id)
+        if last is not None and abs(level - last) <= ECHO_LEVEL_TOL:
+            return
         # level is 0.0 (off) or > 0 here — pass it through verbatim; the engine
         # reads 0/None alike as "off" but 0.0 must not become a spurious None.
         self.submit(ForeignChange(channel_id=entity_id, level=level, ct=ct))
