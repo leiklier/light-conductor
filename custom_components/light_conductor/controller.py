@@ -108,6 +108,9 @@ ECHO_CT_TOL = 60
 #: Software stepping ramp cadence (~1 step/s, rule §8.2 adapter fallback).
 STEP_INTERVAL = 1.0
 
+#: Grace added to a native-transition fade envelope before it expires (§8.4, F1).
+ENVELOPE_MARGIN = 2.0
+
 
 def _monotonic() -> float:
     """Patchable monotonic clock (echo TTL / rate limiting)."""
@@ -166,17 +169,33 @@ class _Echo:
     deadline: float
 
 
+@dataclass(slots=True)
+class _Envelope:
+    """A live fade window for a native-transition command (§8.4, F1)."""
+
+    lo: float
+    hi: float
+    deadline: float
+
+
 class EchoLedger:
     """Per-entity record of own commands; classifies incoming reports (§8.4).
 
-    A write records a level echo and/or a CT echo. An incoming state change is
-    an *echo* if it matches a live entry (consume-one), else a *foreign change*
-    (§9.1). Wall-event entities bypass this and always latch (§9.4).
+    A one-shot write records a level echo and/or a CT echo (consume-one). A
+    *native-transition* write additionally opens a fade **envelope**: while the
+    envelope is live, any report whose level falls inside ``[lo-tol, hi+tol]``
+    is an echo (the Plejd mesh reports intermediate levels ~every 150 ms during
+    a fade — rule 8.4 must not latch an override on those, F1). A report
+    *outside* the envelope is a genuine mid-fade interruption and latches. On
+    expiry the envelope is dropped; a normal final-value echo (recorded at
+    envelope creation) still absorbs a late final report. Wall-event entities
+    bypass all of this and always latch (§9.4).
     """
 
     def __init__(self, ttl: float) -> None:
         self._ttl = ttl
         self._entries: dict[str, deque[_Echo]] = {}
+        self._envelopes: dict[str, _Envelope] = {}
 
     def record(self, entity_id: str, level: float | None, ct: int | None) -> None:
         deadline = _monotonic() + self._ttl
@@ -186,12 +205,29 @@ class EchoLedger:
         if ct is not None:
             q.append(_Echo(level=None, ct=ct, deadline=deadline))
 
+    def record_envelope(
+        self, entity_id: str, from_level: float, to_level: float, ramp: float
+    ) -> None:
+        """Open a fade envelope and a final-value echo (F1)."""
+        self._envelopes[entity_id] = _Envelope(
+            lo=min(from_level, to_level),
+            hi=max(from_level, to_level),
+            deadline=_monotonic() + ramp + ENVELOPE_MARGIN,
+        )
+        self.record(entity_id, to_level, None)
+
     def consume(self, entity_id: str, level: float | None, ct: int | None) -> bool:
         """True if this observation matches (and consumes) a recorded command."""
+        now = _monotonic()
+        env = self._envelopes.get(entity_id)
+        if env is not None:
+            if env.deadline < now:
+                del self._envelopes[entity_id]
+            elif level is not None and env.lo - ECHO_LEVEL_TOL <= level <= env.hi + ECHO_LEVEL_TOL:
+                return True  # intermediate fade sample — echo; keep the envelope live
         q = self._entries.get(entity_id)
         if not q:
             return False
-        now = _monotonic()
         while q and q[0].deadline < now:
             q.popleft()
         for echo in list(q):
@@ -215,95 +251,173 @@ class EchoLedger:
 # ---------------------------------------------------------------------------
 
 
-class ChannelWriter:
-    """Executes ramps for one channel: native transition or stepping fallback.
+@dataclass(slots=True)
+class _Cmd:
+    """A pending one-shot channel command (latest-wins slot)."""
 
-    Latest-wins per channel — a new command cancels any in-flight ramp. CT is
-    written before brightness (rule §5.4). Concurrency is bounded site-wide by
-    the shared ``max_inflight`` semaphore (§8.3).
+    off: bool
+    level: float  # normalized target (0 for off)
+    ct: int | None
+    ramp: float
+
+
+class ChannelWriter:
+    """Serialized per-channel write executor (§8.2/§8.3).
+
+    Every write for a channel flows through one *pending slot* (latest wins)
+    and one in-flight guard, so service calls execute strictly in order — a
+    ``turn_off`` can never be buried by a stale ``turn_on`` on a slow device
+    (F3). Consecutive writes are spaced by ``min_write_interval`` (F2). A move
+    is either a single native-transition write, or — when the light has no
+    ``TRANSITION`` feature — a software flux-linear stepping ramp whose steps
+    are themselves fed one at a time through the same slot. CT is written
+    before brightness (§5.4). Site-wide concurrency is capped by the shared
+    ``max_inflight`` semaphore.
     """
 
     def __init__(self, controller: Controller, entity_id: str) -> None:
         self._c = controller
         self.entity_id = entity_id
-        self._cancel_step: CALLBACK_TYPE | None = None
+        self._min_interval = controller.tun.min_write_interval
+        self._pending: _Cmd | None = None
+        self._inflight = False
         self._last_write = 0.0
+        self._rate_cancel: CALLBACK_TYPE | None = None
+        self._step_cancel: CALLBACK_TYPE | None = None
+        self._step_state: tuple[float, float, int | None, int, bool] | None = None
 
     @callback
     def cancel(self) -> None:
-        if self._cancel_step is not None:
-            self._cancel_step()
-            self._cancel_step = None
+        """Cancel all armed timers (unload)."""
+        self._cancel_stepping()
+        if self._rate_cancel is not None:
+            self._rate_cancel()
+            self._rate_cancel = None
 
     @callback
     def set_channel(self, level: float, ct: int | None, ramp: float) -> None:
-        self.cancel()
-        goal_b = _level_to_brightness(level) / 255.0
+        self._cancel_stepping()
         if self._c.supports_transition(self.entity_id) or ramp <= STEP_INTERVAL:
-            self._c.async_run_write(self._single_on(level, ct, ramp))
-            return
-        self._start_ramp(goal_b, ct, ramp, off_at_end=False)
+            self._submit(_Cmd(off=False, level=max(0.0, min(1.0, level)), ct=ct, ramp=ramp))
+        else:
+            self._start_stepping(_level_to_brightness(level) / 255.0, ct, ramp, off_at_end=False)
 
     @callback
     def turn_off(self, ramp: float) -> None:
-        self.cancel()
+        self._cancel_stepping()
         if self._c.supports_transition(self.entity_id) or ramp <= STEP_INTERVAL:
-            self._c.async_run_write(self._single_off(ramp))
+            self._submit(_Cmd(off=True, level=0.0, ct=None, ramp=ramp))
+        else:
+            self._start_stepping(0.0, None, ramp, off_at_end=True)
+
+    # -- pending slot + rate limit + serialization (F2/F3) -----------------
+
+    @callback
+    def _submit(self, cmd: _Cmd) -> None:
+        self._pending = cmd  # latest wins: an intervening command is coalesced away
+        self._pump()
+
+    @callback
+    def _pump(self) -> None:
+        if self._inflight or self._pending is None or self._rate_cancel is not None:
             return
-        self._start_ramp(0.0, None, ramp, off_at_end=True)
+        wait = self._min_interval - (_monotonic() - self._last_write)
+        if wait > 0:
+            self._rate_cancel = async_call_later(self._c.hass, wait, self._on_rate)
+        else:
+            self._flush()
 
-    # -- native transition writes ------------------------------------------
+    @callback
+    def _on_rate(self, _now: Any) -> None:
+        self._rate_cancel = None
+        self._flush()  # the spacing has elapsed — execute without re-checking
 
-    async def _single_on(self, level: float, ct: int | None, ramp: float) -> None:
+    @callback
+    def _flush(self) -> None:
+        if self._inflight or self._pending is None:
+            return
+        cmd, self._pending = self._pending, None
+        self._inflight = True
+        self._last_write = _monotonic()
+        coro = self._do_off(cmd.ramp) if cmd.off else self._do_single(cmd.level, cmd.ct, cmd.ramp)
+        task = self._c.async_run_write(coro)
+        task.add_done_callback(self._on_write_done)
+
+    @callback
+    def _on_write_done(self, _task: asyncio.Task) -> None:
+        self._inflight = False
+        self._pump()
+
+    # -- one-shot writes ---------------------------------------------------
+
+    async def _do_single(self, level: float, ct: int | None, ramp: float) -> None:
         brightness = _level_to_brightness(level)
+        native = self._c.supports_transition(self.entity_id) and ramp > 0
         if ct is not None:
             # CT before brightness (rule §5.4): the OUTPUT_SET can clobber CT.
             await self._c.async_call_light(
                 self.entity_id, {ATTR_COLOR_TEMP_KELVIN: ct}, level=None, ct=ct
             )
         data: dict[str, Any] = {ATTR_BRIGHTNESS: brightness}
-        if self._c.supports_transition(self.entity_id) and ramp > 0:
+        target = brightness / 255.0
+        if native:
             data[ATTR_TRANSITION] = ramp
-        await self._c.async_call_light(self.entity_id, data, level=brightness / 255.0, ct=None)
+            frm = _obs_level(self._c.hass.states.get(self.entity_id)) or 0.0
+            await self._c.async_call_light(
+                self.entity_id, data, level=target, ct=None, envelope=(frm, target, ramp)
+            )
+        else:
+            await self._c.async_call_light(self.entity_id, data, level=target, ct=None)
 
-    async def _single_off(self, ramp: float) -> None:
+    async def _do_off(self, ramp: float) -> None:
+        native = self._c.supports_transition(self.entity_id) and ramp > 0
         data: dict[str, Any] = {}
-        if self._c.supports_transition(self.entity_id) and ramp > 0:
+        if native:
             data[ATTR_TRANSITION] = ramp
-        await self._c.async_call_light(self.entity_id, data, level=0.0, ct=None, turn_off=True)
+            frm = _obs_level(self._c.hass.states.get(self.entity_id)) or 0.0
+            await self._c.async_call_light(
+                self.entity_id, data, level=0.0, ct=None, turn_off=True, envelope=(frm, 0.0, ramp)
+            )
+        else:
+            await self._c.async_call_light(self.entity_id, data, level=0.0, ct=None, turn_off=True)
 
     # -- software stepping ramp (no native transition) ---------------------
 
-    def _start_ramp(self, goal_b: float, ct: int | None, ramp: float, off_at_end: bool) -> None:
-        state = self._c.hass.states.get(self.entity_id)
-        b0 = _obs_level(state) or 0.0
+    def _cancel_stepping(self) -> None:
+        if self._step_cancel is not None:
+            self._step_cancel()
+            self._step_cancel = None
+        self._step_state = None
+
+    def _start_stepping(self, goal_b: float, ct: int | None, ramp: float, off_at_end: bool) -> None:
+        b0 = _obs_level(self._c.hass.states.get(self.entity_id)) or 0.0
         steps = max(1, round(ramp / STEP_INTERVAL))
-        self._ramp_step(b0, goal_b, ct, 0, steps, off_at_end)
+        self._step_state = (b0, goal_b, ct, steps, off_at_end)
+        self._ramp_step(0)
 
     @callback
-    def _ramp_step(
-        self, b0: float, goal_b: float, ct: int | None, i: int, steps: int, off_at_end: bool
-    ) -> None:
+    def _ramp_step(self, i: int) -> None:
+        if self._step_state is None:
+            return
+        b0, goal_b, ct, steps, off_at_end = self._step_state
         i += 1
         frac = i / steps
         # Flux-linear interpolation under the default square-law curve — one
-        # step "looks" the same size at any level (rule §4.3 intent). Calibrated
-        # curves refine allocation, not this fallback cadence.
+        # step "looks" the same size at any level (rule §4.3 intent). Each step
+        # goes through the shared pending slot, so it is spaced + serialized and
+        # records its own per-step echo (F1: the stepping path stays as-is).
         b = (b0 * b0 + (goal_b * goal_b - b0 * b0) * frac) ** 0.5
         last = i >= steps
         if last and off_at_end:
-            self._c.async_run_write(self._single_off(0.0))
+            self._submit(_Cmd(off=True, level=0.0, ct=None, ramp=0.0))
         else:
-            level = max(0.0, b)
-            self._c.async_run_write(self._single_on(level, ct if i == 1 else None, 0.0))
+            self._submit(_Cmd(off=False, level=max(0.0, b), ct=ct if i == 1 else None, ramp=0.0))
         if not last:
-            self._cancel_step = async_call_later(
-                self._c.hass,
-                STEP_INTERVAL,
-                lambda _now: self._ramp_step(b0, goal_b, ct, i, steps, off_at_end),
+            self._step_cancel = async_call_later(
+                self._c.hass, STEP_INTERVAL, lambda _now: self._ramp_step(i)
             )
         else:
-            self._cancel_step = None
+            self._step_cancel = None
 
 
 # ---------------------------------------------------------------------------
@@ -419,13 +533,16 @@ class Controller:
         sun_elev = None
         if sun is not None:
             sun_elev = sun.attributes.get("elevation")
+        # away_lighting / enabled / master_* are restorable entity state, not
+        # world state — they are authoritatively restored by their entities'
+        # restore events (queued before the first ReviewTick), so the snapshot
+        # just carries the engine defaults here.
         return InitialSnapshot(
             enabled=self.enabled,
             sun_elevation=float(sun_elev) if sun_elev is not None else None,
             sleep=self._resolve_bool(self.options.get(CONF_SLEEP_ENTITY)),
             anyone_home=self._resolve_home(),
             vacation=self._resolve_bool(self.options.get(CONF_VACATION_ENTITY)),
-            away_lighting=True,
             tv_playing=self._resolve_tv(),
             master_on=self.master_on,
             master_pct=self.master_pct,
@@ -499,17 +616,22 @@ class Controller:
     def _process(self, event: CoreEvent) -> None:
         commands = self.engine.handle(event, dt_util.utcnow())
         for cmd in commands:
-            match cmd:
-                case SetChannel():
-                    self._exec_set(cmd)
-                case TurnOffChannel():
-                    self._exec_off(cmd)
-                case PublishState():
-                    self._exec_publish(cmd)
-                case ScheduleReview():
-                    self._exec_review(cmd)
-                case CalibrationResult():
-                    self._exec_calibration(cmd)
+            # Isolate each command (F4): one bad exec must not swallow the
+            # trailing ScheduleReview/PublishState and stall the self-schedule.
+            try:
+                match cmd:
+                    case SetChannel():
+                        self._exec_set(cmd)
+                    case TurnOffChannel():
+                        self._exec_off(cmd)
+                    case PublishState():
+                        self._exec_publish(cmd)
+                    case ScheduleReview():
+                        self._exec_review(cmd)
+                    case CalibrationResult():
+                        self._exec_calibration(cmd)
+            except Exception:
+                _LOGGER.exception("Error executing %s", type(cmd).__name__)
 
     # -- plan execution -----------------------------------------------------
 
@@ -577,10 +699,11 @@ class Controller:
         return bool(feats & LightEntityFeature.TRANSITION)
 
     @callback
-    def async_run_write(self, coro: Any) -> None:
+    def async_run_write(self, coro: Any) -> asyncio.Task:
         task = self.hass.async_create_task(coro)
         self._write_tasks.add(task)
         task.add_done_callback(self._on_write_done)
+        return task
 
     @callback
     def _on_write_done(self, task: asyncio.Task) -> None:
@@ -596,11 +719,17 @@ class Controller:
         level: float | None,
         ct: int | None,
         turn_off: bool = False,
+        envelope: tuple[float, float, float] | None = None,
     ) -> None:
         if self.hass.states.is_state(entity_id, STATE_UNAVAILABLE):
             return  # §8.5: never queue against a dead link
-        # Record the echo BEFORE the (non-blocking) service call (§8.4).
-        self._echo.record(entity_id, level, ct)
+        # Record the echo BEFORE the (non-blocking) service call (§8.4). A
+        # native-transition write records a fade envelope so intermediate mesh
+        # reports during the fade are not mistaken for a foreign change (F1).
+        if envelope is not None:
+            self._echo.record_envelope(entity_id, *envelope)
+        else:
+            self._echo.record(entity_id, level, ct)
         service = SERVICE_TURN_OFF if turn_off else SERVICE_TURN_ON
         async with self._sem:  # §8.3 max_inflight concurrency cap
             await self.hass.services.async_call(
@@ -680,8 +809,10 @@ class Controller:
         if level is None:
             return  # went unavailable — handled on recovery
         if self._echo.consume(entity_id, level, ct):
-            return  # our own command echo
-        self.submit(ForeignChange(channel_id=entity_id, level=level or None, ct=ct))
+            return  # our own command echo (incl. an intermediate fade sample)
+        # level is 0.0 (off) or > 0 here — pass it through verbatim; the engine
+        # reads 0/None alike as "off" but 0.0 must not become a spurious None.
+        self.submit(ForeignChange(channel_id=entity_id, level=level, ct=ct))
 
     @callback
     def _on_wall_event(self, event: Event) -> None:
@@ -697,7 +828,7 @@ class Controller:
             self.submit(
                 ForeignChange(
                     channel_id=cid,
-                    level=_obs_level(st) or None,
+                    level=_obs_level(st),  # 0.0 (off) stays 0.0, not None
                     ct=_obs_ct(st),
                     wall_event=True,
                 )
