@@ -9,6 +9,7 @@ start gate, and the persistence contract (§4.4/rule 5).
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from itertools import pairwise
 
 from custom_components.light_conductor.core.engine import Engine
 from custom_components.light_conductor.core.events import (
@@ -34,8 +35,13 @@ NIGHT = -10.0
 BASE = datetime(2026, 7, 1, 23, 0, 0)
 
 
-def _cal_engine(chans: list[Channel], *, tun: Tunables | None = None, calibrations=None) -> Engine:
-    """A night-time engine with the room occupied and a settled dark sensor."""
+def _cal_engine(
+    chans: list[Channel], *, tun: Tunables | None = None, calibrations=None, ambient: float = 0.0
+) -> Engine:
+    """A night-time engine with the room occupied and a settled dark sensor.
+
+    ``ambient`` is the resting dark lux fed pre-sweep (the off-baseline the
+    sweep must subtract, F3a)."""
     eng = Engine(
         closed_config(chans, lux_active_day=100.0),
         InitialSnapshot(sun_elevation=NIGHT, occupancy={"lab": True}),
@@ -44,10 +50,10 @@ def _cal_engine(chans: list[Channel], *, tun: Tunables | None = None, calibratio
     )
     eng.handle(SunElevationChanged(NIGHT), BASE)
     eng.handle(PresenceChanged("lab", True), BASE + timedelta(seconds=40))
-    # A few dark samples so the estimator is fresh + stable (can_start gate).
+    # A few settled samples so the estimator is fresh + stable (can_start gate).
     t = BASE + timedelta(seconds=50)
     for _ in range(5):
-        eng.handle(LuxReport("lab", 0.0), t)
+        eng.handle(LuxReport("lab", ambient), t)
         t = t + timedelta(seconds=2)
     return eng
 
@@ -345,7 +351,139 @@ def test_dead_channel_gets_zero_gain_default_curve() -> None:
     assert eng.calibration_of("lab").gains["dead"] == 0.0
 
 
+# --- F3: guards that were mutation-invisible ----------------------------
+
+
+def test_sweep_subtracts_nonzero_dark_baseline() -> None:
+    """§4.4 (F3a): fitted gains are corrected for a nonzero ambient baseline.
+
+    With 2 lx of ambient dark light, a true-gain-100 channel must fit ~100, not
+    ~102 — deleting the off-baseline subtraction (calibration.py) fails this."""
+    chans = [Channel("c", gain=100.0, band=Band.PRIMARY)]
+    eng = _cal_engine(chans, ambient=2.0)
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 2.0)  # 2 lx ambient
+    start = BASE + timedelta(seconds=70)
+    eng.handle(StartCalibration("lab"), start)
+    results = _drive_sweep(eng, plant, start + timedelta(seconds=1))
+    assert results and results[0].ok
+    fitted = eng.calibration_of("lab").gains["c"]
+    assert abs(fitted - 100.0) < 1.0  # baseline-corrected (a raw fit would be ~102)
+
+
+def test_sweep_enforces_monotone_curve_over_noisy_points() -> None:
+    """§4.4 (F3b): a raw sweep that DIPS mid-range commits a monotone curve that
+    differs from the raw ratios — deleting the cummax enforcement fails this."""
+    # A true curve that dips at b=0.5 (a noisy under-read), both 0.25 and 0.5
+    # below full: raw ratios 0.34 -> 0.20 are non-monotone AND both < 1, so the
+    # min(1.0) clamp cannot hide the decrease — only the cummax can.
+    tab = {0.1: 0.10, 0.25: 0.34, 0.5: 0.20, 0.75: 0.62, 1.0: 1.0}
+    dip = lambda b: tab.get(round(b, 2), b * b)  # noqa: E731
+    chans = [Channel("c", gain=100.0, band=Band.PRIMARY, curve=dip)]
+    eng = _cal_engine(chans)
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 0.0)
+    start = BASE + timedelta(seconds=70)
+    eng.handle(StartCalibration("lab"), start)
+    _drive_sweep(eng, plant, start + timedelta(seconds=1))
+    photo = eng._photo["lab"]
+    fluxes = [photo.flux("c", b) for b in (0.0, 0.1, 0.25, 0.5, 0.75, 1.0)]
+    assert all(b - a >= -1e-9 for a, b in pairwise(fluxes))  # monotone
+    # The committed curve lifted the dipped b=0.5 point above its raw 0.20 ratio.
+    assert photo.flux("c", 0.5) > 0.30  # cummax carried the 0.34 forward
+    assert abs(photo.flux("c", 0.5) - 0.20) > 0.1  # differs from the raw point
+
+
+# --- F6: an abort tick must not double-command --------------------------
+
+
+def test_abort_plan_has_no_duplicate_channel_commands() -> None:
+    """§4.4 (F6): the abort recompute emits the restore only — the room's normal
+    reconcile is suspended that tick, so no channel is commanded twice.
+
+    The prior light (a manual 0.3, ON) is restored on abort, but a sleep abort
+    also drives the room OFF; without the suspend, the restore SetChannel and
+    the reconcile TurnOff would both target the same channel in one plan (the
+    bug). A sleep (not foreign) abort is used so no override masks the reconcile."""
+    from custom_components.light_conductor.core.plan import SetChannel, TurnOffChannel
+
+    chans = [Channel("a", gain=120.0, band=Band.ACCENT), Channel("b", gain=60.0)]
+    cfg = closed_config(chans, out_active_day={Band.ACCENT: 0.5, Band.PRIMARY: 0.5})
+    eng = Engine(cfg, InitialSnapshot(sun_elevation=NIGHT, occupancy={"lab": True}))
+    eng.handle(SunElevationChanged(NIGHT), BASE)
+    eng.handle(PresenceChanged("lab", True), BASE + timedelta(seconds=40))
+    t = BASE + timedelta(seconds=50)
+    for _ in range(5):
+        eng.handle(LuxReport("lab", 0.0), t)
+        t = t + timedelta(seconds=2)
+    # A distinctive pre-sweep manual light state (ON) to be restored on abort.
+    for cid in ("a", "b"):
+        eng.state.rooms["lab"].channels[cid].commanded_b = 0.3
+        eng.state.rooms["lab"].channels[cid].on = True
+
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 0.0)
+    start = BASE + timedelta(seconds=70)
+    eng.handle(StartCalibration("lab"), start)
+    t = start + timedelta(seconds=1)
+    for _ in range(6):
+        plant.tick(t)
+        t = t + timedelta(seconds=1)
+    out = eng.handle(SleepChanged(True), t)  # mode-off abort (no override latch)
+    channel_cmds = [c.channel_id for c in out if isinstance(c, SetChannel | TurnOffChannel)]
+    assert len(channel_cmds) == len(set(channel_cmds))  # no channel commanded twice
+
+
 # --- persistence contract (rule 5) --------------------------------------
+
+
+def test_calibration_rejects_corrupt_payloads() -> None:
+    """Rule 5 (F2): from_dict validates and raises on malformed calibration."""
+    good = RoomCalibration(
+        room_id="lab",
+        gains={"c": 50.0},
+        curves={"c": ((0.0, 0.0), (0.5, 0.25), (1.0, 1.0))},
+    ).to_dict()
+    RoomCalibration.from_dict(good)  # sanity: the good one loads
+
+    def corrupt(**over):
+        import copy
+
+        d = copy.deepcopy(good)
+        d.update(over)
+        return d
+
+    import pytest
+
+    with pytest.raises(ValueError):  # negative gain
+        RoomCalibration.from_dict(corrupt(gains={"c": -5.0}))
+    with pytest.raises(ValueError):  # NaN gain
+        RoomCalibration.from_dict(corrupt(gains={"c": float("nan")}))
+    with pytest.raises(ValueError):  # non-monotone flux (spans 0..1, dips mid)
+        RoomCalibration.from_dict(
+            corrupt(curves={"c": [[0.0, 0.0], [0.5, 0.9], [0.75, 0.4], [1.0, 1.0]]})
+        )
+    with pytest.raises(ValueError):  # curve does not span b=0..1
+        RoomCalibration.from_dict(corrupt(curves={"c": [[0.1, 0.0], [1.0, 1.0]]}))
+    with pytest.raises(ValueError):  # relative flux does not span 0..1
+        RoomCalibration.from_dict(corrupt(curves={"c": [[0.0, 0.2], [1.0, 1.0]]}))
+    with pytest.raises(ValueError):  # non-monotone in b
+        RoomCalibration.from_dict(
+            corrupt(curves={"c": [[0.0, 0.0], [0.5, 0.5], [0.3, 0.7], [1.0, 1.0]]})
+        )
+    with pytest.raises(ValueError):  # fewer than two points
+        RoomCalibration.from_dict(corrupt(curves={"c": [[0.0, 0.0]]}))
+    with pytest.raises(ValueError):  # non-finite curve point
+        RoomCalibration.from_dict(corrupt(curves={"c": [[0.0, 0.0], [1.0, float("inf")]]}))
+    with pytest.raises(ValueError):  # gains/curves cover different channels
+        RoomCalibration.from_dict(corrupt(gains={"c": 5.0, "d": 5.0}))
+
+
+def test_corrupt_persisted_calibration_leaves_room_uncalibrated() -> None:
+    """Rule 5 (F2): a malformed (non-monotone) calibration is not loaded."""
+    chans = [Channel("c", gain=100.0)]
+    cfg = closed_config(chans, lux_active_day=100.0)
+    bad = RoomCalibration("lab", gains={"c": 50.0}, curves={"c": ((0.0, 0.0), (1.0, 0.5))})
+    eng = Engine(cfg, calibrations={"lab": bad})  # last point flux != 1 -> invalid
+    assert not eng._photo["lab"].calibrated
+    assert eng._photo["lab"].gain("c") == 100.0  # config default retained
 
 
 def test_calibration_roundtrips_and_validates() -> None:

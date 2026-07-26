@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
+from itertools import pairwise
 from typing import Protocol
 
 # ---------------------------------------------------------------------------
@@ -353,8 +354,17 @@ class EstimatorState:
     a_filt: float = 0.0
     #: Published natural-light estimate ``N̂`` (rule 3.2/3.3).
     n_hat: float = 0.0
-    #: Online per-room scalar gain multiplier, bounded [0.5, 2.0] (rule 3.4).
+    #: Online per-room scalar gain multiplier. For a calibrated room it is
+    #: bounded [0.5, 2.0] of the calibrated gains (rule 3.4); for an
+    #: uncalibrated room it holds the first-night bootstrap gain over the
+    #: default b² curves once ``bootstrap_confident`` (rule 3.5/4.4).
     gain_mult: float = 1.0
+    #: True once the first-night bootstrap has a conservative room-scalar gain
+    #: and the room may enter closed-loop control (rule 3.5/4.4). Per-run only —
+    #: never persisted; a restart re-learns from open-loop.
+    bootstrap_confident: bool = False
+    #: Own-step gain ratios (ΔL / Δflux) collected while bootstrapping (3.5/4.4).
+    bootstrap_ratios: list[float] = field(default_factory=list)
     #: Last lux sample arrival (any sample, incl. blanked) — staleness (3.5).
     last_report_at: datetime | None = None
     #: Last sample folded into ``l_filt`` — the low-pass ``dt`` source (3.2).
@@ -375,6 +385,12 @@ class EstimatorState:
     #: Cleared the moment a second own command lands inside the settle window
     #: (a non-quiet window never updates the gain, rule 3.4).
     pending_valid: bool = False
+    #: Whether the pending observation feeds the first-night bootstrap (armed on
+    #: observed ΔL) rather than the calibrated §3.4 refine (rule 3.5/4.4).
+    pending_shadow: bool = False
+
+
+_CAL_EPS = 1e-6
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,9 +399,12 @@ class RoomCalibration:
 
     Plain data bound to the room's channel set: ``gains`` is ``g_i`` (lux at
     the sensor at full output) and ``curves`` is the per-channel relative-flux
-    piecewise ``(b, flux)`` points ``f_i``. The adapter stores :meth:`to_dict`;
-    :meth:`from_dict` validates on load and :meth:`matches` guards the
-    channel-set contract (rule 5 of the estimator brief).
+    piecewise ``(b, flux)`` points ``f_i``. The adapter stores :meth:`to_dict`
+    and reloads via :meth:`from_dict`, which **validates** the payload and
+    raises :class:`ValueError` on anything malformed so the adapter discards it
+    (the room then stays uncalibrated, rule 5 of the estimator brief).
+    :meth:`matches` guards the channel-set contract; :meth:`validate` guards the
+    numeric contract (finite, positive gains; monotone curves spanning b=0..1).
     """
 
     room_id: str
@@ -397,6 +416,46 @@ class RoomCalibration:
         ids = set(channel_ids)
         return set(self.gains) == ids and set(self.curves) == ids
 
+    def validate(self) -> None:
+        """Raise :class:`ValueError` unless the calibration is well-formed (rule 5).
+
+        Every gain must be finite and > 0; every curve must have finite points,
+        be non-decreasing in both ``b`` and flux, start at ``b=0`` and end at
+        ``b=1`` (within epsilon). A corrupt store (NaN, negative gain,
+        non-monotone or truncated curve) is rejected, not silently trusted.
+        """
+        from math import isfinite
+
+        if set(self.gains) != set(self.curves):
+            raise ValueError("calibration gains and curves cover different channels")
+        for cid, g in self.gains.items():
+            if not isfinite(g) or g <= 0.0:
+                raise ValueError(f"channel {cid}: gain must be finite and > 0 (got {g})")
+        for cid, pts in self.curves.items():
+            if len(pts) < 2:
+                raise ValueError(f"channel {cid}: curve needs >= 2 points")
+            for b, f in pts:
+                if not (isfinite(b) and isfinite(f)):
+                    raise ValueError(f"channel {cid}: non-finite curve point")
+            bs = [b for b, _f in pts]
+            fs = [f for _b, f in pts]
+            if abs(bs[0]) > _CAL_EPS or abs(bs[-1] - 1.0) > _CAL_EPS:
+                raise ValueError(f"channel {cid}: curve must span b=0..1")
+            if abs(fs[0]) > _CAL_EPS or abs(fs[-1] - 1.0) > _CAL_EPS:
+                raise ValueError(f"channel {cid}: relative flux must span 0..1")
+            if any(b1 - b0 < -_CAL_EPS for b0, b1 in pairwise(bs)):
+                raise ValueError(f"channel {cid}: curve not monotone in b")
+            if any(f1 - f0 < -_CAL_EPS for f0, f1 in pairwise(fs)):
+                raise ValueError(f"channel {cid}: curve not monotone in flux")
+
+    def is_valid(self) -> bool:
+        """Non-raising :meth:`validate` (for the engine's silent load path)."""
+        try:
+            self.validate()
+        except ValueError:
+            return False
+        return True
+
     def to_dict(self) -> dict[str, object]:
         return {
             "room_id": self.room_id,
@@ -406,12 +465,15 @@ class RoomCalibration:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> RoomCalibration:
+        """Rebuild + validate a persisted calibration; raises on corruption (rule 5)."""
         gains = {str(k): float(v) for k, v in dict(data["gains"]).items()}  # type: ignore[arg-type]
         curves = {
             str(cid): tuple((float(b), float(f)) for b, f in pts)  # type: ignore[misc]
             for cid, pts in dict(data["curves"]).items()  # type: ignore[arg-type]
         }
-        return cls(room_id=str(data["room_id"]), gains=gains, curves=curves)
+        cal = cls(room_id=str(data["room_id"]), gains=gains, curves=curves)
+        cal.validate()
+        return cal
 
 
 class CalPhase(StrEnum):
@@ -456,4 +518,9 @@ class RoomDiagnostics:
     role: Role
     overridden: bool
     target_output: float  # highest band's normalized target (open-loop)
-    natural_lux: float | None  # placeholder until the estimator PR (§3)
+    #: Estimated natural light N̂ at the sensor, rounded to 0.1 lx; None when the
+    #: room has no fresh sensor (§3). The adapter buckets + rate-limits before
+    #: the recorder (rule 10).
+    natural_lux: float | None
+    #: Closed-loop lux target T', rounded to 0.1 lx; None on the open-loop path.
+    target_lux: float | None = None

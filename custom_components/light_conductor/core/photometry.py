@@ -90,10 +90,14 @@ class RoomPhotometry:
         self._gains: dict[str, float] = {c.channel_id: c.gain for c in room.channels}
         #: Flipped True by the §4.4 sweep or a matching persisted calibration.
         self.calibrated: bool = False
-        if calibration is not None and calibration.matches(self._channel_ids):
-            # Persisted calibration bound to this exact channel set (rule 5):
-            # load it; a mismatch leaves the defaults + uncalibrated (caller
-            # decides — RoomPhotometry silently ignores a non-matching set).
+        if (
+            calibration is not None
+            and calibration.matches(self._channel_ids)
+            and calibration.is_valid()
+        ):
+            # Persisted calibration bound to this exact channel set AND
+            # well-formed (rule 5): load it. A mismatch or a malformed payload
+            # leaves the defaults + uncalibrated (safe by construction).
             self.apply_calibration(calibration)
 
     def flux(self, channel_id: str, b: float) -> float:

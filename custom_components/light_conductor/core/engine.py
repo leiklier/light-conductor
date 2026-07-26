@@ -211,8 +211,11 @@ class Engine:
         if rs.cal is not None:
             calibration.ingest_lux(rs, event.lux, now, self.tun)  # sweep collector (§4.4)
             return
-        a_now = estimator.a_hat(rs, self._photo[room.room_id])
-        estimator.ingest_lux(rs.est, event.lux, now, self.state.sun_elevation, a_now, self.tun)
+        photo = self._photo[room.room_id]
+        a_now = estimator.a_hat(rs, photo)
+        estimator.ingest_lux(
+            rs.est, event.lux, now, self.state.sun_elevation, a_now, self.tun, photo.calibrated
+        )
 
     def _on_foreign(self, event: ForeignChange, now: datetime) -> None:
         room = self.config.channel_room(event.channel_id)
@@ -293,6 +296,12 @@ class Engine:
             elif prior_cal is not None:  # abort: roll photometry back exactly
                 photo.apply_calibration(prior_cal)
                 photo.calibrated = prior_calibrated
+            if outcome.restore_light:
+                # The abort tick already emitted the prior-light restore; keep
+                # the room suspended so its normal reconcile does not also fire
+                # and double-command the same channels (F6). It resumes on the
+                # next event.
+                suspended.add(room.room_id)
             plan.commands.append(
                 CalibrationResult(room.room_id, outcome.ok, outcome.reason, outcome.coverage)
             )
@@ -420,8 +429,16 @@ class Engine:
         ct_override: int | None = None
         fade: float | None = None
         photo = self._photo[room.room_id]
-        closed = res is None and room.has_lux_sensor and not estimator.is_stale(rs.est, now, tun)
+        # Closed-loop only when the sensor is fresh AND the room's gains are
+        # trustworthy — calibrated, or bootstrap-confident (F1a). An untrusted
+        # lux room runs the open-loop tables (safe by construction) while it
+        # learns its first-night gain in shadow (§3.5/4.4).
+        fresh = room.has_lux_sensor and not estimator.is_stale(rs.est, now, tun)
+        trusted = photo.calibrated or rs.est.bootstrap_confident
+        closed = res is None and fresh and trusted
+        shadow = res is None and fresh and not trusted
         correcting = False
+        target_lux: float | None = None
 
         if res is not None:
             role = res.role
@@ -436,7 +453,7 @@ class Engine:
             channel_b = photometry.allocate(room.channels, outputs, e, tun)
         elif closed:
             role = base
-            channel_b, correcting = self._closed_loop(
+            channel_b, correcting, target_lux = self._closed_loop(
                 room, rs, base, prev_role, e, g, now, photo, plan
             )
         else:
@@ -451,7 +468,10 @@ class Engine:
         # Emit writes unless observe-only (rule 10) or inside startup grace (11.1).
         if s.enabled and not self._in_grace(now):
             before = len(plan.commands)
-            a_before_unit = estimator.a_hat(rs, photo, 1.0) if correcting else 0.0
+            # Arm a gain observation for a closed-loop correction (§3.4 refine)
+            # or any own step while learning in shadow (§3.5/4.4 bootstrap).
+            arm = fresh and (correcting or shadow)
+            a_before_unit = estimator.a_hat(rs, photo, 1.0) if arm else 0.0
             ch_out = {ch: channel_b[ch.channel_id] for ch in room.channels}
             anchor = ct_policy.fixed_anchor(ch_out, tun)
             room_active = role is Role.ACTIVE
@@ -464,15 +484,16 @@ class Engine:
                 governor.plan_channel(
                     plan, ch, rs.channels[ch.channel_id], room_active, b, ct, photo, tun, fade
                 )
-            if len(plan.commands) > before:  # write-blank window opens (§3.2a)
+            emitted = len(plan.commands) > before
+            if emitted:  # write-blank window opens (§3.2a)
                 estimator.note_own_command(rs.est, now)
-            if correcting:  # arm the online-gain observation for this step (§3.4)
+            if arm and emitted:
                 base_delta = estimator.a_hat(rs, photo, 1.0) - a_before_unit
-                estimator.record_step(rs.est, rs.est.l_filt, base_delta, now, tun)
+                estimator.record_step(rs.est, rs.est.l_filt, base_delta, now, tun, shadow=shadow)
 
         plan.review_at(roles.next_review(rs, now))
-        natural = rs.est.n_hat if closed else None
-        return self._diag(room, rs, role, max(channel_b.values(), default=0.0), natural)
+        natural = rs.est.n_hat if (closed or shadow) else None
+        return self._diag(room, rs, role, max(channel_b.values(), default=0.0), natural, target_lux)
 
     def _closed_loop(
         self,
@@ -485,13 +506,13 @@ class Engine:
         now: datetime,
         photo: RoomPhotometry,
         plan: Plan,
-    ) -> tuple[dict[str, float], bool]:
+    ) -> tuple[dict[str, float], bool, float]:
         """Feed-forward closed-loop control for one room (§3.6/§4.5).
 
-        Returns ``(channel_b, correcting)``. While the error is inside the
-        deadband (or the sustain has not elapsed) the room *holds* its current
-        commanded outputs — the governor then emits nothing. When it corrects,
-        a single model-predicted (feed-forward) write lands near the goal.
+        Returns ``(channel_b, correcting, target_lux)``. While the error is
+        inside the deadband (or the sustain has not elapsed) the room *holds*
+        its current commanded outputs — the governor then emits nothing. When it
+        corrects, a single model-predicted (feed-forward) write lands near goal.
         """
         tun = self.tun
         t_prime = estimator.target_lux(rs, role, room.profile, e, g, tun)
@@ -504,7 +525,7 @@ class Engine:
         plan.review_at(review)
         if not correct:
             hold = {ch.channel_id: rs.channels[ch.channel_id].commanded_b for ch in room.channels}
-            return hold, False
+            return hold, False, t_prime
         demand = max(0.0, t_prime - n)
         channel_b = estimator.channel_outputs_for_demand(
             room.channels, demand, e, photo, rs.est.gain_mult, tun
@@ -512,7 +533,7 @@ class Engine:
         if e >= tun.evening_cap_threshold:  # evening cap on normalized output (2.4)
             cap = room.profile.evening_output_cap
             channel_b = {cid: min(b, cap) for cid, b in channel_b.items()}
-        return channel_b, True
+        return channel_b, True, t_prime
 
     def _diag(
         self,
@@ -521,13 +542,18 @@ class Engine:
         role: Role,
         peak: float | None = None,
         natural_lux: float | None = None,
+        target_lux: float | None = None,
     ) -> RoomDiagnostics:
         if peak is None:
             peak = max((cs.commanded_b for cs in rs.channels.values()), default=0.0)
+        # Quantize the lux diagnostics to 0.1 lx (rule 10, F4). The adapter must
+        # STILL bucket + rate-limit these before the recorder (presence-conductor
+        # recorder-discipline lesson) — this only trims float noise.
         return RoomDiagnostics(
             room_id=room.room_id,
             role=role,
             overridden=rs.overridden,
             target_output=peak,
-            natural_lux=natural_lux,
+            natural_lux=None if natural_lux is None else round(natural_lux, 1),
+            target_lux=None if target_lux is None else round(target_lux, 1),
         )

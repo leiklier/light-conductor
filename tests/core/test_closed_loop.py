@@ -137,21 +137,23 @@ def test_stale_fallback_and_recovery_are_slew_bounded() -> None:
 
     tun = eng.tun
     bound = tun.slew_step / tun.slew_interval + 1e-9
+    photo = eng._photo["lab"]
     cs = eng.state.rooms["lab"].channels["c"]
+
+    def flux_of(b: float) -> float:
+        return photo.flux("c", b)  # the same curve the governor sized the ramp with
 
     def emit_ok(cmds: list[object]) -> None:
         for c in cmds:
             if isinstance(c, SetChannel) and c.channel_id == "c" and c.ramp_seconds > 0:
-                prev = cs_prev[0]
-                rate = abs(c.level**2 - prev) / c.ramp_seconds
+                rate = abs(flux_of(c.level) - cs_prev[0]) / c.ramp_seconds
                 assert rate <= bound, f"switchover step {rate} exceeds slew {bound}"
 
     # Stop feeding lux; drive review ticks so the sensor goes stale (> 120 s).
-    cs_prev = [cs.commanded_b**2]
+    cs_prev = [flux_of(cs.commanded_b)]
     t = START + timedelta(seconds=140)
     for _ in range(40):
-        before = cs.commanded_b**2
-        cs_prev[0] = before
+        cs_prev[0] = flux_of(cs.commanded_b)
         cmds = eng.handle(ReviewTick(), t)
         emit_ok(cmds)
         t = t + timedelta(seconds=5)
@@ -159,25 +161,51 @@ def test_stale_fallback_and_recovery_are_slew_bounded() -> None:
 
     # Sensor recovers: fresh lux resumes closed-loop, again slew-bounded.
     for _ in range(40):
-        cs_prev[0] = cs.commanded_b**2
+        cs_prev[0] = flux_of(cs.commanded_b)
         cmds = plant.tick(t)
         emit_ok(cmds)
         t = t + timedelta(seconds=2)
 
 
-# --- (h) uncalibrated room stays sane -----------------------------------
+# --- (h) uncalibrated room: open-loop then first-night bootstrap ---------
 
 
-def test_uncalibrated_room_is_bounded_and_sane() -> None:
-    """§4.4/§3.4: an uncalibrated room (default b^2 curve, default gain) with a
-    modest true gain runs closed-loop sanely — bounded outputs, no hunting."""
-    # model_gain 1 (uncalibrated default); true gain 1.6, within the online
-    # multiplier's reach so influence stays bounded.
-    chans = [Channel("c", gain=140.0, model_gain=100.0)]  # 1.4x miscalibration
-    cfg = closed_config(chans, lux_active_day=90.0)
-    eng = booted_engine(cfg, sun=20.0)
-    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 25.0)
-    _run(plant, START, 200)
+def test_probe_A_uncalibrated_bootstraps_then_closes_no_hunt() -> None:
+    """§3.5/§4.4 (F1): an unconfigured lux room (config gain 1.0, TRUE gain 180)
+    must NOT hunt-then-park-dark. It runs the open-loop tables and learns a
+    conservative first-night gain in shadow; closed-loop only engages once
+    bootstrap_confident, and the fitted gain over-models (x margin direction)."""
+    from custom_components.light_conductor.core.events import MasterGainChanged
+
+    # Uncalibrated: config gain defaults 1.0 (model_gain=1.0); true gain 180.
+    chans = [Channel("c", gain=180.0, model_gain=1.0)]
+    cfg = closed_config(chans, lux_active_day=100.0, out_active_day={Band.PRIMARY: 0.4})
+    eng = booted_engine(cfg, sun=20.0, calibrated=False)
+    est = eng.state.rooms["lab"].est
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 30.0)
+
+    # Three master-gain nudges give three open-loop steps > settle apart, hence
+    # three shadow observations. The room stays open-loop the entire time — the
+    # closed loop must not engage before bootstrap_confident (F1a).
+    nudges = {104: 72.0, 318: 88.0, 532: 100.0}  # tick-seconds -> master pct (even for dt=2)
+    confident_before_closed = {"ok": True}
+    t = START
+    for _ in range(430):  # ~860 s at dt=2 s
+        secs = int((t - START).total_seconds())
+        if secs in nudges:
+            eng.handle(MasterGainChanged(nudges[secs]), t)
+        cmds = plant.tick(t)
+        # Invariant: no closed-loop target is published until confident (F1a).
+        if not est.bootstrap_confident:
+            d = next(c for c in cmds if hasattr(c, "rooms"))
+            if d.rooms[0].target_lux is not None:
+                confident_before_closed["ok"] = False
+        t = t + timedelta(seconds=2)
+
+    assert est.bootstrap_confident  # first-night bootstrap committed
+    assert confident_before_closed["ok"]  # closed-loop only after confidence
+    # x margin direction: the fitted room gain over-models the median ratio.
+    assert est.gain_mult >= 180.0
     cs = eng.state.rooms["lab"].channels["c"]
-    assert 0.0 <= cs.commanded_b <= 1.0  # bounded
-    assert plant.reversals("c") <= 3  # sane, not hunting
+    assert cs.commanded_b > 0.05  # did NOT park dark
+    assert plant.reversals("c") <= 2  # no hunting (the probe-A regression)

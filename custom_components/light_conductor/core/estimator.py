@@ -39,9 +39,26 @@ from .tunables import Tunables
 GAIN_MIN = 0.5
 GAIN_MAX = 2.0
 
+#: Attribution sanity window for a §3.4 gain observation (rule 3.4, F5): an
+#: observed ΔL whose sign disagrees with the prediction, or whose magnitude is
+#: outside [OBS_RATIO_LO, OBS_RATIO_HI] x the predicted magnitude, is discarded
+#: (a cloud drifting through the settle window must not move the gain).
+OBS_RATIO_LO = 0.3
+OBS_RATIO_HI = 3.0
+
+#: A flux change below this is "no step" — nothing to attribute a ΔL to.
+_CAL_EPS = 1e-6
+
 
 def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
+
+
+def _median(values: list[float]) -> float:
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    return s[mid] if n % 2 else 0.5 * (s[mid - 1] + s[mid])
 
 
 # ---------------------------------------------------------------------------
@@ -94,25 +111,38 @@ def invalidate_pending(est: EstimatorState) -> None:
     est.pending_l_before = None
     est.pending_base_delta = None
     est.pending_settle_at = None
+    est.pending_shadow = False
 
 
 def record_step(
-    est: EstimatorState, l_before: float | None, base_delta: float, now: datetime, tun: Tunables
+    est: EstimatorState,
+    l_before: float | None,
+    base_delta: float,
+    now: datetime,
+    tun: Tunables,
+    shadow: bool = False,
 ) -> None:
-    """Arm an online-gain observation for a just-emitted feed-forward step (3.4).
+    """Arm an own-step gain observation (rule 3.4 refine, or 3.5/4.4 bootstrap).
 
-    ``base_delta`` is the predicted ΔL of the step at ``gain_mult == 1``. A
-    second step (or a foreign command) inside the settle window overwrites /
-    invalidates this, so only a *quiet* single step ever updates the gain.
+    ``base_delta`` is the model-predicted ΔL of the step at ``gain_mult == 1``
+    (the total flux change x the modelled gains). For the *refine* path
+    (calibrated room) the predicted magnitude must clear ``deadband_abs`` to be
+    worth learning from. For the *shadow bootstrap* path the model gain is the
+    default 1.0 and hence ``base_delta`` is tiny in flux terms — the arm gate is
+    the *observed* ΔL instead (checked at settle), so any real flux change
+    arms. A second step or a foreign change inside the settle window voids it.
     """
-    if l_before is None or abs(base_delta) < tun.deadband_abs:
-        # Too small to learn from without amplifying sensor noise.
-        invalidate_pending(est)
+    if l_before is None or abs(base_delta) < _CAL_EPS:
+        invalidate_pending(est)  # no flux moved — nothing to attribute
+        return
+    if not shadow and abs(base_delta) < tun.deadband_abs:
+        invalidate_pending(est)  # predicted move too small to refine on (noise)
         return
     est.pending_l_before = l_before
     est.pending_base_delta = base_delta
     est.pending_settle_at = now + timedelta(seconds=_settle_seconds(tun))
     est.pending_valid = True
+    est.pending_shadow = shadow
 
 
 def ingest_lux(
@@ -122,12 +152,15 @@ def ingest_lux(
     sun_elevation: float | None,
     a_now: float,
     tun: Tunables,
+    calibrated: bool = True,
 ) -> None:
-    """Fold one :class:`~.events.LuxReport` into the estimator (rules 3.2-3.4).
+    """Fold one :class:`~.events.LuxReport` into the estimator (rules 3.2-3.5).
 
     ``a_now`` is ``Â`` evaluated for the room's current commanded outputs.
-    A ``None`` lux (sensor unavailable) is ignored — staleness (rule 3.5) then
-    trips on ``last_report_at`` ageing out.
+    ``calibrated`` selects the gain path: a calibrated room refines the bounded
+    §3.4 multiplier; an uncalibrated one runs the §3.5/4.4 first-night
+    bootstrap. A ``None`` lux (sensor unavailable) is ignored — staleness
+    (rule 3.5) then trips on ``last_report_at`` ageing out.
     """
     if lux is None:
         return
@@ -161,8 +194,8 @@ def ingest_lux(
     # Natural estimate N̂ = clamp(L_filt - Â_filt, 0, ∞) with the night prior.
     _update_n_hat(est, dt, sun_elevation, tun)
 
-    # (c) Online gain refinement (rule 3.4): a quiet, settled single step.
-    _maybe_learn_gain(est, now, tun)
+    # (c) Gain learning: §3.4 refine (calibrated) or §3.5/4.4 bootstrap.
+    _maybe_learn_gain(est, now, tun, calibrated)
 
 
 def _update_n_hat(
@@ -194,28 +227,68 @@ def _update_n_hat(
     est.n_hat = max(0.0, est.n_hat)
 
 
-def _maybe_learn_gain(est: EstimatorState, now: datetime, tun: Tunables) -> None:
-    if not est.pending_valid or est.pending_settle_at is None:
+def _maybe_learn_gain(est: EstimatorState, now: datetime, tun: Tunables, calibrated: bool) -> None:
+    """Attribute a settled own-step's ΔL to the room gain (rule 3.4 / 3.5).
+
+    Calibrated rooms refine the bounded [0.5, 2.0] multiplier with the §3.4 EMA
+    (guarded by the attribution window, F5). Uncalibrated rooms accumulate
+    ΔL/Δflux ratios and, once ``bootstrap_min_obs`` land, commit a conservative
+    over-modelled room-scalar gain and flip ``bootstrap_confident`` (rule
+    3.5/4.4). A confident-but-uncalibrated room freezes its bootstrap gain.
+    """
+    if not est.pending_valid or est.pending_settle_at is None or now < est.pending_settle_at:
         return
-    if now < est.pending_settle_at:
-        return
-    if (
-        est.l_filt is None
-        or est.pending_l_before is None
-        or est.pending_base_delta is None
-        or abs(est.pending_base_delta) < tun.deadband_abs
-    ):
+    if est.l_filt is None or est.pending_l_before is None or est.pending_base_delta is None:
         invalidate_pending(est)
         return
+    base = est.pending_base_delta
     obs_delta = est.l_filt - est.pending_l_before
-    obs_mult = obs_delta / est.pending_base_delta
-    # EMA toward the observed multiplier, bounded relative to the calibration.
+    shadow = est.pending_shadow
+    invalidate_pending(est)  # consume the observation regardless of the outcome
+
+    if calibrated:
+        _refine_gain(est, obs_delta, base, tun)
+    elif not est.bootstrap_confident and shadow:
+        _bootstrap_gain(est, obs_delta, base, tun)
+    # else: uncalibrated + confident -> frozen bootstrap gain (no update).
+
+
+def _refine_gain(est: EstimatorState, obs_delta: float, base: float, tun: Tunables) -> None:
+    """§3.4 bounded EMA with the F5 attribution guard."""
+    if abs(base) < tun.deadband_abs:
+        return
+    predicted = base * est.gain_mult
+    if predicted == 0.0 or (obs_delta > 0) != (base > 0):
+        return  # sign disagrees with the model -> not our step (cloud drift)
+    if not (OBS_RATIO_LO * abs(predicted) <= abs(obs_delta) <= OBS_RATIO_HI * abs(predicted)):
+        return  # magnitude outside the attribution window -> discard (F5)
+    obs_mult = obs_delta / base
     est.gain_mult = _clamp(
-        est.gain_mult + tun.gain_learn_rate * (obs_mult - est.gain_mult),
-        GAIN_MIN,
-        GAIN_MAX,
+        est.gain_mult + tun.gain_learn_rate * (obs_mult - est.gain_mult), GAIN_MIN, GAIN_MAX
     )
-    invalidate_pending(est)
+
+
+def _bootstrap_gain(est: EstimatorState, obs_delta: float, base: float, tun: Tunables) -> None:
+    """§3.5/4.4 first-night bootstrap: arm on observed ΔL, commit a medianxmargin gain."""
+    if abs(obs_delta) < tun.deadband_abs:
+        return  # observed change too small to be a reliable observation
+    ratio = obs_delta / base
+    if ratio <= 0.0:  # sign disagreement -> not our step
+        return
+    est.bootstrap_ratios.append(ratio)
+    if len(est.bootstrap_ratios) >= tun.bootstrap_min_obs:
+        # Over-model deliberately (x margin): a modelled gain ABOVE the truth
+        # gives loop gain < 1 (stable undershoot that converges); under-modelling
+        # gives loop gain > 1 (the hunting regime). Conservative = err high.
+        old = est.gain_mult
+        est.gain_mult = _median(est.bootstrap_ratios) * tun.bootstrap_margin
+        est.bootstrap_confident = True
+        # Re-sync the filtered Â to the new gain scale so N̂ is consistent the
+        # instant closed-loop takes over (no switchover transient).
+        if old > 0.0:
+            est.a_filt *= est.gain_mult / old
+        if est.l_filt is not None:
+            est.n_hat = max(0.0, est.l_filt - est.a_filt)
 
 
 # ---------------------------------------------------------------------------

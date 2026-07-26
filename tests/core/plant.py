@@ -27,6 +27,7 @@ from custom_components.light_conductor.core.model import (
     EngineConfig,
     InitialSnapshot,
     Profile,
+    RoomCalibration,
     RoomConfig,
     Vacancy,
 )
@@ -170,11 +171,36 @@ def closed_config(
     )
 
 
-def booted_engine(config: EngineConfig, *, sun: float, room_id: str = "lab") -> Engine:
-    """An engine booted past the startup grace with the room occupied (ACTIVE)."""
+def calibration_for(config: EngineConfig, room_id: str = "lab") -> RoomCalibration:
+    """A RoomCalibration marking the room calibrated with its config gains.
+
+    Square-law curves (the closed-loop tests all use square-law true curves), so
+    a room built this way models its plant exactly — the "calibrated" case.
+    """
+    room = next(r for r in config.rooms if r.room_id == room_id)
+    grid = (0.0, 0.25, 0.5, 0.75, 1.0)
+    return RoomCalibration(
+        room_id=room_id,
+        gains={c.channel_id: c.gain for c in room.channels},
+        curves={c.channel_id: tuple((b, b * b) for b in grid) for c in room.channels},
+    )
+
+
+def booted_engine(
+    config: EngineConfig, *, sun: float, room_id: str = "lab", calibrated: bool = True
+) -> Engine:
+    """An engine booted past the startup grace with the room occupied (ACTIVE).
+
+    ``calibrated`` (default) loads a matching calibration so the room enters
+    closed-loop immediately; ``False`` leaves it uncalibrated, so it runs
+    open-loop and learns its first-night bootstrap gain in shadow (§3.5/4.4).
+    """
     from custom_components.light_conductor.core.events import PresenceChanged, SunElevationChanged
 
-    eng = Engine(config, InitialSnapshot(sun_elevation=sun, occupancy={room_id: True}))
+    cals = {room_id: calibration_for(config, room_id)} if calibrated else None
+    eng = Engine(
+        config, InitialSnapshot(sun_elevation=sun, occupancy={room_id: True}), calibrations=cals
+    )
     # First event arms the startup grace; step past it before measuring.
     base = datetime(2026, 7, 1, 12, 0, 0)
     eng.handle(SunElevationChanged(sun), base)

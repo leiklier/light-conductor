@@ -249,6 +249,32 @@ def test_tiny_step_does_not_learn() -> None:
     assert not est.pending_valid
 
 
+def test_gain_attribution_window_rejects_cloud_drift() -> None:
+    """§3.4 (F5): a cloud drifting through the settle window (ΔL of the wrong
+    sign / magnitude vs the model) must not move gain_mult."""
+    # Wrong sign: predicted a rise, but lux fell (a cloud dimmed the room).
+    est = EstimatorState()
+    estimator.ingest_lux(est, 100.0, at(1, 20, 0, 0), DAY, 0.0, TUN)
+    estimator.record_step(est, est.l_filt, 20.0, at(1, 20, 0, 2), TUN)  # predicts +20
+    before = est.gain_mult
+    t = at(1, 20, 0, 2)
+    for _k in range(200):
+        estimator.ingest_lux(est, 40.0, t, DAY, 0.0, TUN)  # lux FELL (cloud)
+        t = t + timedelta(seconds=3)
+    assert est.gain_mult == before  # sign disagreement -> discarded
+
+    # Wrong magnitude: predicted +20 but a cloud added +200 (10x, outside window).
+    est2 = EstimatorState()
+    estimator.ingest_lux(est2, 100.0, at(1, 20, 0, 0), DAY, 0.0, TUN)
+    estimator.record_step(est2, est2.l_filt, 20.0, at(1, 20, 0, 2), TUN)
+    before2 = est2.gain_mult
+    t = at(1, 20, 0, 2)
+    for _k in range(200):
+        estimator.ingest_lux(est2, 320.0, t, DAY, 0.0, TUN)  # +220, > 3x predicted
+        t = t + timedelta(seconds=3)
+    assert est2.gain_mult == before2  # magnitude outside window -> discarded
+
+
 def test_none_lux_is_ignored_but_ages_toward_stale() -> None:
     """§3.5: a None lux (sensor unavailable) is ignored; the estimate stands."""
     est = EstimatorState()
@@ -289,6 +315,67 @@ def test_target_lux_per_role_tier() -> None:
     # Master gain scales, clamped to lux_max.
     prof2 = Profile(lux_active_day=800.0, lux_max=1000.0)
     assert estimator.target_lux(rs, Role.ACTIVE, prof2, 0.0, 2.0, TUN) == 1000.0
+
+
+def test_record_step_ignores_no_flux_move() -> None:
+    """§3.4: a step with no baseline or no flux change never arms an observation."""
+    est = EstimatorState()
+    estimator.record_step(est, None, 10.0, at(1, 20, 0), TUN)
+    assert not est.pending_valid
+    estimator.record_step(est, 5.0, 0.0, at(1, 20, 0), TUN)  # zero flux move
+    assert not est.pending_valid
+
+
+def _settled_obs(
+    est: EstimatorState,
+    *,
+    l_before: float,
+    l_now: float,
+    base: float,
+    shadow: bool,
+    calibrated: bool,
+) -> None:
+    """Craft a settled pending observation and fold one sample to consume it."""
+    est.l_filt = l_now
+    est.last_filt_at = at(1, 20, 0, 0)
+    est.pending_l_before = l_before
+    est.pending_base_delta = base
+    est.pending_settle_at = at(1, 20, 0, 1)
+    est.pending_valid = True
+    est.pending_shadow = shadow
+    # Fold a sample equal to l_now (no filter move) well past the settle window.
+    estimator.ingest_lux(est, l_now, at(1, 20, 5, 0), DAY, 0.0, TUN, calibrated=calibrated)
+
+
+def test_refine_skips_subdeadband_base() -> None:
+    """§3.4: the refine path ignores a predicted move below the deadband."""
+    est = EstimatorState()
+    before = est.gain_mult
+    _settled_obs(est, l_before=0.0, l_now=100.0, base=2.0, shadow=False, calibrated=True)
+    assert est.gain_mult == before  # base 2 < deadband_abs 5 -> no refine
+
+
+def test_settled_pending_with_missing_field_is_dropped() -> None:
+    """§3.4: a settled pending whose captured fields are incomplete is voided."""
+    est = EstimatorState()
+    est.l_filt = 10.0
+    est.last_filt_at = at(1, 20, 0, 0)
+    est.pending_valid = True
+    est.pending_l_before = None  # incomplete capture
+    est.pending_base_delta = 10.0
+    est.pending_settle_at = at(1, 20, 0, 1)
+    estimator.ingest_lux(est, 10.0, at(1, 20, 5, 0), DAY, 0.0, TUN)
+    assert not est.pending_valid  # dropped without a division
+
+
+def test_bootstrap_skips_tiny_or_wrong_sign_observation() -> None:
+    """§3.5/4.4: a sub-deadband or wrong-sign observed ΔL adds no bootstrap ratio."""
+    est = EstimatorState()
+    _settled_obs(est, l_before=8.0, l_now=10.0, base=0.1, shadow=True, calibrated=False)
+    assert est.bootstrap_ratios == []  # observed ΔL 2 < deadband_abs 5
+    est2 = EstimatorState()
+    _settled_obs(est2, l_before=20.0, l_now=10.0, base=0.1, shadow=True, calibrated=False)
+    assert est2.bootstrap_ratios == []  # observed ΔL -10 < 0 -> sign disagreement
 
 
 def test_band_fill_zero_demand_is_all_off() -> None:
