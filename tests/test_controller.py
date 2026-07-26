@@ -86,6 +86,32 @@ async def test_echo_then_foreign_override(hass: HomeAssistant, monkeypatch) -> N
     assert controller.engine.room_state("a").overridden is True
 
 
+async def test_poll_reconfirmation_is_not_foreign(hass: HomeAssistant, monkeypatch) -> None:
+    """A true-state poll re-reporting the standing setpoint LONG after the echo
+    TTL (Plejd: every ~3 min, as a uint16/256 float) must not read as a foreign
+    change — it would latch a false override within minutes of every command."""
+    controller, overridden, clock, env = await _partial_fade_setup(hass, monkeypatch)
+
+    clock[0] = env.start + env.ramp
+    set_light(hass, "light.a", "on", brightness=round(env.to * 255), transition=True)
+    await hass.async_block_till_done()
+    assert hass.states.get(overridden).state == "off"
+
+    # 3 minutes later: echo entries and fade corridor are long expired; the
+    # poll reports our own value quantized differently (float).
+    clock[0] = env.start + env.ramp + 180.0
+    set_light(hass, "light.a", "on", brightness=round(env.to * 255) - 0.25, transition=True)
+    await hass.async_block_till_done()
+    assert hass.states.get(overridden).state == "off"
+    assert controller.engine.room_state("a").overridden is False
+
+    # A genuinely different late report is still a foreign change.
+    clock[0] = env.start + env.ramp + 200.0
+    set_light(hass, "light.a", "on", brightness=255, transition=True)
+    await hass.async_block_till_done()
+    assert hass.states.get(overridden).state == "on"
+
+
 async def test_transition_fade_reports_no_override(hass: HomeAssistant, monkeypatch) -> None:
     """Reports tracking the fade front must NOT latch; an off-front yank does (F1)."""
     _controller, overridden, clock, env = await _partial_fade_setup(hass, monkeypatch)
