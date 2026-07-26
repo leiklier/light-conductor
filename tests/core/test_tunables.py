@@ -40,6 +40,10 @@ DOC_ROWS: dict[str, tuple[tuple[str, ...], tuple[object, ...]]] = {
     "tau_lux_up / tau_lux_down": (("tau_lux_up", "tau_lux_down"), (30.0, 60.0)),
     "night_prior_deg / tau_night_prior": (("night_prior_deg", "tau_night_prior"), (-6.0, 600.0)),
     "gain_learn_rate": (("gain_learn_rate",), (0.1,)),
+    "bootstrap_min_obs / bootstrap_margin": (
+        ("bootstrap_min_obs", "bootstrap_margin"),
+        (3, 1.5),
+    ),
     "lux_stale": (("lux_stale",), (120.0,)),
     "deadband_abs / deadband_rel": (("deadband_abs", "deadband_rel"), (5.0, 0.15)),
     "error_sustain / error_sustain_fast": (("error_sustain", "error_sustain_fast"), (20.0, 2.0)),

@@ -56,6 +56,12 @@ class Tunables:
     night_prior_deg: float = -6.0  # 3.3
     tau_night_prior: float = 600.0  # 3.3
     gain_learn_rate: float = 0.1  # 3.4
+    #: First-night bootstrap (§3.5/§4.4): an uncalibrated lux-sensor room runs
+    #: open-loop while the estimator learns a conservative room-scalar gain from
+    #: >= bootstrap_min_obs own-step observations, over-modelled by
+    #: bootstrap_margin so the resulting loop gain is < 1 (stable undershoot).
+    bootstrap_min_obs: int = 3  # 3.5/4.4
+    bootstrap_margin: float = 1.5  # 3.5/4.4
     lux_stale: float = 120.0  # 3.5
     deadband_abs: float = 5.0  # 3.6
     deadband_rel: float = 0.15  # 3.6

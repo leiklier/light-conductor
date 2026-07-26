@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from math import sqrt
 
-from .model import Band, ChannelConfig, RoomConfig
+from .model import Band, ChannelConfig, RoomCalibration, RoomConfig
 from .tunables import Tunables
 
 
@@ -50,6 +50,13 @@ class Curve:
         inverse = tuple((y, x) for x, y in self._points)
         return _interp(tuple(sorted(inverse)), f)
 
+    def points(self) -> tuple[tuple[float, float], ...]:
+        """Explicit ``(b, flux)`` points (square-law samples for the default)."""
+        if self._points is not None:
+            return self._points
+        grid = (0.0, 0.1, 0.25, 0.5, 0.75, 1.0)
+        return tuple((b, b * b) for b in grid)
+
 
 def _interp(points: tuple[tuple[float, float], ...], x: float) -> float:
     lo_x, lo_y = points[0]
@@ -66,15 +73,32 @@ def _interp(points: tuple[tuple[float, float], ...], x: float) -> float:
 
 
 class RoomPhotometry:
-    """Per-room photometric model (rules 4.1-4.3)."""
+    """Per-room photometric model (rules 4.1-4.3, 4.4).
 
-    __slots__ = ("_curves", "_gains", "calibrated")
+    Satisfies :class:`~.model.PhotometricModel` structurally, so the governor,
+    estimator and calibration modules consume it without importing this
+    module. ``calibrated`` flips True once a §4.4 sweep commits, or when a
+    persisted :class:`~.model.RoomCalibration` is loaded that matches the
+    room's channel set.
+    """
 
-    def __init__(self, room: RoomConfig) -> None:
+    __slots__ = ("_channel_ids", "_curves", "_gains", "calibrated")
+
+    def __init__(self, room: RoomConfig, calibration: RoomCalibration | None = None) -> None:
+        self._channel_ids: tuple[str, ...] = tuple(c.channel_id for c in room.channels)
         self._curves: dict[str, Curve] = {c.channel_id: Curve(c.curve) for c in room.channels}
         self._gains: dict[str, float] = {c.channel_id: c.gain for c in room.channels}
-        #: Flipped True only by the §4.4 sweep (a later PR).
+        #: Flipped True by the §4.4 sweep or a matching persisted calibration.
         self.calibrated: bool = False
+        if (
+            calibration is not None
+            and calibration.matches(self._channel_ids)
+            and calibration.is_valid()
+        ):
+            # Persisted calibration bound to this exact channel set AND
+            # well-formed (rule 5): load it. A mismatch or a malformed payload
+            # leaves the defaults + uncalibrated (safe by construction).
+            self.apply_calibration(calibration)
 
     def flux(self, channel_id: str, b: float) -> float:
         return self._curves[channel_id].flux(b)
@@ -84,6 +108,25 @@ class RoomPhotometry:
 
     def gain(self, channel_id: str) -> float:
         return self._gains[channel_id]
+
+    # -- calibration transaction (rule 4.4) --------------------------------
+
+    def export_calibration(self, room_id: str) -> RoomCalibration:
+        """Snapshot the current gains + curves as plain data (rule 4.4/5)."""
+        return RoomCalibration(
+            room_id=room_id,
+            gains=dict(self._gains),
+            curves={cid: c.points() for cid, c in self._curves.items()},
+        )
+
+    def apply_calibration(self, cal: RoomCalibration) -> None:
+        """Commit measured gains + curves (rule 4.4). Marks the room calibrated."""
+        for cid in self._channel_ids:
+            if cid in cal.gains:
+                self._gains[cid] = cal.gains[cid]
+            if cid in cal.curves:
+                self._curves[cid] = Curve(cal.curves[cid])
+        self.calibrated = True
 
 
 def allocate(

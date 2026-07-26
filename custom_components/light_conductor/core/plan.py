@@ -62,6 +62,22 @@ class ScheduleReview(Command):
     at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class CalibrationResult(Command):
+    """Outcome of a calibration sweep, for the adapter to fire as an HA event.
+
+    ``ok`` marks a transactional commit (rule 4.4); otherwise ``reason``
+    explains the rejection/abort. ``coverage`` reports, per channel, how many
+    of the ``calibration_levels`` produced a usable measurement (0..1) — the
+    adapter surfaces it on the calibration result entity (§10).
+    """
+
+    room_id: str
+    ok: bool
+    reason: str
+    coverage: tuple[tuple[str, float], ...] = ()
+
+
 @dataclass(slots=True)
 class Plan:
     """Accumulates the commands of one ``handle()`` call.
