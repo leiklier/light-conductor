@@ -108,7 +108,8 @@ ECHO_CT_TOL = 60
 #: Software stepping ramp cadence (~1 step/s, rule §8.2 adapter fallback).
 STEP_INTERVAL = 1.0
 
-#: Grace added to a native-transition fade envelope before it expires (§8.4, F1).
+#: Floor for the fade-corridor overshoot margin: deadline = start + ramp +
+#: max(ENVELOPE_MARGIN, 0.5*ramp) so a congested mesh tail never latches (§8.4, F1).
 ENVELOPE_MARGIN = 2.0
 
 
@@ -171,25 +172,43 @@ class _Echo:
 
 @dataclass(slots=True)
 class _Envelope:
-    """A live fade window for a native-transition command (§8.4, F1)."""
+    """A live fade-front corridor for a native-transition command (§8.4, F1).
 
-    lo: float
-    hi: float
+    The Plejd fork steps brightness linearly during a transition, so the
+    expected level at time ``t`` is ``front(t)`` — a linear ramp from ``frm`` to
+    ``to`` over ``ramp`` seconds. A report is an echo only while it tracks that
+    moving front (within a temporal ``slack`` window absorbing device
+    nonlinearity/jitter), so a foreign dial is caught the moment the front
+    advances past where it stuck — not blindly absorbed for the whole fade.
+    """
+
+    frm: float
+    to: float
+    start: float
+    ramp: float
     deadline: float
+
+    def front(self, t: float) -> float:
+        if self.ramp <= 0.0:
+            return self.to
+        p = (t - self.start) / self.ramp
+        p = 0.0 if p < 0.0 else 1.0 if p > 1.0 else p
+        return self.frm + (self.to - self.frm) * p
 
 
 class EchoLedger:
     """Per-entity record of own commands; classifies incoming reports (§8.4).
 
     A one-shot write records a level echo and/or a CT echo (consume-one). A
-    *native-transition* write additionally opens a fade **envelope**: while the
-    envelope is live, any report whose level falls inside ``[lo-tol, hi+tol]``
-    is an echo (the Plejd mesh reports intermediate levels ~every 150 ms during
-    a fade — rule 8.4 must not latch an override on those, F1). A report
-    *outside* the envelope is a genuine mid-fade interruption and latches. On
-    expiry the envelope is dropped; a normal final-value echo (recorded at
-    envelope creation) still absorbs a late final report. Wall-event entities
-    bypass all of this and always latch (§9.4).
+    *native-transition* write additionally opens a fade-front **corridor**
+    (:class:`_Envelope`): a report is an echo iff it lies within the front's
+    position over ``[now-slack, now+slack]`` (± ``ECHO_LEVEL_TOL``), so the
+    fork's ~150 ms intermediate fade reports are echoes but a dial that drifts
+    off the front — including one that sticks while a full-range fade sweeps
+    past it — is a foreign change and latches (§9.1). After the corridor
+    deadline a normal final-value echo (recorded at corridor creation) still
+    absorbs a late completion near target. Wall-event entities bypass all of
+    this and always latch (§9.4).
     """
 
     def __init__(self, ttl: float) -> None:
@@ -208,11 +227,11 @@ class EchoLedger:
     def record_envelope(
         self, entity_id: str, from_level: float, to_level: float, ramp: float
     ) -> None:
-        """Open a fade envelope and a final-value echo (F1)."""
+        """Open a fade-front corridor and a final-value echo (F1)."""
+        start = _monotonic()
+        margin = max(ENVELOPE_MARGIN, 0.5 * ramp)  # a congested mesh tail must not latch
         self._envelopes[entity_id] = _Envelope(
-            lo=min(from_level, to_level),
-            hi=max(from_level, to_level),
-            deadline=_monotonic() + ramp + ENVELOPE_MARGIN,
+            frm=from_level, to=to_level, start=start, ramp=ramp, deadline=start + ramp + margin
         )
         self.record(entity_id, to_level, None)
 
@@ -221,10 +240,13 @@ class EchoLedger:
         now = _monotonic()
         env = self._envelopes.get(entity_id)
         if env is not None:
-            if env.deadline < now:
+            if now > env.deadline:
                 del self._envelopes[entity_id]
-            elif level is not None and env.lo - ECHO_LEVEL_TOL <= level <= env.hi + ECHO_LEVEL_TOL:
-                return True  # intermediate fade sample — echo; keep the envelope live
+            elif level is not None:
+                slack = max(0.5, 0.3 * env.ramp)
+                a, b = env.front(now - slack), env.front(now + slack)
+                if min(a, b) - ECHO_LEVEL_TOL <= level <= max(a, b) + ECHO_LEVEL_TOL:
+                    return True  # tracking the fade front — echo; corridor stays live
         q = self._entries.get(entity_id)
         if not q:
             return False
@@ -285,10 +307,13 @@ class ChannelWriter:
         self._rate_cancel: CALLBACK_TYPE | None = None
         self._step_cancel: CALLBACK_TYPE | None = None
         self._step_state: tuple[float, float, int | None, int, bool] | None = None
+        self._stopped = False
 
     @callback
     def cancel(self) -> None:
-        """Cancel all armed timers (unload)."""
+        """Stop the writer for good (unload): no more pumps, cancel all timers."""
+        self._stopped = True
+        self._pending = None
         self._cancel_stepping()
         if self._rate_cancel is not None:
             self._rate_cancel()
@@ -319,7 +344,12 @@ class ChannelWriter:
 
     @callback
     def _pump(self) -> None:
-        if self._inflight or self._pending is None or self._rate_cancel is not None:
+        if (
+            self._stopped
+            or self._inflight
+            or self._pending is None
+            or self._rate_cancel is not None
+        ):
             return
         wait = self._min_interval - (_monotonic() - self._last_write)
         if wait > 0:
@@ -346,6 +376,8 @@ class ChannelWriter:
     @callback
     def _on_write_done(self, _task: asyncio.Task) -> None:
         self._inflight = False
+        if self._stopped:
+            return  # unloaded mid-flight — never re-pump / re-arm a timer
         self._pump()
 
     # -- one-shot writes ---------------------------------------------------
@@ -573,15 +605,18 @@ class Controller:
         if self._review_cancel is not None:
             self._review_cancel()
             self._review_cancel = None
+        # Stop writers FIRST (sets each _stopped so an in-flight write's
+        # completion can't re-pump or re-arm a rate timer), then cancel the
+        # in-flight write tasks, then the drain task.
         for w in self._writers.values():
             w.cancel()
+        for t in list(self._write_tasks):
+            t.cancel()
         if self._task is not None:
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
             self._task = None
-        for t in list(self._write_tasks):
-            t.cancel()
 
     # -- serial event loop --------------------------------------------------
     #
