@@ -21,9 +21,28 @@ What it does:
 - **Night path, TV mode, away-off, outdoor room** — built in.
 - **Calibrated photometry** — a one-button night sweep measures each lamp's
   lux gain and dimming curve at the room's sensor.
+- **Manual control is respected** — any wall rotary, HomeKit, or voice change
+  latches a per-room override; the conductor backs off until vacancy, sleep,
+  away, or a timeout.
+- **Whole-home setup** — one config entry for the house, prefilled by
+  discovery from your Home Assistant areas (lights, illuminance sensor,
+  presence-conductor occupancy), then editable room-by-room under Options.
+- **Recorder-friendly** — measurement sensors publish through a quantize +
+  rate-limit gate; volatile internals live on the diagnostics platform, never
+  in recorded attributes.
 
-Status: design phase. See `docs/ENGINE_SPEC.md` (normative),
-`docs/DECISION.md` (ADR), `docs/DISCOVERY.md` (live-instance analysis).
+Entities: `light.light_conductor_master` (master gain dimmer),
+`switch.light_conductor_enabled` / `_away_lighting`, per-outdoor-room
+occupational switch, and per room `sensor.<room>_role`,
+`binary_sensor.<room>_overridden`, and — for rooms with a lux sensor —
+`sensor.<room>_natural_lux` / `sensor.<room>_target_lux`,
+`button.<room>_record_light_response`, `event.<room>_calibration`.
+
+Status: implemented, **not yet released**. Install via HACS as a *custom
+repository* (`leiklier/light-conductor`); it is not in the default HACS store.
+See `docs/ENGINE_SPEC.md` (normative), `docs/DECISION.md` (ADR),
+`docs/DISCOVERY.md` (live-instance analysis), and `docs/MIGRATION.md`
+(retiring the legacy automations).
 
 ## Releases & channels
 
