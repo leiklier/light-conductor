@@ -457,6 +457,112 @@ def test_abort_plan_has_no_duplicate_channel_commands() -> None:
     assert len(channel_cmds) == len(set(channel_cmds))  # no channel commanded twice
 
 
+# --- partial coverage + delta-filtered slow sensor (rule 4.4) ------------
+
+
+def _field_tun(**over) -> Tunables:
+    """Tunables for a slow, delta-filtered sweep: long dwell + tiny write-blank
+    so the off-baseline (a None-first publish) lands post-blank."""
+    from dataclasses import replace
+
+    return replace(Tunables(), calibration_dwell=90.0, write_blank=0.5, **over)
+
+
+def _drive_field_sweep(
+    eng: Engine, plant: Plant, start: datetime, ticks: int = 600
+) -> list[CalibrationResult]:
+    """Drive a delta-filtered sweep: lux only on a delta-publish, ReviewTicks
+    otherwise so the engine still advances the dwell deadlines (as the real
+    controller's scheduled reviews would)."""
+    results: list[CalibrationResult] = []
+    t = start
+    for _ in range(ticks):
+        cmds = plant.tick_field(t)
+        if not cmds:
+            cmds = eng.handle(ReviewTick(), t)
+        results.extend(c for c in cmds if isinstance(c, CalibrationResult))
+        if eng.state.rooms["lab"].cal is None and results:
+            break
+        t = t + timedelta(seconds=1)
+    return results
+
+
+def test_fit_channel_partial_coverage_extrapolates_square_law() -> None:
+    """§4.4: a channel with only 50/75/100 sampled commits a monotone curve
+    whose low end follows a square-law arc scaled to the lowest sampled point."""
+    from custom_components.light_conductor.core import calibration
+    from custom_components.light_conductor.core.tunables import Tunables
+
+    levels = Tunables().calibration_levels
+    # A true square-law channel, gain 100, only the top three levels captured.
+    meas = {0.5: 25.0, 0.75: 56.25, 1.0: 100.0}
+    gain, curve = calibration._fit_channel(0.0, meas, levels)
+    assert abs(gain - 100.0) < 1.0  # recovered from the top sampled level
+    pts = dict(curve)
+    # Below the lowest sample (0.5) the arc is f_low * (b/0.5)**2 = b**2 here.
+    assert abs(pts[0.25] - 0.0625) < 1e-6  # 0.25**2 (scaled b²)
+    assert abs(pts[0.10] - 0.01) < 1e-6  # 0.10**2
+    # Monotone, spans (0,0)..(1,1).
+    fluxes = [f for _b, f in curve]
+    assert all(b - a >= -1e-9 for a, b in pairwise(fluxes))
+    assert curve[0] == (0.0, 0.0) and abs(curve[-1][1] - 1.0) < 1e-9
+
+
+def test_fit_channel_extrapolates_above_top_sample() -> None:
+    """§4.4: if the brightest level (1.0) was never captured, the gain is
+    square-law extrapolated to b=1 and the curve extended to (1, 1)."""
+    from custom_components.light_conductor.core import calibration
+    from custom_components.light_conductor.core.tunables import Tunables
+
+    levels = Tunables().calibration_levels
+    # A square-law channel, gain 100, only 0.5 and 0.75 captured (top < 1.0).
+    meas = {0.5: 25.0, 0.75: 56.25}
+    gain, curve = calibration._fit_channel(0.0, meas, levels)
+    assert abs(gain - 100.0) < 1.0  # g = contrib_top / top**2 = 56.25 / 0.5625
+    pts = dict(curve)
+    assert abs(pts[1.0] - 1.0) < 1e-9  # extended to (1, 1)
+    assert abs(pts[0.5] - 0.25) < 1e-6 and abs(pts[0.75] - 0.5625) < 1e-6
+    fluxes = [f for _b, f in curve]
+    assert all(b - a >= -1e-9 for a, b in pairwise(fluxes))  # monotone
+
+
+def test_delta_filtered_slow_sensor_recovers_gain() -> None:
+    """§4.4: on a delta-filtered slow sensor (Apollo LTR390 regime) the dim
+    levels never clear the on-device delta, so the channel calibrates from its
+    bright levels with partial coverage — and still recovers the true gain."""
+    chans = [Channel("c", gain=100.0, band=Band.PRIMARY)]
+    eng = _cal_engine(chans, tun=_field_tun())
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 0.0, delta=10.0, min_cadence=60.0)
+
+    start = BASE + timedelta(seconds=70)
+    eng.handle(StartCalibration("lab"), start)
+    results = _drive_field_sweep(eng, plant, start + timedelta(seconds=1))
+
+    assert results and results[0].ok
+    cov = dict(results[0].coverage)
+    assert cov["c"] < 1.0  # partial coverage — dim levels were sub-delta
+    fitted = eng.calibration_of("lab").gains["c"]
+    assert abs(fitted - 100.0) / 100.0 < 0.05  # gain recovered within tolerance
+
+
+def test_delta_filtered_two_levels_rejects_room() -> None:
+    """§4.4: a channel that only captures two levels (< CAL_MIN_POINTS) makes the
+    room reject missing_samples with the per-channel coverage map."""
+    chans = [Channel("c", gain=100.0, band=Band.PRIMARY)]
+    eng = _cal_engine(chans, tun=_field_tun())
+    # delta 40: only 75 % (56 lx) and 100 % (100 lx) clear it from the 0 baseline.
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 0.0, delta=40.0, min_cadence=60.0)
+
+    start = BASE + timedelta(seconds=70)
+    eng.handle(StartCalibration("lab"), start)
+    results = _drive_field_sweep(eng, plant, start + timedelta(seconds=1))
+
+    assert results and not results[0].ok
+    assert results[0].reason == "missing_samples"
+    assert dict(results[0].coverage)["c"] < 0.6  # only two of five levels
+    assert not eng._photo["lab"].calibrated  # nothing committed
+
+
 # --- persistence contract (rule 5) --------------------------------------
 
 
