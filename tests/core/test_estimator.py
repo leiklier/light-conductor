@@ -128,8 +128,8 @@ def test_staleness_trips_after_lux_stale() -> None:
     est = EstimatorState()
     assert estimator.is_stale(est, at(1, 20, 0), TUN)  # no sample yet
     estimator.ingest_lux(est, 10.0, at(1, 20, 0), DAY, 0.0, TUN)
-    assert not estimator.is_stale(est, at(1, 20, 1), TUN)
-    assert estimator.is_stale(est, at(1, 20, 3), TUN)  # > 120 s later
+    assert not estimator.is_stale(est, at(1, 20, 4), TUN)  # 240 s < lux_stale (300 s)
+    assert estimator.is_stale(est, at(1, 20, 6), TUN)  # > 300 s later
 
 
 # --- §3.6 deadband + sustain --------------------------------------------

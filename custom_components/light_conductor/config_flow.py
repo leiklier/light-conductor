@@ -98,6 +98,7 @@ _TUNABLE_UI: dict[str, tuple[float, float, float]] = {
     "circadian_tick": (30, 900, 30),
     "evening_cap_threshold": (0, 1, 0.05),
     "lux_stale": (30, 600, 10),
+    "daylight_full": (20, 1000, 10),
     "night_hold": (60, 1800, 30),
     "night_fade": (0, 60, 1),
     "sleep_fade": (0, 60, 1),

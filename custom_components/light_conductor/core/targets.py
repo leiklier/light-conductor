@@ -58,6 +58,27 @@ def apply_evening_cap(
     return {b: min(v, cap) for b, v in outputs.items()}
 
 
+def daylight_factor(n_hat: float, tun: Tunables) -> float:
+    """Daylight damping factor ``D`` for the untrusted open-loop path (rule 4.7).
+
+    ``D = clamp(1 - N̂ / daylight_full, daylight_min_factor, 1.0)``: bright
+    daylight pulls the open-loop tables down, darkness leaves them at full.
+    Replicates the legacy ``100 - 0.5·lux`` damping for rooms whose sensors read
+    daylight well but are nearly blind to their own lamps (§3.1). ``N̂`` for an
+    untrusted room ≈ the filtered lux.
+    """
+    if tun.daylight_full <= 0.0:
+        return 1.0
+    d = 1.0 - n_hat / tun.daylight_full
+    return max(tun.daylight_min_factor, min(1.0, d))
+
+
+def apply_daylight(outputs: dict[Band, float], n_hat: float, tun: Tunables) -> dict[Band, float]:
+    """Scale the ACTIVE/ADJACENT/BACKGROUND open-loop outputs by ``D`` (rule 4.7)."""
+    d = daylight_factor(n_hat, tun)
+    return {b: v * d for b, v in outputs.items()}
+
+
 def peak_output(outputs: dict[Band, float]) -> float:
     """The brightest band output (for diagnostics, rule 10)."""
     return max(outputs.values(), default=0.0)

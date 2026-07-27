@@ -354,13 +354,13 @@ def test_abort_on_sensor_going_stale_mid_sweep() -> None:
     plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 0.0)
     start = BASE + timedelta(seconds=70)
     eng.handle(StartCalibration("lab"), start)
-    # Run a few dwells feeding lux, then stop and jump past lux_stale (120 s).
+    # Run a few dwells feeding lux, then stop and jump past lux_stale (300 s).
     t = start + timedelta(seconds=1)
     for _ in range(8):
         plant.tick(t)
         t = t + timedelta(seconds=1)
     assert eng.state.rooms["lab"].cal is not None
-    out = eng.handle(ReviewTick(), t + timedelta(seconds=130))
+    out = eng.handle(ReviewTick(), t + timedelta(seconds=330))  # past lux_stale (300 s)
     results = [c for c in out if isinstance(c, CalibrationResult)]
     assert results and results[0].reason == "sensor_stale"
 

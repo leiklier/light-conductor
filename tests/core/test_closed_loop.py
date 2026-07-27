@@ -149,9 +149,9 @@ def test_stale_fallback_and_recovery_are_slew_bounded() -> None:
                 rate = abs(flux_of(c.level) - cs_prev[0]) / c.ramp_seconds
                 assert rate <= bound, f"switchover step {rate} exceeds slew {bound}"
 
-    # Stop feeding lux; drive review ticks so the sensor goes stale (> 120 s).
+    # Stop feeding lux; drive review ticks so the sensor goes stale (> 300 s).
     cs_prev = [flux_of(cs.commanded_b)]
-    t = START + timedelta(seconds=140)
+    t = START + timedelta(seconds=440)
     for _ in range(40):
         cs_prev[0] = flux_of(cs.commanded_b)
         cmds = eng.handle(ReviewTick(), t)

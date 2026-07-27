@@ -62,7 +62,7 @@ class Tunables:
     #: bootstrap_margin so the resulting loop gain is < 1 (stable undershoot).
     bootstrap_min_obs: int = 3  # 3.5/4.4
     bootstrap_margin: float = 1.5  # 3.5/4.4
-    lux_stale: float = 120.0  # 3.5
+    lux_stale: float = 300.0  # 3.5 (60 s publish cadence with dedup: 120 s was flappy)
     deadband_abs: float = 5.0  # 3.6
     deadband_rel: float = 0.15  # 3.6
     error_sustain: float = 20.0  # 3.6
@@ -71,6 +71,12 @@ class Tunables:
     # --- §4 photometry / allocation ---------------------------------------
     calibration_levels: tuple[float, ...] = (0.10, 0.25, 0.50, 0.75, 1.0)  # 4.4
     calibration_dwell: float = 4.0  # 4.4
+    #: Daylight-aware open-loop (rule 4.7): an untrusted lux-sensor room scales
+    #: its open-loop tables by D = clamp(1 - N̂/daylight_full, min_factor, 1.0),
+    #: replicating the legacy 100 - 0.5·lux daytime damping for sensors that read
+    #: daylight well but their own lamps barely.
+    daylight_full: float = 200.0  # 4.7
+    daylight_min_factor: float = 0.0  # 4.7
     band_overlap: float = 0.15  # 4.5
     boost_evening_max: float = 0.5  # 4.5
 

@@ -466,6 +466,19 @@ class Engine:
         else:
             role = base
             outputs = targets.role_outputs(room.profile, role, e, tun)
+            # Daylight-aware open-loop (§4.7): an untrusted lux room (fresh sensor,
+            # not yet trusted) scales its tier outputs by the daylight factor D,
+            # replicating the legacy 100 - 0.5·lux daytime damping. A stale sensor
+            # (no fresh N̂) falls through unscaled (D → 1), exactly as before.
+            # While a first-night bootstrap observation is settling the factor is
+            # held steady (latched) so N̂ drift does not re-command and disrupt it.
+            if shadow:
+                if rs.est.pending_valid and rs.est.daylight_latch is not None:
+                    d_factor = rs.est.daylight_latch
+                else:
+                    d_factor = targets.daylight_factor(rs.est.n_hat, tun)
+                rs.est.daylight_latch = d_factor
+                outputs = {b: v * d_factor for b, v in outputs.items()}
             outputs = gain.scale(outputs, g)
             outputs = targets.apply_evening_cap(outputs, e, room.profile, tun)
             channel_b = photometry.allocate(room.channels, outputs, e, tun)
