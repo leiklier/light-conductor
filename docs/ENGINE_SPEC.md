@@ -97,7 +97,20 @@ Sleep mode overrides per §6.1.
 `lux_active_day`, `lux_active_evening`, `lux_background`. ACTIVE interpolates
 between day and evening values by the circadian factor (2.3); ADJACENT and
 BACKGROUND derive from the interpolated ACTIVE target (1.5, and
-`background_fraction` with `background_cap`). OFF ⇒ 0.
+`background_fraction` with `background_cap`). An explicit nonzero
+`lux_background` acts as a floor under the derived BACKGROUND target. OFF ⇒ 0.
+
+A tier value of **0 means UNSET**, not "0 lx". An unset tier on a
+closed-loop room falls back to a fraction of that room's calibrated capacity
+`C = Σ_i g_i · f_i(1)` (the sum of the channels' calibrated lux gains at full
+output, scaled by the online gain multiplier so a bootstrap-confident room
+uses its learned scale): `lux_active_day → lux_day_frac · C`,
+`lux_active_evening → lux_evening_frac · C`, `lux_background →
+lux_background_frac · C`. This keeps a freshly calibrated room targeting real
+light instead of 0 lx (which would leave it dark). An explicit nonzero tier
+always wins. Uncalibrated/untrusted rooms never reach the closed loop — they
+run the daylight-scaled open-loop tables (§4.6/§4.7), where capacity is
+meaningless before calibration — so the fallback never applies to them.
 
 2.2 **Rooms without a lux sensor** use the same tier machinery but express
 targets directly as normalized channel output (open-loop tables, §4.6).
@@ -437,6 +450,7 @@ override latches (not restored — cleared on restart).
 | hold_passing_scale / hold_settled_scale | 0.3 / 4.0 | 1.3 |
 | adjacent_fraction / adjacent_cap | 0.5 / 30 lx | 1.5 |
 | background_fraction / background_cap | 0.25 / 15 lx | 2.1 |
+| lux_day_frac / lux_evening_frac / lux_background_frac | 0.6 / 0.2 / 0.05 | 2.1 |
 | living_memory | 900 s | 1.6 |
 | trigger_hold / door_close_hold | 300 s / 15 s | 1.7, 1.9 |
 | presence_blind_hold | 120 s | 1.1, 1.8 |
