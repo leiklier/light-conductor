@@ -10,12 +10,15 @@ from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.light_conductor.const import (
+    CONF_HOLD_SECONDS,
     CONF_LUX_SENSOR,
     CONF_PRESENCE_PRIMARY,
     CONF_ROOMS,
     CONF_SLEEP_ENTITY,
     DOMAIN,
 )
+
+from .adapter import options, room, setup_entry
 
 
 async def test_user_flow_creates_single_entry(hass: HomeAssistant) -> None:
@@ -93,3 +96,58 @@ async def test_options_round_trip(hass: HomeAssistant) -> None:
     )
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert entry.options[CONF_SLEEP_ENTITY] == "binary_sensor.sleep"
+
+
+async def test_options_edit_channel(hass: HomeAssistant) -> None:
+    """Per-channel editing: rooms → channels → pick room → pick channel → form."""
+    entry = await setup_entry(hass, options([room("k", ["light.k"])]))
+
+    async def configure(flow_id: str, data: dict) -> dict:
+        return await hass.config_entries.options.async_configure(flow_id, data)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await configure(result["flow_id"], {"next_step_id": "rooms"})
+    result = await configure(result["flow_id"], {"next_step_id": "channels"})
+    assert result["step_id"] == "channels"
+    result = await configure(result["flow_id"], {"room_id": "k"})
+    assert result["step_id"] == "pick_channel"
+    result = await configure(result["flow_id"], {"entity": "light.k"})
+    assert result["step_id"] == "channel_detail"
+    # Edit band/weight/dim_floor; omit fixed_ct ⇒ CT-capable.
+    result = await configure(
+        result["flow_id"], {"band": "accent", "weight": 2.5, "dim_floor": 0.05}
+    )
+    assert result["type"] == FlowResultType.MENU  # back at the rooms menu
+    result = await configure(result["flow_id"], {"next_step_id": "init"})
+    result = await configure(result["flow_id"], {"next_step_id": "finish"})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    ch = entry.options[CONF_ROOMS][0]["channels"][0]
+    assert ch["entity"] == "light.k"
+    assert ch["band"] == "accent"
+    assert ch["weight"] == 2.5
+    assert ch["fixed_ct"] is None  # empty fixed_ct ⇒ CT-capable
+    assert ch["dim_floor"] == 0.05
+
+
+async def test_options_room_detail_accepts_hold_seconds(hass: HomeAssistant) -> None:
+    """hold_seconds is now in the room_detail schema (no more extra-keys reject)."""
+    entry = await setup_entry(hass, options([room("k", ["light.k"])]))
+
+    async def configure(flow_id: str, data: dict) -> dict:
+        return await hass.config_entries.options.async_configure(flow_id, data)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await configure(result["flow_id"], {"next_step_id": "rooms"})
+    result = await configure(result["flow_id"], {"next_step_id": "edit_room"})
+    result = await configure(result["flow_id"], {"room_id": "k"})
+    assert result["step_id"] == "room_detail"
+    result = await configure(
+        result["flow_id"],
+        {"name": "K", "shape": "presence", "channels": ["light.k"], "hold_seconds": 240},
+    )
+    assert result["type"] == FlowResultType.MENU  # accepted, back at the rooms menu
+    result = await configure(result["flow_id"], {"next_step_id": "init"})
+    result = await configure(result["flow_id"], {"next_step_id": "finish"})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_ROOMS][0][CONF_HOLD_SECONDS] == 240

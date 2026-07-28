@@ -46,6 +46,7 @@
         "menu_options": {
           "add_room": "Add a room",
           "edit_room": "Edit a room",
+          "channels": "Edit channels",
           "remove_room": "Remove a room",
           "init": "Back"
         }
@@ -86,6 +87,7 @@
           "trigger_entities": "Triggers (door / pass-by)",
           "living_group": "Living group",
           "tv_mode": "Participates in TV mode",
+          "hold_seconds": "Active hold (seconds)",
           "vacancy": "Vacancy behaviour",
           "active_day_output": "Active output (day)",
           "active_evening_output": "Active output (evening)",
@@ -94,6 +96,27 @@
           "night_output": "Night-path output",
           "tv_output": "TV output (occupied)",
           "tv_output_empty": "TV output (empty)"
+        }
+      },
+      "channels": {
+        "title": "Edit channels",
+        "data": {
+          "room_id": "Room"
+        }
+      },
+      "pick_channel": {
+        "title": "Channels: {room}",
+        "data": {
+          "entity": "Channel"
+        }
+      },
+      "channel_detail": {
+        "title": "Channel: {channel}",
+        "data": {
+          "band": "Allocation band",
+          "weight": "Weight",
+          "fixed_ct": "Fixed colour temperature (K, empty = CT-capable)",
+          "dim_floor": "Dim floor"
         }
       },
       "tunables": {

@@ -46,6 +46,7 @@
         "menu_options": {
           "add_room": "Legg til rom",
           "edit_room": "Rediger rom",
+          "channels": "Rediger kanaler",
           "remove_room": "Fjern rom",
           "init": "Tilbake"
         }
@@ -86,6 +87,7 @@
           "trigger_entities": "Utløsere (dør / passering)",
           "living_group": "Oppholdsgruppe",
           "tv_mode": "Deltar i TV-modus",
+          "hold_seconds": "Aktiv holdetid (sekunder)",
           "vacancy": "Oppførsel ved tomt rom",
           "active_day_output": "Aktiv utgang (dag)",
           "active_evening_output": "Aktiv utgang (kveld)",
@@ -94,6 +96,27 @@
           "night_output": "Nattsti-utgang",
           "tv_output": "TV-utgang (opptatt)",
           "tv_output_empty": "TV-utgang (tomt)"
+        }
+      },
+      "channels": {
+        "title": "Rediger kanaler",
+        "data": {
+          "room_id": "Rom"
+        }
+      },
+      "pick_channel": {
+        "title": "Kanaler: {room}",
+        "data": {
+          "entity": "Kanal"
+        }
+      },
+      "channel_detail": {
+        "title": "Kanal: {channel}",
+        "data": {
+          "band": "Tildelingsbånd",
+          "weight": "Vekt",
+          "fixed_ct": "Fast fargetemperatur (K, tom = CT-kapabel)",
+          "dim_floor": "Dimmegulv"
         }
       },
       "tunables": {
