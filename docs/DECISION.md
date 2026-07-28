@@ -180,15 +180,26 @@ that assumption:
 
 Decision: (1) **capacity-scale the deadband** — the absolute component is
 capped at `deadband_capacity_frac × C` and floored at `deadband_floor` (sensor
-noise), so a low-capacity room reaches sub-5-lx targets while a high-capacity
-room is unchanged (the `min` picks the 5-lx `deadband_abs`); (2) add a
-**capacity gate** — closed loop additionally requires `C ≥
-min_closed_loop_capacity` (4 lx), below which the room uses the existing
+noise). Note the scaling applies to EVERY room with `C < deadband_abs /
+deadband_capacity_frac` (25 lx at defaults) — e.g. C = 10 gets a 2-lx deadband
+— not only the two motivating rooms; targets scale with the same C, so control
+error stays proportional. Only rooms with `C ≥ 25` are strictly unchanged (the
+`min` picks the 5-lx `deadband_abs`). Rooms landing in the 5–20 lx band should
+be watched for hunting against their sensor's real noise floor after
+calibration. (2) add a **capacity gate** — closed loop additionally requires
+`C ≥ min_closed_loop_capacity` (4 lx), below which the room uses the existing
 daylight-aware open-loop path (§4.7), the same code path an uncalibrated room
-takes. The gain-arming thresholds (§3.4/§3.5) deliberately keep gating on the
-fixed `deadband_abs` — a sub-delta room not arming bootstrap is a safety
-property, not a bug. Rejected alternative: lowering `deadband_abs` globally —
-it would make high-capacity rooms hunt on sensor noise.
+takes. The gate has no hysteresis: a calibrated room whose `gain_mult` drifts
+across the boundary could oscillate closed↔open loop — accepted because both
+live rooms sit far from it (sofakrok `C ∈ [4.45, 17.78]` over the full
+`gain_mult` range; kjøkken's sub-deadband deltas freeze its `gain_mult`
+entirely); add hysteresis before configuring a room whose capacity sits near
+4–6 lx. A calibrated `C < 4` room with no explicit open-loop output tiers
+resolves role outputs to 0 via §4.7 and stays dark — configure output tiers
+for any such room. The gain-arming thresholds (§3.4/§3.5) deliberately keep
+gating on the fixed `deadband_abs` — a sub-delta room not arming bootstrap is
+a safety property, not a bug. Rejected alternative: lowering `deadband_abs`
+globally — it would make high-capacity rooms hunt on sensor noise.
 
 ## Open questions — RESOLVED (user, 2026-07-25)
 

@@ -134,11 +134,12 @@ async def test_command_ledger_seeded_on_start(hass: HomeAssistant) -> None:
     assert controller._last_commanded["light.b"] == 0.0
 
 
-async def test_reload_poll_reconfirmation_after_seed_is_not_foreign(hass: HomeAssistant) -> None:
-    """§8: a reload wipes _last_commanded; seeding it from live state means the
-    integration's poll re-report of the standing pre-reload level is consumed,
-    not latched as a false override (the reload false-latch incident). A
-    genuinely different report still latches."""
+async def test_poll_reconfirmation_after_startup_seed_is_not_foreign(hass: HomeAssistant) -> None:
+    """§8: controller start seeds _last_commanded from live state, so the
+    integration's poll re-report of the standing level is consumed, not latched
+    as a false override (the reload false-latch incident). The seed path runs
+    identically on fresh setup and options reload (both via async_start); this
+    exercises it through setup. A genuinely different report still latches."""
     set_light(hass, "light.a", "on", brightness=128, transition=True)
     # Presence ON so the room is ACTIVE (not off-worthy) — a latched override on a
     # vacant room would release on the next reconcile, masking the test.

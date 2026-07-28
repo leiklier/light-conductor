@@ -145,6 +145,16 @@ def test_capacity_above_gate_uses_closed_loop() -> None:
     assert _target_of(diag) is not None  # closed-loop path (above the capacity gate)
 
 
+def test_capacity_exactly_at_gate_uses_closed_loop() -> None:
+    """§4.5: the gate is inclusive — C == min_closed_loop_capacity closes the loop."""
+    chans = [Channel("c", gain=4.0)]  # C = 4.0 == min_closed_loop_capacity default
+    cfg = closed_config(chans, lux_active_day=3.0, out_active_day={Band.PRIMARY: 0.8})
+    eng = booted_engine(cfg, sun=DAY, calibrated=True)
+    _feed(eng, 1.0, START, n=3)
+    diag = eng.handle(ReviewTick(), START + timedelta(seconds=8))
+    assert _target_of(diag) is not None  # ≥ is inclusive: at-boundary room is closed-loop
+
+
 def test_capacity_gate_respects_the_tunable() -> None:
     """§4.5: lowering min_closed_loop_capacity lets a tiny room close the loop."""
     from datetime import datetime
