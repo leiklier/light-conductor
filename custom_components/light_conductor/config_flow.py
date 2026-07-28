@@ -155,11 +155,17 @@ def _pct(_default: float) -> NumberSelector:
 
 
 def _opt(key: str, source: dict[str, Any]) -> Any:
-    """A ``vol.Optional`` marker pre-filled from the current value (blank if unset)."""
+    """A ``vol.Optional`` marker pre-filled from the current value (blank if unset).
+
+    Prefill uses ``suggested_value`` — never ``default``: a voluptuous default
+    is re-injected into omitted submissions, which makes an optional field
+    impossible to CLEAR through the flow (this bit both the sleep-entity swap
+    and soverom's offline lux sensor in the field).
+    """
     current = source.get(key)
     if current in (None, [], ""):
         return vol.Optional(key)
-    return vol.Optional(key, default=current)
+    return vol.Optional(key, description={"suggested_value": current})
 
 
 # ---------------------------------------------------------------------------

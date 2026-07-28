@@ -247,3 +247,21 @@ async def test_unload_mid_burst_is_clean(hass: HomeAssistant) -> None:
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=2))
     await hass.async_block_till_done()
     assert len(turn_on) == before
+
+
+async def test_fresh_install_and_restore_miss_boot_observe_only(hass, monkeypatch) -> None:
+    """Fail-safe boundary: without restore data the conductor must boot
+    observe-only (a restore miss must never bring it up live)."""
+    set_light(hass, "light.a", transition=True)
+    hass.states.async_set("binary_sensor.pa", "off")
+    entry = await setup_entry(
+        hass,
+        options([room("a", ["light.a"], presence="binary_sensor.pa")]),
+        enabled=False,  # no restore cache seeded
+    )
+    calls = async_mock_service(hass, "light", "turn_on")
+    controller = hass.data[DOMAIN][entry.entry_id]
+    assert controller.enabled is False
+    hass.states.async_set("binary_sensor.pa", "on")
+    await hass.async_block_till_done()
+    assert not calls  # occupied room, but observe-only: zero commands
