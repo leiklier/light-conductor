@@ -317,6 +317,36 @@ def test_target_lux_per_role_tier() -> None:
     assert estimator.target_lux(rs, Role.ACTIVE, prof2, 0.0, 2.0, TUN) == 1000.0
 
 
+def test_target_lux_capacity_fraction_defaults() -> None:
+    """§2.1: an UNSET (0) lux tier falls back to a capacity fraction; an explicit
+    tier overrides the auto default; the background floor uses lux_background_frac."""
+    from custom_components.light_conductor.core.model import Profile, Role, RoomState
+
+    rs = RoomState()
+    c = 200.0
+    auto = Profile()  # every tier 0 (UNSET), lux_max default 1000
+    # ACTIVE, day (E=0) -> lux_day_frac·C; evening (E=1) -> lux_evening_frac·C.
+    assert estimator.target_lux(rs, Role.ACTIVE, auto, 0.0, 1.0, TUN, c) == TUN.lux_day_frac * c
+    assert estimator.target_lux(rs, Role.ACTIVE, auto, 1.0, 1.0, TUN, c) == TUN.lux_evening_frac * c
+    # E midway interpolates the two capacity fractions.
+    mid = estimator.target_lux(rs, Role.ACTIVE, auto, 0.5, 1.0, TUN, c)
+    assert abs(mid - 0.5 * (TUN.lux_day_frac + TUN.lux_evening_frac) * c) < 1e-9
+    # An explicit tier always wins over the auto default.
+    explicit = Profile(lux_active_day=30.0)
+    assert estimator.target_lux(rs, Role.ACTIVE, explicit, 0.0, 1.0, TUN, c) == 30.0
+    # BACKGROUND fraction path (small C): min(0.6·40·0.25, cap 15)=6, floor 0.05·40=2.
+    assert estimator.target_lux(rs, Role.BACKGROUND, auto, 0.0, 1.0, TUN, 40.0) == 6.0
+    # BACKGROUND floor lifts above the capped fraction once lux_background_frac·C
+    # exceeds background_cap: C=2000 -> floor 100 > min(0.6·2000·0.25, 15)=15.
+    assert estimator.target_lux(rs, Role.BACKGROUND, auto, 0.0, 1.0, TUN, 2000.0) == 100.0
+    # An explicit lux_background is a floor under BACKGROUND (still capacity-fraction
+    # ACTIVE): min(0.6·200·0.25,15)=15 floored by 50 -> 50.
+    bg = Profile(lux_background=50.0)
+    assert estimator.target_lux(rs, Role.BACKGROUND, bg, 0.0, 1.0, TUN, c) == 50.0
+    # No capacity + unset tiers -> 0 (an uncalibrated/no-capacity room is untouched).
+    assert estimator.target_lux(rs, Role.ACTIVE, auto, 0.0, 1.0, TUN, 0.0) == 0.0
+
+
 def test_record_step_ignores_no_flux_move() -> None:
     """§3.4: a step with no baseline or no flux change never arms an observation."""
     est = EstimatorState()

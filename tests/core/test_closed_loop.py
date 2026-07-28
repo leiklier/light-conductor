@@ -167,6 +167,86 @@ def test_stale_fallback_and_recovery_are_slew_bounded() -> None:
         t = t + timedelta(seconds=2)
 
 
+# --- (g) capacity-fraction defaults for UNSET lux tiers (§2.1) ------------
+
+
+def test_calibrated_unset_tiers_target_capacity_fraction_by_day() -> None:
+    """§2.1: a calibrated room whose lux tiers are all UNSET (0) targets a
+    fraction of its capacity C (0.6·C by day) — the light turns ON and settles
+    near the auto target instead of parking dark at a 0 lx tier (the live
+    blackout that motivated this fix)."""
+    chans = [Channel("c", gain=200.0)]  # calibrated: model gain == true gain
+    cfg = closed_config(chans, lux_active_day=0.0, lux_active_evening=0.0, lux_background=0.0)
+    eng = booted_engine(cfg, sun=20.0)  # sun high -> E=0 full day
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 30.0)  # some natural light
+
+    _run(plant, START, 120)
+    cs = eng.state.rooms["lab"].channels["c"]
+    assert cs.commanded_b > 0.05  # did NOT park dark on a 0 lx tier
+    settled = plant.true_lux(START + timedelta(seconds=240))
+    assert abs(settled - 0.6 * 200.0) < 20.0  # settled near the auto target 0.6·C = 120
+
+
+def test_calibrated_unset_tiers_evening_interpolates_to_evening_fraction() -> None:
+    """§2.1: the auto target interpolates day↔evening — an evening room settles
+    near lux_evening_frac·C, not the day fraction."""
+    chans = [Channel("c", gain=200.0)]
+    cfg = closed_config(chans, lux_active_day=0.0, lux_active_evening=0.0, lux_background=0.0)
+    # 22:30 local + sun below the sun-ramp floor -> E clamps to 1 (full evening).
+    eng = booted_engine(cfg, sun=-3.0)
+    start = datetime(2026, 7, 1, 22, 45, 0)
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 10.0)
+    _run(plant, start, 200)
+    assert abs(eng.circadian_factor(start) - 1.0) < 1e-9  # full evening
+    settled = plant.true_lux(start + timedelta(seconds=400))
+    assert abs(settled - 0.2 * 200.0) < 20.0  # near lux_evening_frac·C = 40
+
+
+def test_explicit_tier_overrides_capacity_default() -> None:
+    """§2.1: an explicit nonzero lux_active_day wins over the capacity default."""
+    chans = [Channel("c", gain=200.0)]
+    cfg = closed_config(chans, lux_active_day=30.0, lux_active_evening=0.0, lux_background=0.0)
+    eng = booted_engine(cfg, sun=20.0)
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 5.0)
+    _run(plant, START, 160)
+    settled = plant.true_lux(START + timedelta(seconds=320))
+    assert abs(settled - 30.0) < 12.0  # tracks the explicit 30 lx, not 0.6·C = 120
+
+
+def test_bootstrap_confident_room_uses_bootstrap_capacity() -> None:
+    """§2.1/§3.5: a bootstrap-confident (uncalibrated) room whose tiers are UNSET
+    resolves its auto target from the bootstrap-scaled capacity (default gains ·
+    the learned scalar), so once closed-loop engages the room is lit — not dark."""
+    from custom_components.light_conductor.core.events import MasterGainChanged
+
+    chans = [Channel("c", gain=180.0, model_gain=1.0)]  # uncalibrated: config gain 1.0
+    cfg = closed_config(
+        chans,
+        lux_active_day=0.0,
+        lux_active_evening=0.0,
+        lux_background=0.0,
+        out_active_day={Band.PRIMARY: 0.4},
+    )
+    eng = booted_engine(cfg, sun=20.0, calibrated=False)
+    est = eng.state.rooms["lab"].est
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 30.0)
+
+    nudges = {104: 72.0, 318: 88.0, 532: 100.0}  # three open-loop steps -> three obs
+    t = START
+    for _ in range(430):  # ~860 s at dt=2 s
+        secs = int((t - START).total_seconds())
+        if secs in nudges:
+            eng.handle(MasterGainChanged(nudges[secs]), t)
+        plant.tick(t)
+        t = t + timedelta(seconds=2)
+
+    assert est.bootstrap_confident  # first-night bootstrap committed
+    # C = gain_mult · default gain (1.0) is the learned room scalar; the auto day
+    # target 0.6·C is real light -> the room is lit, not parked at a 0 lx tier.
+    cs = eng.state.rooms["lab"].channels["c"]
+    assert cs.commanded_b > 0.05
+
+
 # --- (h) uncalibrated room: open-loop then first-night bootstrap ---------
 
 

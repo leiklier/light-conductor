@@ -22,6 +22,10 @@ DOC_ROWS: dict[str, tuple[tuple[str, ...], tuple[object, ...]]] = {
         ("background_fraction", "background_cap"),
         (0.25, 15.0),
     ),
+    "lux_day_frac / lux_evening_frac / lux_background_frac": (
+        ("lux_day_frac", "lux_evening_frac", "lux_background_frac"),
+        (0.6, 0.2, 0.05),
+    ),
     "living_memory": (("living_memory",), (900.0,)),
     "trigger_hold / door_close_hold": (("trigger_hold", "door_close_hold"), (300.0, 15.0)),
     "presence_blind_hold": (("presence_blind_hold",), (120.0,)),

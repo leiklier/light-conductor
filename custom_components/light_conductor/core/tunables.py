@@ -30,6 +30,13 @@ class Tunables:
     adjacent_cap: float = 30.0  # 1.5 (lux; closed-loop only)
     background_fraction: float = 0.25  # 2.1
     background_cap: float = 15.0  # 2.1 (lux; closed-loop only)
+    #: Capacity-fraction defaults for an UNSET (0) closed-loop lux tier (§2.1):
+    #: the tier falls back to this fraction of the room's calibrated capacity
+    #: C = Σ_i g_i·f_i(1)·m. Engineering constants — not room-editable; the
+    #: operator surface is the per-room tiers themselves (an explicit tier wins).
+    lux_day_frac: float = 0.6  # 2.1
+    lux_evening_frac: float = 0.2  # 2.1
+    lux_background_frac: float = 0.05  # 2.1
     living_memory: float = 900.0  # 1.6
     trigger_hold: float = 300.0  # 1.7, 1.9
     door_close_hold: float = 15.0  # 1.9

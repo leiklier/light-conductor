@@ -544,7 +544,13 @@ class Engine:
         corrects, a single model-predicted (feed-forward) write lands near goal.
         """
         tun = self.tun
-        t_prime = estimator.target_lux(rs, role, room.profile, e, g, tun)
+        # Room calibrated capacity C = Σ_i g_i·f_i(1)·m from the CURRENT effective
+        # photometry gains · the online multiplier, so a bootstrap-confident room
+        # (default gains · a learned scalar) resolves an unset tier too (§2.1).
+        capacity = rs.est.gain_mult * sum(
+            photo.gain(ch.channel_id) * photo.flux(ch.channel_id, 1.0) for ch in room.channels
+        )
+        t_prime = estimator.target_lux(rs, role, room.profile, e, g, tun, capacity)
         a_now = estimator.a_hat(rs, photo)
         n = rs.est.n_hat
         deadband = max(tun.deadband_abs, tun.deadband_rel * t_prime)
