@@ -493,7 +493,11 @@ class Controller:
         self.diagnostics: dict[str, RoomDiagnostics] = {}
         self.master_pct: float = self.engine.state.master_pct
         self.master_on: bool = self.engine.state.master_on
-        self.enabled: bool = self.engine.state.enabled
+        # Fail-safe boundary (§10/§11): a fresh install AND a missed restore
+        # both boot observe-only — the conductor must never go live unbidden
+        # after a restart. The enabled switch's restore submits
+        # SetEnabled(True) when the stored state was on.
+        self.enabled: bool = False
 
         self._build_indexes()
 

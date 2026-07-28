@@ -6,6 +6,7 @@ re-submitted through the controller so the engine and the entity agree.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from homeassistant.components.switch import SwitchEntity
@@ -20,6 +21,8 @@ from .controller import Controller
 from .core.events import OccupationalChanged, SetAwayLighting, SetEnabled
 from .core.model import RoomShape
 from .entity import LightConductorEntity, room_device_info
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -48,6 +51,12 @@ class _RestoreSwitch(LightConductorEntity, SwitchEntity, RestoreEntity):
         last = await self.async_get_last_state()
         if last is not None:
             self._apply(last.state == "on")
+        else:
+            # The engine's fail-safe default stands (enabled=False ⇒ observe
+            # only). A missed restore must be visible, not silent: a restore
+            # miss on the enabled switch is how a conductor could otherwise
+            # go live unbidden after a restart.
+            _LOGGER.warning("No restore data for %s; using the fail-safe default", self.entity_id)
 
     def _apply(self, on: bool) -> None:  # pragma: no cover - overridden
         raise NotImplementedError

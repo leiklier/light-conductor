@@ -22,8 +22,11 @@ from .adapter import entity_id_for, options, room, set_light, setup_entry
 async def test_master_gain_restore(hass: HomeAssistant) -> None:
     # Restored 200/255 ≈ 78 % ⇒ clearly above the 50 % neutral default. The
     # object id is language-pinned, so the restore key is light_conductor_master.
-    mock_restore_cache(hass, (State("light.light_conductor_master", "on", {"brightness": 200}),))
-    entry = await setup_entry(hass, options([room("k", ["light.k"])]))
+    entry = await setup_entry(
+        hass,
+        options([room("k", ["light.k"])]),
+        restore=(State("light.light_conductor_master", "on", {"brightness": 200}),),
+    )
     controller = hass.data[DOMAIN][entry.entry_id]
     assert controller.engine.state.master_pct > 70.0
     assert controller.master_on is True

@@ -9,9 +9,12 @@ from __future__ import annotations
 from typing import Any
 
 from homeassistant.const import ATTR_SUPPORTED_FEATURES
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import entity_registry as er
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    mock_restore_cache,
+)
 
 from custom_components.light_conductor.const import (
     CONF_ACTIVITY_SENSOR,
@@ -112,7 +115,19 @@ def options(rooms: list[dict], *, instant: bool = True, **globals_: Any) -> dict
     return opts
 
 
-async def setup_entry(hass: HomeAssistant, opts: dict[str, Any]) -> MockConfigEntry:
+async def setup_entry(
+    hass: HomeAssistant,
+    opts: dict[str, Any],
+    enabled: bool = True,
+    restore: tuple[State, ...] = (),
+) -> MockConfigEntry:
+    states = tuple(restore)
+    if enabled:
+        # Production fail-safe boots observe-only; tests go live the way a
+        # real install does — through the enabled switch's restored state.
+        states = (State("switch.light_conductor_enabled", "on"), *states)
+    if states:
+        mock_restore_cache(hass, states)
     entry = MockConfigEntry(domain=DOMAIN, title="Test", data={}, options=opts)
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
