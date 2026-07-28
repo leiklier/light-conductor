@@ -73,6 +73,51 @@ async def test_entity_object_ids_are_language_pinned(hass: HomeAssistant) -> Non
     assert eid("balkong_occupational") == "switch.light_conductor_balkong_occupational"
 
 
+def test_channels_sensor_marks_all_attributes_unrecorded() -> None:
+    """§10: every attribute is MATCH_ALL-unrecorded so churn never records."""
+    from homeassistant.const import MATCH_ALL
+
+    from custom_components.light_conductor.sensor import ChannelsSensor
+
+    assert ChannelsSensor._unrecorded_attributes == frozenset({MATCH_ALL})
+
+
+async def test_channels_sensor_disabled_by_default_and_reports_commanded(
+    hass: HomeAssistant,
+) -> None:
+    """§10: the per-room channels debug sensor is disabled by default; once the
+    operator enables it, its state/attributes reflect the commanded outputs."""
+    set_light(hass, "light.a", "on", brightness=128, transition=True)
+    hass.states.async_set("binary_sensor.pa", "on")
+    entry = await setup_entry(
+        hass,
+        options([room("a", ["light.a"], presence="binary_sensor.pa", max_output=0.5)]),
+    )
+    reg = er.async_get(hass)
+    eid = entity_id_for(hass, entry, "a_channels")
+    assert eid == "sensor.light_conductor_a_channels"
+    ent = reg.async_get(eid)
+    assert ent.disabled_by is not None  # opt-in debug sensor
+    assert hass.states.get(eid) is None  # disabled → no state object
+
+    # Enable it and reload; now it publishes the per-channel commanded outputs.
+    reg.async_update_entity(eid, disabled_by=None)
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    state = hass.states.get(eid)
+    assert state is not None
+    controller = hass.data[DOMAIN][entry.entry_id]
+    cs = controller.engine.room_state("a").channels["light.a"]
+    pct = round(cs.commanded_b * 100.0)
+    assert int(float(state.state)) == pct  # peak commanded output, whole percent
+    assert state.attributes.get("unit_of_measurement") == "%"
+    ch = state.attributes["light.a"]
+    assert ch["output_pct"] == pct
+    assert ch["on"] is True
+    assert "ct" in ch  # whole-Kelvin int or None
+
+
 async def test_master_off_event(hass: HomeAssistant) -> None:
     entry = await setup_entry(hass, options([room("k", ["light.k"])]))
     controller = hass.data[DOMAIN][entry.entry_id]

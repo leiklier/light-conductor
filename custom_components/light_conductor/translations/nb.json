@@ -150,7 +150,8 @@
         }
       },
       "natural_lux": { "name": "Naturlig lys" },
-      "target_lux": { "name": "Mållys" }
+      "target_lux": { "name": "Mållys" },
+      "channels": { "name": "Kanalutganger" }
     },
     "binary_sensor": {
       "overridden": { "name": "Overstyrt" }

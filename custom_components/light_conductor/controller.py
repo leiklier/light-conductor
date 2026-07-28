@@ -604,6 +604,16 @@ class Controller:
             tunables=self.tun,
             calibrations=self._load_calibrations(),
         )
+        # Seed the command ledger from the live snapshot BEFORE subscriptions
+        # arm (§8, §11.1): a config-entry reload rebuilds this controller and
+        # wipes the per-channel _last_commanded tracking. The Plejd 3-min true-
+        # state poll then re-reports the PRE-reload standing level as a float and,
+        # with no ledger match, latches a FALSE manual override ~seconds later.
+        # Seeding each channel from its current on/off state makes that first
+        # poll re-report tolerance-match and be consumed. Accepted trade-off: a
+        # genuine manual change made in the snapshot→first-report gap is absorbed
+        # once (documented in §8).
+        self._seed_command_ledger()
         self._subscribe()
         self._started = True
         # Re-read live presence/activity now that subscriptions are armed: a state
@@ -615,6 +625,21 @@ class Controller:
         self._reconfirm_live_state()
         # First review kicks self-scheduling and publishes initial state.
         self.submit(ReviewTick())
+
+    def _seed_command_ledger(self) -> None:
+        """Seed per-channel ``_last_commanded`` from current light state (§8/§11.1).
+
+        For every configured channel, adopt its current observed normalized level
+        as the standing setpoint (0.0 when off, the brightness/255 when on), using
+        the SAME normalization + tolerance semantics the poll-reconfirmation path
+        in ``_on_light_change`` consumes. An unavailable channel is left unseeded
+        (it reconciles on availability recovery). Idempotent on a fresh setup —
+        the first reconcile's own command overwrites the seed as usual.
+        """
+        for cid in self._channel_room:
+            level = _obs_level(self.hass.states.get(cid))
+            if level is not None:  # 0.0 (off) is a valid setpoint; None (dead) is not
+                self._last_commanded[cid] = level
 
     def _reconfirm_live_state(self) -> None:
         """Re-submit live presence/activity per room after arming subscriptions.

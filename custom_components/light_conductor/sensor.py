@@ -10,13 +10,15 @@ internals never appear as recorded attributes — they live in ``diagnostics.py`
 
 from __future__ import annotations
 
+from typing import Any
+
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import LIGHT_LUX
+from homeassistant.const import LIGHT_LUX, MATCH_ALL, PERCENTAGE, EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -74,6 +76,8 @@ async def async_setup_entry(
         rid = room[CONF_ROOM_ID]
         name = room.get(CONF_NAME, rid)
         entities.append(RoleSensor(controller, rid, name))
+        # Per-channel commanded outputs — a disabled-by-default debug sensor (§10).
+        entities.append(ChannelsSensor(controller, rid, name))
         # Natural- and target-lux are closed-loop quantities: only meaningful
         # for a room with a lux sensor (§10), like the calibration button.
         if room.get(CONF_LUX_SENSOR):
@@ -106,6 +110,87 @@ class RoleSensor(_RoomSensor):
     def native_value(self) -> str | None:
         diag = self._diag()
         return diag.role.value if diag is not None else None
+
+
+class ChannelsSensor(_RoomSensor):
+    """Per-channel commanded outputs for debugging (§10, recorder-safe).
+
+    Disabled by default (registry opt-in): the operator enables it only while
+    debugging. State is the room's peak commanded output as a whole percent;
+    attributes carry one entry per channel — ``{output_pct, ct, on}`` — sourced
+    from the engine's per-channel commanded state (the same data diagnostics.py
+    exposes). ALL attributes are unrecorded (``MATCH_ALL``) so even when enabled
+    the per-channel churn never reaches the recorder, and pushes are gated to a
+    changed commanded value AND a ≥ ``MIN_PUBLISH_INTERVAL`` interval — it
+    piggybacks the engine publish signal (no new timers), preserving the
+    zero-write recorder discipline the gated lux sensors uphold.
+    """
+
+    _attr_translation_key = "channels"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
+    _unrecorded_attributes = frozenset({MATCH_ALL})
+
+    def __init__(self, controller: Controller, room_id: str, name: str) -> None:
+        super().__init__(controller, room_id, name, "channels")
+        self._state: int | None = None
+        self._attrs: dict[str, dict[str, Any]] = {}
+        self._sig: tuple[Any, ...] | None = None
+        self._last = 0.0
+
+    def _compute(self) -> tuple[int, dict[str, dict[str, Any]]]:
+        try:
+            channels = self.controller.engine.room_state(self._room_id).channels
+        except KeyError:  # room not seeded yet (defensive)
+            return 0, {}
+        attrs: dict[str, dict[str, Any]] = {}
+        peak = 0.0
+        for cid, cs in channels.items():
+            peak = max(peak, cs.commanded_b)
+            attrs[cid] = {
+                "output_pct": round(cs.commanded_b * 100.0),
+                "ct": None if cs.commanded_ct is None else round(cs.commanded_ct),
+                "on": cs.on,
+            }
+        return round(peak * 100.0), attrs
+
+    @staticmethod
+    def _signature(state: int, attrs: dict[str, dict[str, Any]]) -> tuple[Any, ...]:
+        # Quantized identity: sub-percent / sub-kelvin wiggle is not a change.
+        return (
+            state,
+            tuple(sorted((cid, a["output_pct"], a["ct"], a["on"]) for cid, a in attrs.items())),
+        )
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self._state, self._attrs = self._compute()
+        self._sig = self._signature(self._state, self._attrs)
+        # Leave ``_last`` at 0.0 so the FIRST commanded change after startup
+        # publishes promptly (the controller builds a snapshot-less engine before
+        # async_start rebuilds + reconciles it — the real value lands after add);
+        # the interval only throttles *subsequent* churn.
+
+    @callback
+    def _on_engine_update(self) -> None:
+        state, attrs = self._compute()
+        sig = self._signature(state, attrs)
+        if sig == self._sig:
+            return  # no commanded value changed — nothing to record
+        if _monotonic() - self._last < MIN_PUBLISH_INTERVAL:
+            return  # rate-limit churn (recorder discipline; a later tick pushes)
+        self._state, self._attrs, self._sig = state, attrs, sig
+        self._last = _monotonic()
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> int | None:
+        return self._state
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return self._attrs
 
 
 class _GatedSensor(_RoomSensor):

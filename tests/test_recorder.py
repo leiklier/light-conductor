@@ -44,17 +44,18 @@ async def test_recorder_discipline_sweep(hass: HomeAssistant, monkeypatch) -> No
 
 
 EXPECTED_INVENTORY = (
-    # A lux room (k) + an outdoor room (b):
+    # A lux room (k) + an outdoor room (b). Every room gets a disabled-by-default
+    # channels debug sensor (registered, so it counts in the registry inventory).
     3  # hub: master, enabled, away_lighting
     + 1  # outdoor extra: occupational
-    + 6  # room k (lux): role, overridden, natural_lux, target_lux, button, event
-    + 2  # room b (no lux): role, overridden
+    + 7  # room k (lux): role, channels, overridden, natural_lux, target_lux, button, event
+    + 3  # room b (no lux): role, channels, overridden
 )
 
 
 def test_entity_inventory_floor() -> None:
     """The entity inventory for a known home is pinned (kept in sync by hand)."""
-    assert EXPECTED_INVENTORY == 12
+    assert EXPECTED_INVENTORY == 14
 
 
 async def test_entity_inventory_count(hass: HomeAssistant) -> None:
