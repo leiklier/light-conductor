@@ -52,6 +52,9 @@ from .const import (
     CONF_EVENING_CAP,
     CONF_HOLD_SECONDS,
     CONF_LIVING_GROUP,
+    CONF_LUX_ACTIVE_DAY,
+    CONF_LUX_ACTIVE_EVENING,
+    CONF_LUX_BACKGROUND,
     CONF_LUX_SENSOR,
     CONF_NAME,
     CONF_NEIGHBOURS,
@@ -151,6 +154,13 @@ def _select_multi(options: list[str]) -> SelectSelector:
 def _pct(_default: float) -> NumberSelector:
     return NumberSelector(
         NumberSelectorConfig(min=0, max=1, step=0.01, mode=NumberSelectorMode.BOX)
+    )
+
+
+def _lux() -> NumberSelector:
+    """A lux (illuminance) box for a closed-loop tier target (§2.1)."""
+    return NumberSelector(
+        NumberSelectorConfig(min=0, max=2000, step=1, mode=NumberSelectorMode.BOX)
     )
 
 
@@ -478,6 +488,13 @@ class LightConductorOptionsFlow(OptionsFlow):
             ):
                 if key in user_input:
                     profile[key] = user_input[key]
+            # Closed-loop lux tiers are clearable (suggested_value idiom): a blank
+            # submission omits the key ⇒ drop it so the room reverts to auto.
+            for key in (CONF_LUX_ACTIVE_DAY, CONF_LUX_ACTIVE_EVENING, CONF_LUX_BACKGROUND):
+                if user_input.get(key) not in (None, ""):
+                    profile[key] = user_input[key]
+                else:
+                    profile.pop(key, None)
             updated[CONF_PROFILE] = profile
             self._options[CONF_ROOMS] = [
                 updated if r[CONF_ROOM_ID] == self._room_id else r for r in rooms
@@ -539,6 +556,13 @@ class LightConductorOptionsFlow(OptionsFlow):
                     CONF_TV_OUTPUT_EMPTY,
                     default=profile.get(CONF_TV_OUTPUT_EMPTY, DEFAULT_TV_OUTPUT_EMPTY),
                 ): _pct(DEFAULT_TV_OUTPUT_EMPTY),
+                # Closed-loop lux tiers (§2.1): optional; prefilled via
+                # suggested_value so a blank submission CLEARS the field ⇒ auto
+                # (a capacity fraction). Only meaningful for a room with a lux
+                # sensor; harmlessly ignored open-loop.
+                _opt(CONF_LUX_ACTIVE_DAY, profile): _lux(),
+                _opt(CONF_LUX_ACTIVE_EVENING, profile): _lux(),
+                _opt(CONF_LUX_BACKGROUND, profile): _lux(),
             }
         )
         return self.async_show_form(

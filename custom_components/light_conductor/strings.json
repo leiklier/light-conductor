@@ -95,7 +95,10 @@
           "evening_output_cap": "Evening output cap",
           "night_output": "Night-path output",
           "tv_output": "TV output (occupied)",
-          "tv_output_empty": "TV output (empty)"
+          "tv_output_empty": "TV output (empty)",
+          "lux_active_day": "Lux target — active (day)",
+          "lux_active_evening": "Lux target — active (evening)",
+          "lux_background": "Lux target — background floor"
         }
       },
       "channels": {
