@@ -72,8 +72,20 @@ class Tunables:
     lux_stale: float = 300.0  # 3.5 (60 s publish cadence with dedup: 120 s was flappy)
     deadband_abs: float = 5.0  # 3.6
     deadband_rel: float = 0.15  # 3.6
+    #: Capacity-scaled control deadband (§3.6): the absolute deadband component is
+    #: itself capped at ``deadband_capacity_frac·C`` (room calibrated capacity)
+    #: so a low-capacity room (e.g. sofakrok, C≈8.8 lx) can reach targets that sit
+    #: below the fixed 5-lx floor, then floored at ``deadband_floor`` (sensor-noise
+    #: floor). A high-capacity room (C≥25) is unchanged (min picks deadband_abs).
+    deadband_capacity_frac: float = 0.2  # 3.6
+    deadband_floor: float = 0.5  # 3.6 (lx, sensor-noise floor)
     error_sustain: float = 20.0  # 3.6
     error_sustain_fast: float = 2.0  # 3.6
+    #: Closed-loop capacity gate (§4.5/§4.7): a room enters closed loop only when
+    #: its capacity C ≥ this floor. Below it (e.g. kjøkken, C≈2 lx) the room runs
+    #: the daylight-aware open-loop path even once calibrated — servoing ~1 lx
+    #: targets against ~1 lx sensor quantization would never visibly light.
+    min_closed_loop_capacity: float = 4.0  # 4.5/4.7 (lx)
 
     # --- §4 photometry / allocation ---------------------------------------
     calibration_levels: tuple[float, ...] = (0.10, 0.25, 0.50, 0.75, 1.0)  # 4.4

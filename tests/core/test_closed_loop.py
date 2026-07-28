@@ -247,6 +247,45 @@ def test_bootstrap_confident_room_uses_bootstrap_capacity() -> None:
     assert cs.commanded_b > 0.05
 
 
+# --- (g2) capacity-scaled deadband: low-capacity rooms reach their tiers ---
+
+
+def test_low_capacity_room_corrects_below_the_fixed_deadband() -> None:
+    """§3.6: a sofakrok-like calibrated room (single channel, C≈8.9) whose auto
+    day target is 0.6·C ≈ 5.3 lx lights the room. Under the OLD fixed 5-lx
+    deadband its ~3.8-lx deficit (target 5.3 - ambient 1.5) sat below threshold
+    and the ACTIVE role held it dark (the live incident); the capacity-scaled
+    deadband (0.2·C ≈ 1.78 lx) clears it."""
+    chans = [Channel("c", gain=8.9)]  # calibrated: model gain == true gain
+    cfg = closed_config(chans, lux_active_day=0.0, lux_active_evening=0.0, lux_background=0.0)
+    eng = booted_engine(cfg, sun=20.0)  # sun high → E=0 full day, room ACTIVE
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 1.5)  # dark-corner ambient
+
+    _run(plant, START, 160)
+    cs = eng.state.rooms["lab"].channels["c"]
+    assert cs.commanded_b > 0.3  # lit — did NOT hold dark below the 5-lx deadband
+    settled = plant.true_lux(START + timedelta(seconds=320))
+    assert abs(settled - 0.6 * 8.9) < 2.0  # settled near the auto day target 0.6·C ≈ 5.3
+
+
+def test_low_capacity_evening_tier_is_reachable() -> None:
+    """§3.6: the evening tier of a low-capacity room becomes reachable — under
+    the fixed 5-lx deadband an evening target of a few lx was mathematically
+    unreachable (error < 5 always), so the room never lit at night."""
+    chans = [Channel("c", gain=8.9)]
+    cfg = closed_config(chans, lux_active_day=0.0, lux_active_evening=3.0, lux_background=0.0)
+    # 22:45 local + sun below the ramp floor → E clamps to 1 (full evening).
+    eng = booted_engine(cfg, sun=-3.0)
+    start = datetime(2026, 7, 1, 22, 45, 0)
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 0.5)
+    _run(plant, start, 200)
+    assert abs(eng.circadian_factor(start) - 1.0) < 1e-9  # full evening
+    cs = eng.state.rooms["lab"].channels["c"]
+    assert cs.commanded_b > 0.2  # the evening tier lit the room
+    settled = plant.true_lux(start + timedelta(seconds=400))
+    assert abs(settled - 3.0) < 2.0  # near the explicit 3-lx evening target
+
+
 # --- (h) uncalibrated room: open-loop then first-night bootstrap ---------
 
 

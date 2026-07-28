@@ -443,8 +443,17 @@ class Engine:
         # learns its first-night gain in shadow (§3.5/4.4).
         fresh = room.has_lux_sensor and not estimator.is_stale(rs.est, now, tun)
         trusted = photo.calibrated or rs.est.bootstrap_confident
-        closed = res is None and fresh and trusted
-        shadow = res is None and fresh and not trusted
+        # Closed-loop capacity gate (§4.5/§4.7): a trustworthy gain model is not
+        # enough — the room must also produce enough light for its own sensor to
+        # servo against. A room whose capacity C is below min_closed_loop_capacity
+        # (e.g. kjøkken, C≈2 lx) would otherwise chase ~1 lx tiers against ~1 lx
+        # quantization and never visibly light, a regression vs its working
+        # open-loop mode. Below the gate it falls through the SAME daylight-aware
+        # open-loop path an uncalibrated room uses (the ``shadow`` branch).
+        capacity = self._room_capacity(rs, room, photo)
+        eligible = trusted and capacity >= tun.min_closed_loop_capacity
+        closed = res is None and fresh and eligible
+        shadow = res is None and fresh and not eligible
         correcting = False
         target_lux: float | None = None
 
@@ -462,7 +471,7 @@ class Engine:
         elif closed:
             role = base
             channel_b, correcting, target_lux = self._closed_loop(
-                room, rs, base, prev_role, e, g, now, photo, plan
+                room, rs, base, prev_role, e, g, now, photo, capacity, plan
             )
         else:
             role = base
@@ -524,6 +533,18 @@ class Engine:
         natural = rs.est.n_hat if (closed or shadow) else None
         return self._diag(room, rs, role, max(channel_b.values(), default=0.0), natural, target_lux)
 
+    def _room_capacity(self, rs: RoomState, room: RoomConfig, photo: RoomPhotometry) -> float:
+        """Room calibrated capacity ``C = Σ_i g_i·f_i(1)·m`` (§2.1, §4.5).
+
+        The sum of the channels' calibrated lux gains at full output scaled by the
+        online gain multiplier ``m``, so a bootstrap-confident room (default gains
+        · a learned scalar) resolves it too. Computed once at the mode-decision
+        point and reused by the capacity gate and the closed loop (no duplication).
+        """
+        return rs.est.gain_mult * sum(
+            photo.gain(ch.channel_id) * photo.flux(ch.channel_id, 1.0) for ch in room.channels
+        )
+
     def _closed_loop(
         self,
         room: RoomConfig,
@@ -534,6 +555,7 @@ class Engine:
         g: float,
         now: datetime,
         photo: RoomPhotometry,
+        capacity: float,
         plan: Plan,
     ) -> tuple[dict[str, float], bool, float]:
         """Feed-forward closed-loop control for one room (§3.6/§4.5).
@@ -542,18 +564,17 @@ class Engine:
         inside the deadband (or the sustain has not elapsed) the room *holds*
         its current commanded outputs — the governor then emits nothing. When it
         corrects, a single model-predicted (feed-forward) write lands near goal.
+        ``capacity`` is the room capacity C the engine already computed for the
+        capacity gate (§4.5) — reused here for the auto tiers and the deadband.
         """
         tun = self.tun
-        # Room calibrated capacity C = Σ_i g_i·f_i(1)·m from the CURRENT effective
-        # photometry gains · the online multiplier, so a bootstrap-confident room
-        # (default gains · a learned scalar) resolves an unset tier too (§2.1).
-        capacity = rs.est.gain_mult * sum(
-            photo.gain(ch.channel_id) * photo.flux(ch.channel_id, 1.0) for ch in room.channels
-        )
         t_prime = estimator.target_lux(rs, role, room.profile, e, g, tun, capacity)
         a_now = estimator.a_hat(rs, photo)
         n = rs.est.n_hat
-        deadband = max(tun.deadband_abs, tun.deadband_rel * t_prime)
+        # Capacity-scaled control deadband (§3.6) — see estimator.control_deadband:
+        # the absolute component is capped at a fraction of the room capacity so a
+        # low-capacity room can reach targets below the fixed 5-lx floor.
+        deadband = estimator.control_deadband(tun, capacity, t_prime)
         error = t_prime - (n + a_now)
         fast_edge = role is not prev_role
         correct, review = estimator.should_correct(rs.est, error, deadband, now, fast_edge, tun)
