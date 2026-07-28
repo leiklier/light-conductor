@@ -388,6 +388,11 @@ class EstimatorState:
     #: Whether the pending observation feeds the first-night bootstrap (armed on
     #: observed ΔL) rather than the calibrated §3.4 refine (rule 3.5/4.4).
     pending_shadow: bool = False
+    #: Latched §4.7 daylight factor held steady while a shadow observation
+    #: settles: N̂-driven damping would otherwise nudge the open-loop output by
+    #: sub-min_delta amounts each tick, re-commanding and disrupting the
+    #: first-night bootstrap measurement. ``None`` until the first daylight scale.
+    daylight_latch: float | None = None
 
 
 _CAL_EPS = 1e-6

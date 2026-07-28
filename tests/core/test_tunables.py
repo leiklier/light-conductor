@@ -44,12 +44,16 @@ DOC_ROWS: dict[str, tuple[tuple[str, ...], tuple[object, ...]]] = {
         ("bootstrap_min_obs", "bootstrap_margin"),
         (3, 1.5),
     ),
-    "lux_stale": (("lux_stale",), (120.0,)),
+    "lux_stale": (("lux_stale",), (300.0,)),
     "deadband_abs / deadband_rel": (("deadband_abs", "deadband_rel"), (5.0, 0.15)),
     "error_sustain / error_sustain_fast": (("error_sustain", "error_sustain_fast"), (20.0, 2.0)),
     "calibration_levels / calibration_dwell": (
         ("calibration_levels", "calibration_dwell"),
         ((0.10, 0.25, 0.50, 0.75, 1.0), 4.0),
+    ),
+    "daylight_full / daylight_min_factor": (
+        ("daylight_full", "daylight_min_factor"),
+        (200.0, 0.0),
     ),
     "band_overlap / boost_evening_max": (("band_overlap", "boost_evening_max"), (0.15, 0.5)),
     "ct_day / ct_evening / ct_min_evening": (

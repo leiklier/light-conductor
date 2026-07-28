@@ -63,6 +63,7 @@ from .model import (
     RoomCalibration,
     RoomConfig,
     RoomDiagnostics,
+    RoomShape,
     RoomState,
 )
 from .photometry import RoomPhotometry
@@ -466,6 +467,19 @@ class Engine:
         else:
             role = base
             outputs = targets.role_outputs(room.profile, role, e, tun)
+            # Daylight-aware open-loop (§4.7): an untrusted lux room (fresh sensor,
+            # not yet trusted) scales its tier outputs by the daylight factor D,
+            # replicating the legacy 100 - 0.5·lux daytime damping. A stale sensor
+            # (no fresh N̂) falls through unscaled (D → 1), exactly as before.
+            # While a first-night bootstrap observation is settling the factor is
+            # held steady (latched) so N̂ drift does not re-command and disrupt it.
+            if shadow:
+                if rs.est.pending_valid and rs.est.daylight_latch is not None:
+                    d_factor = rs.est.daylight_latch
+                else:
+                    d_factor = targets.daylight_factor(rs.est.n_hat, tun)
+                rs.est.daylight_latch = d_factor
+                outputs = {b: v * d_factor for b, v in outputs.items()}
             outputs = gain.scale(outputs, g)
             outputs = targets.apply_evening_cap(outputs, e, room.profile, tun)
             channel_b = photometry.allocate(room.channels, outputs, e, tun)
@@ -499,6 +513,14 @@ class Engine:
                 estimator.record_step(rs.est, rs.est.l_filt, base_delta, now, tun, shadow=shadow)
 
         plan.review_at(roles.next_review(rs, now))
+        # Outdoor rooms follow the sun ramp, but at an E plateau (overnight, or a
+        # winter afternoon before sunset) the global circadian scheduler goes
+        # quiet — the next clock boundary is hours away — so an outdoor room that
+        # is ON would linger in its dusk background until an unrelated event
+        # instead of turning off promptly as E descends past outdoor_on_threshold.
+        # Self-schedule a circadian-cadence re-check while it is lit (shadow audit).
+        if room.shape is RoomShape.OUTDOOR and res is not None and not res.off:
+            plan.review_at(now + timedelta(seconds=tun.circadian_tick))
         natural = rs.est.n_hat if (closed or shadow) else None
         return self._diag(room, rs, role, max(channel_b.values(), default=0.0), natural, target_lux)
 

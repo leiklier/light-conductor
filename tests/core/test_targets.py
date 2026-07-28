@@ -56,3 +56,36 @@ def test_evening_cap_clamps_high_e() -> None:
 def test_peak_output() -> None:
     assert targets.peak_output({Band.ACCENT: 0.2, Band.PRIMARY: 0.5}) == 0.5
     assert targets.peak_output({}) == 0.0
+
+
+# --- §4.7 daylight-aware open-loop ---------------------------------------
+
+
+def test_daylight_factor_scales_with_natural_light() -> None:
+    """§4.7: D = clamp(1 - N̂/daylight_full, min, 1). Default daylight_full=200."""
+    assert targets.daylight_factor(0.0, TUN) == 1.0  # dark → full output
+    assert abs(targets.daylight_factor(150.0, TUN) - 0.25) < 1e-9  # 1 - 150/200
+    assert targets.daylight_factor(100.0, TUN) == 0.5
+
+
+def test_daylight_factor_floors_at_min_and_clamps_high() -> None:
+    """§4.7: N̂ ≥ daylight_full floors at daylight_min_factor; clamps to [min, 1]."""
+    from dataclasses import replace
+
+    assert targets.daylight_factor(200.0, TUN) == 0.0  # floor (default min 0.0)
+    assert targets.daylight_factor(500.0, TUN) == 0.0  # never negative
+    floored = replace(TUN, daylight_min_factor=0.2)
+    assert targets.daylight_factor(1000.0, floored) == 0.2  # honours the floor
+
+
+def test_apply_daylight_scales_every_band() -> None:
+    d = targets.apply_daylight({Band.PRIMARY: 0.8, Band.ACCENT: 0.4}, 150.0, TUN)
+    assert abs(d[Band.PRIMARY] - 0.2) < 1e-9  # 0.8 * 0.25
+    assert abs(d[Band.ACCENT] - 0.1) < 1e-9  # 0.4 * 0.25
+
+
+def test_daylight_disabled_when_full_nonpositive() -> None:
+    from dataclasses import replace
+
+    off = replace(TUN, daylight_full=0.0)
+    assert targets.daylight_factor(150.0, off) == 1.0  # guarded, no zero-division

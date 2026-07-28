@@ -51,6 +51,18 @@ class Outcome:
 
 _ONGOING = Outcome(done=False)
 
+#: A level completes as soon as this many post-blank samples have settled (rule
+#: 4.4 early advance) — a fast sensor sweeps quickly; a slow, delta-filtered one
+#: still runs to ``calibration_dwell``.
+CAL_MIN_SAMPLES_PER_LEVEL = 1
+
+#: A channel commits from its sampled points once at least this many of its
+#: levels were captured (rule 4.4 partial coverage); the room rejects
+#: ``missing_samples`` if any channel falls short.
+CAL_MIN_POINTS = 3
+
+_CAL_EPS = 1e-9
+
 
 # ---------------------------------------------------------------------------
 # Start gating (rule 4.4)
@@ -148,22 +160,30 @@ def step(rs: RoomState, state: EngineState, now: datetime, plan: Plan, tun: Tuna
     if est.last_report_at is None or (now - est.last_report_at).total_seconds() > tun.lux_stale:
         return abort(rs, plan, "sensor_stale", now, tun)
 
-    if now < cal.deadline:
+    # Early advance (rule 4.4): a level completes as soon as
+    # CAL_MIN_SAMPLES_PER_LEVEL post-blank samples have settled (the blank
+    # window in ingest_lux already guarantees the minimum settle), otherwise at
+    # the full calibration_dwell for a slow, delta-filtered sensor.
+    if now < cal.deadline and len(cal.samples) < CAL_MIN_SAMPLES_PER_LEVEL:
         plan.review_at(cal.deadline)
         return _ONGOING
 
     settled = cal.samples[-1] if cal.samples else None
-    if settled is None:
-        return abort(rs, plan, "missing_samples", now, tun)
 
     if cal.phase is CalPhase.SETTLE_OFF:
+        # The off baseline is essential (every contribution subtracts it); a
+        # settle window that yields no dark sample still aborts (rule 4.4).
+        if settled is None:
+            return abort(rs, plan, "missing_samples", now, tun)
         cal.off_baseline = settled
         return _enter_level(rs, 0, 0, now, plan, tun)
 
-    # DWELL: record this (channel, level) then advance.
+    # DWELL: record this (channel, level) if a sample landed; a level whose
+    # window elapsed with no sample is simply skipped (partial coverage, 4.4).
     cid = cal.channel_order[cal.channel_index]
     level = tun.calibration_levels[cal.level_index]
-    cal.measurements.setdefault(cid, {})[level] = settled
+    if settled is not None:
+        cal.measurements.setdefault(cid, {})[level] = settled
 
     nxt_level = cal.level_index + 1
     if nxt_level < len(tun.calibration_levels):
@@ -191,16 +211,37 @@ def _enter_level(
 
 
 def _commit(rs: RoomState, plan: Plan, now: datetime, tun: Tunables) -> Outcome:
-    """All channels swept: build the calibration and hand it back (rule 4.4)."""
+    """All channels swept: build the calibration and hand it back (rule 4.4).
+
+    Transactional: the room commits only if EVERY channel reached
+    ``CAL_MIN_POINTS`` sampled levels; otherwise it rejects ``missing_samples``
+    with the per-channel coverage map and restores the prior light state.
+    """
     cal = rs.cal
     assert cal is not None
+    coverage = _coverage(cal, tun.calibration_levels)
+    if any(len(cal.measurements.get(cid, {})) < CAL_MIN_POINTS for cid in cal.channel_order):
+        _restore_light(rs, plan, now)
+        rs.cal = None
+        return Outcome(
+            done=True, ok=False, reason="missing_samples", coverage=coverage, restore_light=True
+        )
     base = cal.off_baseline or 0.0
     gains: dict[str, float] = {}
     curves: dict[str, tuple[tuple[float, float], ...]] = {}
     for cid in cal.channel_order:
         meas = cal.measurements.get(cid, {})
         gains[cid], curves[cid] = _fit_channel(base, meas, tun.calibration_levels)
-    coverage = _coverage(cal, tun.calibration_levels)
+    if any(g <= 0.0 for g in gains.values()):
+        # A channel whose sampled levels never rose above the off baseline
+        # yields gain 0 — RoomCalibration.validate would reject it on the next
+        # load anyway, silently reverting the room after a restart. Reject at
+        # commit time instead so the operator sees it.
+        _restore_light(rs, plan, now)
+        rs.cal = None
+        return Outcome(
+            done=True, ok=False, reason="dark_channel", coverage=coverage, restore_light=True
+        )
     calibration = RoomCalibration(room_id="", gains=gains, curves=curves)
     rs.cal = None
     return Outcome(done=True, ok=True, reason="ok", calibration=calibration, coverage=coverage)
@@ -209,25 +250,55 @@ def _commit(rs: RoomState, plan: Plan, now: datetime, tun: Tunables) -> Outcome:
 def _fit_channel(
     base: float, meas: dict[float, float], levels: tuple[float, ...]
 ) -> tuple[float, tuple[tuple[float, float], ...]]:
-    """Gain + relative-flux points for one channel (rule 4.4).
+    """Gain + relative-flux points for one channel from its SAMPLED levels (4.4).
 
-    ``g_i`` is the full-output contribution above the off baseline; ``f_i`` is
-    the contribution normalized to 1 at full, enforced monotone and spanning
-    b=0..1. A channel that produced no measurable light keeps a zero gain and
-    the default square-law curve (bounded influence, §3.4/4.2).
+    ``meas`` holds only the levels a sample landed on (partial coverage). ``g_i``
+    is the full-output (b=1) contribution above the off baseline, square-law
+    extrapolated from the highest sampled level (``g = contrib_top / top**2`` —
+    exact when the top level is 1.0). ``f_i`` is the measured contribution
+    normalized by ``g``, enforced monotone; below the lowest sampled level the
+    curve follows a square-law arc scaled to meet that point, and above the top
+    sampled level it follows ``b**2`` to (1, 1). A channel that produced no
+    measurable light keeps a zero gain and the default square-law curve
+    (bounded influence, §3.4/4.2).
     """
-    contrib = {lv: max(0.0, meas.get(lv, 0.0) - base) for lv in levels}
-    full = contrib.get(levels[-1], 0.0)
-    if full <= 0.0:
+    sampled = sorted(meas)
+    contribs = [(lv, max(0.0, meas[lv] - base)) for lv in sampled]
+    top_level, top_contrib = contribs[-1] if contribs else (0.0, 0.0)
+    if top_contrib <= 0.0 or top_level <= 0.0:
         return 0.0, tuple((b, b * b) for b in (0.0, *levels))
-    pts: list[tuple[float, float]] = [(0.0, 0.0)]
+
+    gain = top_contrib / (top_level * top_level)  # square-law extrapolation to b=1
+    lowest = sampled[0]
+    rel: dict[float, float] = {}
     running = 0.0
+    for lv, c in contribs:
+        running = max(running, c / gain)  # enforce monotone in flux
+        rel[lv] = min(1.0, running)
+    f_low = rel[lowest]
+
+    pts: list[tuple[float, float]] = [(0.0, 0.0)]
     for lv in levels:
-        running = max(running, contrib[lv] / full)  # enforce monotone
-        pts.append((lv, min(1.0, running)))
-    # ``full`` is the last level's contribution, so pts[-1] is always (1.0, 1.0)
-    # — the curve spans b=0..1 by construction.
-    return full, tuple(pts)
+        if lv <= 0.0:
+            continue
+        if lv < lowest - _CAL_EPS:  # square-law arc below the lowest sample
+            pts.append((lv, f_low * (lv / lowest) ** 2))
+        elif lv in rel:  # a measured point
+            pts.append((lv, rel[lv]))
+        elif lv > top_level + _CAL_EPS:  # square-law above the top sample to (1, 1)
+            pts.append((lv, min(1.0, lv * lv)))
+    if pts[-1][0] < 1.0 - _CAL_EPS:
+        pts.append((1.0, 1.0))
+
+    # Final monotone + span guarantee (validate(): spans b=0..1, flux 0..1).
+    out: list[tuple[float, float]] = []
+    run = 0.0
+    for b, f in pts:
+        run = max(run, min(1.0, f))
+        out.append((b, run))
+    if out[-1][1] < 1.0 - _CAL_EPS:
+        out[-1] = (out[-1][0], 1.0)
+    return gain, tuple(out)
 
 
 def _coverage(cal: CalibrationSession, levels: tuple[float, ...]) -> tuple[tuple[str, float], ...]:

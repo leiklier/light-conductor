@@ -74,9 +74,17 @@ class Plant:
     n_of_t: Callable[[datetime], float]
     quant: float = 1.0  # sensor quantization (lux)
     noise: Callable[[datetime], float] = lambda _now: 0.0
+    #: Delta-filtered field-sensor regime (Apollo LTR390, §4.4 calibration): with
+    #: ``delta`` > 0 the plant emits a LuxReport only when the value moved more
+    #: than ``delta`` since the last publish AND at least ``min_cadence`` elapsed
+    #: (on-device dedup at a ~60 s cadence) — used via :meth:`tick_field`.
+    delta: float = 0.0
+    min_cadence: float = 0.0
     #: Recorded (time, {cid: commanded_b}) after every tick, for assertions.
     history: list[tuple[datetime, dict[str, float]]] = field(default_factory=list)
     commands: list[object] = field(default_factory=list)
+    _last_pub_value: float | None = field(default=None, init=False, repr=False)
+    _last_pub_at: datetime | None = field(default=None, init=False, repr=False)
 
     def true_lux(self, now: datetime) -> float:
         rs = self.engine.state.rooms[self.room_id]
@@ -94,6 +102,33 @@ class Plant:
         self.commands.extend(cmds)
         rs = self.engine.state.rooms[self.room_id]
         snap = {c.channel_id: rs.channels[c.channel_id].commanded_b for c in self.channels}
+        self.history.append((now, snap))
+        return cmds
+
+    def tick_field(self, now: datetime) -> list[object]:
+        """Delta-filtered field-sensor tick (Apollo LTR390 regime, §4.4).
+
+        Emits a LuxReport only when the quantized value moved more than ``delta``
+        since the last publish AND at least ``min_cadence`` has elapsed — so a
+        dim level whose contribution stays within ``delta`` of the last published
+        value produces no sample at all (the sub-delta night regime). Ticks that
+        do not publish still record history for command analysis.
+        """
+        value = self.sample(now)
+        publish = self._last_pub_value is None
+        if not publish:
+            moved = abs(value - self._last_pub_value) > self.delta
+            elapsed = (now - self._last_pub_at).total_seconds() >= self.min_cadence
+            publish = moved and elapsed
+        rs = self.engine.state.rooms[self.room_id]
+        snap = {c.channel_id: rs.channels[c.channel_id].commanded_b for c in self.channels}
+        if not publish:
+            self.history.append((now, snap))
+            return []
+        self._last_pub_value = value
+        self._last_pub_at = now
+        cmds = self.engine.handle(LuxReport(self.room_id, value), now)
+        self.commands.extend(cmds)
         self.history.append((now, snap))
         return cmds
 

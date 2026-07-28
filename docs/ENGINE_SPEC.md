@@ -162,7 +162,7 @@ the observed `ΔL` across the step updates a per-room scalar gain multiplier
 via EMA (`gain_learn_rate`, default 0.1), bounded to [0.5, 2.0] of the
 calibrated gains. Per-channel calibration only changes via §4.4 recalibration.
 
-3.5 **Sensor trust.** Lux sensor unavailable/stale (> `lux_stale` 120 s) ⇒
+3.5 **Sensor trust.** Lux sensor unavailable/stale (> `lux_stale` 300 s) ⇒
 room falls back to open-loop tables (§4.6) at the same role tier; recovery is
 seamless because both paths share the §8 funnel. **Closed-loop control also
 requires a trustworthy gain model**: a room enters closed-loop only when it is
@@ -207,10 +207,22 @@ space so a "small step" looks small at any level.
 4.4 **Room calibration routine** (`RecordLightResponse` button per room with a
 lux sensor): only runs when sun elevation < `night_prior_deg` and the room's
 lux is stable. Sweeps each channel alone: off → each of
-`calibration_levels` (default 10/25/50/75/100 %), dwell `calibration_dwell`
-(4 s) per level, recording lux. Produces `g_i` and `f_i` points per channel;
-commits transactionally (all-or-nothing, like presence-conductor 3.3), fires
-a result event, and marks the room `calibrated`. Uncalibrated rooms run
+`calibration_levels` (default 10/25/50/75/100 %), recording lux. **Early
+advance:** a level completes as soon as `CAL_MIN_SAMPLES_PER_LEVEL` (1)
+post-blank samples have settled (a fast sensor sweeps quickly), otherwise at
+`calibration_dwell` (4 s) — a slow, delta-filtered sensor still gets the full
+window. A level whose window elapses with no sample is simply skipped.
+**Partial coverage:** a channel commits its measured `g_i`/`f_i` from the
+sampled points once at least `CAL_MIN_POINTS` (3) of its levels were captured;
+below the lowest sampled level the curve is extrapolated with a square-law
+shape anchored at (0, 0) (the committed relative flux scaled as `b²` to meet
+the lowest sampled point), so a low-gain channel whose dim levels never clear
+the sensor's on-device delta filter still calibrates from its bright levels.
+Coverage is reported per channel (fraction of levels sampled). The room
+commits transactionally (all-or-nothing, like presence-conductor 3.3) only if
+**every** channel reached `CAL_MIN_POINTS`; otherwise it rejects with
+`missing_samples` and the per-channel coverage map. A successful commit fires
+a result event and marks the room `calibrated`. Uncalibrated rooms run
 open-loop until the first-night bootstrap (§3.5) has learned a conservative
 room-scalar gain over the default curve, then enter closed-loop with bounded
 influence; a full sweep later replaces that estimate with per-channel `g_i`/`f_i`.
@@ -234,6 +246,22 @@ behavior where only the accent band survives sunset).
 normalized outputs per band: `out_active_day`, `out_active_evening`,
 `out_background` (profile), interpolated by E, scaled by master gain, floored
 by `dim_floor`.
+
+4.7 **Daylight-aware open-loop.** A room that *has* a lux sensor but whose
+closed loop is not *trusted* (§3.5 — neither `calibrated` nor
+bootstrap-confident) runs the open-loop tables (4.6) scaled by a **daylight
+factor** `D = clamp(1 − N̂ / daylight_full, daylight_min_factor, 1.0)`, applied
+multiplicatively to the ACTIVE/ADJACENT/BACKGROUND outputs *after* circadian
+interpolation and *before* the §8 funnel. `N̂` is the estimator's
+natural-light estimate, which for an untrusted room ≈ the filtered lux (its own
+lamps barely move the sensor — that is precisely what "untrusted" means here,
+§3.1). This replicates the legacy `100 − 0.5·lux` daytime damping for rooms
+whose sensors are good daylight meters but nearly blind to their own lamps:
+bright daylight pulls the tables down, darkness leaves them at full.
+NIGHT_PATH, TV, and outdoor outputs are **not** daylight-scaled — they are mode
+tables (§6), not tier outputs. Lux staleness falls back to unscaled open-loop
+exactly as today (`D → 1` when `N̂` is unavailable). `daylight_full`
+(default 200 lx) and `daylight_min_factor` (default 0.0) are §12 tunables.
 
 ## 5. Color temperature policy
 
@@ -423,10 +451,11 @@ override latches (not restored — cleared on restart).
 | night_prior_deg / tau_night_prior | −6° / 600 s | 3.3 |
 | gain_learn_rate | 0.1 | 3.4 |
 | bootstrap_min_obs / bootstrap_margin | 3 / 1.5 | 3.5, 4.4 |
-| lux_stale | 120 s | 3.5 |
+| lux_stale | 300 s | 3.5 |
 | deadband_abs / deadband_rel | 5 lx / 0.15 | 3.6 |
 | error_sustain / error_sustain_fast | 20 s / 2 s | 3.6 |
 | calibration_levels / calibration_dwell | 10,25,50,75,100 % / 4 s | 4.4 |
+| daylight_full / daylight_min_factor | 200 lx / 0.0 | 4.7 |
 | band_overlap / boost_evening_max | 0.15 / 0.5 | 4.5 |
 | ct_day / ct_evening / ct_min_evening | 3300 / 2400 / 2200 K | 5.1, 5.3 |
 | blend_threshold / blend_delta | 0.1 / 300 K | 5.2 |

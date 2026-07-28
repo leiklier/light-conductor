@@ -37,11 +37,17 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    BANDS,
     CONF_ACTIVE_DAY,
     CONF_ACTIVE_EVENING,
     CONF_ACTIVITY_SENSOR,
     CONF_ANYONE_HOME_ENTITY,
     CONF_BACKGROUND,
+    CONF_CH_BAND,
+    CONF_CH_DIM_FLOOR,
+    CONF_CH_ENTITY,
+    CONF_CH_FIXED_CT,
+    CONF_CH_WEIGHT,
     CONF_CHANNELS,
     CONF_EVENING_CAP,
     CONF_HOLD_SECONDS,
@@ -98,6 +104,7 @@ _TUNABLE_UI: dict[str, tuple[float, float, float]] = {
     "circadian_tick": (30, 900, 30),
     "evening_cap_threshold": (0, 1, 0.05),
     "lux_stale": (30, 600, 10),
+    "daylight_full": (20, 1000, 10),
     "night_hold": (60, 1800, 30),
     "night_fade": (0, 60, 1),
     "sleep_fade": (0, 60, 1),
@@ -311,6 +318,7 @@ class LightConductorOptionsFlow(OptionsFlow):
     def __init__(self) -> None:
         self._options: dict[str, Any] = {}
         self._room_id: str | None = None
+        self._channel_id: str | None = None
 
     @property
     def _rooms(self) -> list[dict[str, Any]]:
@@ -367,7 +375,8 @@ class LightConductorOptionsFlow(OptionsFlow):
 
     async def async_step_rooms(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         return self.async_show_menu(
-            step_id="rooms", menu_options=["add_room", "edit_room", "remove_room", "init"]
+            step_id="rooms",
+            menu_options=["add_room", "edit_room", "channels", "remove_room", "init"],
         )
 
     async def async_step_add_room(
@@ -448,6 +457,8 @@ class LightConductorOptionsFlow(OptionsFlow):
             updated[CONF_TV_MODE] = user_input.get(CONF_TV_MODE, False)
             if user_input.get(CONF_HOLD_SECONDS):
                 updated[CONF_HOLD_SECONDS] = user_input[CONF_HOLD_SECONDS]
+            else:
+                updated.pop(CONF_HOLD_SECONDS, None)  # blank clears the room override
             profile = dict(room.get(CONF_PROFILE, _default_profile()))
             for key in (
                 CONF_VACANCY,
@@ -492,6 +503,9 @@ class LightConductorOptionsFlow(OptionsFlow):
                 vol.Optional(
                     CONF_TV_MODE, default=room.get(CONF_TV_MODE, False)
                 ): BooleanSelector(),
+                _opt(CONF_HOLD_SECONDS, room): NumberSelector(
+                    NumberSelectorConfig(min=10, max=1800, step=5, mode=NumberSelectorMode.BOX)
+                ),
                 vol.Optional(CONF_VACANCY, default=profile.get(CONF_VACANCY, "dim")): _select(
                     VACANCIES
                 ),
@@ -525,6 +539,103 @@ class LightConductorOptionsFlow(OptionsFlow):
             step_id="room_detail",
             data_schema=schema,
             description_placeholders={"room": room.get(CONF_NAME, self._room_id)},
+        )
+
+    # -- per-channel editing (band / weight / fixed_ct / dim_floor) ---------
+
+    def _channel_entities(self, room: dict[str, Any]) -> list[str]:
+        return [c["entity"] if isinstance(c, dict) else c for c in room.get(CONF_CHANNELS, [])]
+
+    async def async_step_channels(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Pick a room whose channels to edit, then a channel (rule 4.1 options)."""
+        if user_input is not None and self._room_id is None:
+            self._room_id = user_input[CONF_ROOM_ID]
+            return await self.async_step_pick_channel()
+        schema = vol.Schema({vol.Required(CONF_ROOM_ID): _select(tuple(self._room_ids()))})
+        return self.async_show_form(step_id="channels", data_schema=schema)
+
+    async def async_step_pick_channel(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        room = next(r for r in self._rooms if r[CONF_ROOM_ID] == self._room_id)
+        if user_input is not None and self._channel_id is None:
+            self._channel_id = user_input[CONF_CH_ENTITY]
+            return await self.async_step_channel_detail()
+        schema = vol.Schema(
+            {vol.Required(CONF_CH_ENTITY): _select(tuple(self._channel_entities(room)))}
+        )
+        return self.async_show_form(
+            step_id="pick_channel",
+            data_schema=schema,
+            description_placeholders={"room": room.get(CONF_NAME, self._room_id)},
+        )
+
+    async def async_step_channel_detail(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        rooms = self._rooms
+        room = next(r for r in rooms if r[CONF_ROOM_ID] == self._room_id)
+        channels = list(room.get(CONF_CHANNELS, []))
+        idx = next(
+            i
+            for i, c in enumerate(channels)
+            if (c["entity"] if isinstance(c, dict) else c) == self._channel_id
+        )
+        current = (
+            channels[idx] if isinstance(channels[idx], dict) else {CONF_CH_ENTITY: self._channel_id}
+        )
+
+        if user_input is not None:
+            ch = dict(current)
+            ch[CONF_CH_ENTITY] = self._channel_id
+            ch[CONF_CH_BAND] = user_input[CONF_CH_BAND]
+            ch[CONF_CH_WEIGHT] = user_input[CONF_CH_WEIGHT]
+            fixed = user_input.get(CONF_CH_FIXED_CT)
+            # Empty ⇒ CT-capable (read the kelvin range from the entity, const.py).
+            ch[CONF_CH_FIXED_CT] = None if fixed in (None, 0, "") else int(fixed)
+            ch[CONF_CH_DIM_FLOOR] = user_input[CONF_CH_DIM_FLOOR]
+            channels[idx] = ch
+            updated = dict(room)
+            updated[CONF_CHANNELS] = channels
+            self._options[CONF_ROOMS] = [
+                updated if r[CONF_ROOM_ID] == self._room_id else r for r in rooms
+            ]
+            self._room_id = None
+            self._channel_id = None
+            return await self.async_step_rooms()
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_CH_BAND, default=current.get(CONF_CH_BAND, "primary")): _select(
+                    BANDS
+                ),
+                vol.Required(
+                    CONF_CH_WEIGHT, default=float(current.get(CONF_CH_WEIGHT, 1.0))
+                ): NumberSelector(
+                    NumberSelectorConfig(min=0, max=10, step=0.1, mode=NumberSelectorMode.BOX)
+                ),
+                # Prefill via suggested_value (not a default) so clearing the
+                # field submits nothing ⇒ CT-capable, per the empty semantics.
+                vol.Optional(
+                    CONF_CH_FIXED_CT,
+                    description={"suggested_value": current.get(CONF_CH_FIXED_CT)},
+                ): NumberSelector(
+                    NumberSelectorConfig(min=1500, max=6500, step=50, mode=NumberSelectorMode.BOX)
+                ),
+                vol.Required(
+                    CONF_CH_DIM_FLOOR, default=float(current.get(CONF_CH_DIM_FLOOR, 0.02))
+                ): _pct(0.02),
+            }
+        )
+        return self.async_show_form(
+            step_id="channel_detail",
+            data_schema=schema,
+            description_placeholders={
+                "room": room.get(CONF_NAME, self._room_id),
+                "channel": self._channel_id,
+            },
         )
 
     # -- tunables -----------------------------------------------------------

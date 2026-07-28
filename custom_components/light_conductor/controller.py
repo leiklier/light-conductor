@@ -602,8 +602,41 @@ class Controller:
         )
         self._subscribe()
         self._started = True
+        # Re-read live presence/activity now that subscriptions are armed: a state
+        # change that landed in the setup gap — between build_snapshot() and
+        # _subscribe() — fires no event and would otherwise be lost, leaving a
+        # room stuck in its seeded (e.g. OFF, from an unavailable primary) role
+        # until an unrelated change happened to re-evaluate it (post-restart role
+        # stickiness, shadow audit). These queue before the first ReviewTick.
+        self._reconfirm_live_state()
         # First review kicks self-scheduling and publishes initial state.
         self.submit(ReviewTick())
+
+    def _reconfirm_live_state(self) -> None:
+        """Re-submit live presence/activity per room after arming subscriptions.
+
+        Closes the startup gap (§11): the snapshot is read before subscriptions
+        exist, so any presence/activity change during setup fires no event. This
+        replays the current live values so the engine's view matches reality the
+        moment the actor starts (idempotent when nothing changed).
+        """
+        for room in self._rooms():
+            rid = room[CONF_ROOM_ID]
+            if room.get(CONF_PRESENCE_PRIMARY) or room.get(CONF_OCCUPANCY_FALLBACK):
+                self.submit(
+                    PresenceChanged(
+                        room_id=rid,
+                        primary=self._room_primary(rid),
+                        fallback=self._room_fallback(rid),
+                    )
+                )
+            if room.get(CONF_ACTIVITY_SENSOR):
+                self.submit(
+                    ActivityChanged(
+                        room_id=rid,
+                        activity=_activity_of(self.hass.states.get(room[CONF_ACTIVITY_SENSOR])),
+                    )
+                )
 
     async def async_stop(self) -> None:
         self._started = False
