@@ -63,6 +63,7 @@ from .model import (
     RoomCalibration,
     RoomConfig,
     RoomDiagnostics,
+    RoomShape,
     RoomState,
 )
 from .photometry import RoomPhotometry
@@ -512,6 +513,14 @@ class Engine:
                 estimator.record_step(rs.est, rs.est.l_filt, base_delta, now, tun, shadow=shadow)
 
         plan.review_at(roles.next_review(rs, now))
+        # Outdoor rooms follow the sun ramp, but at an E plateau (overnight, or a
+        # winter afternoon before sunset) the global circadian scheduler goes
+        # quiet — the next clock boundary is hours away — so an outdoor room that
+        # is ON would linger in its dusk background until an unrelated event
+        # instead of turning off promptly as E descends past outdoor_on_threshold.
+        # Self-schedule a circadian-cadence re-check while it is lit (shadow audit).
+        if room.shape is RoomShape.OUTDOOR and res is not None and not res.off:
+            plan.review_at(now + timedelta(seconds=tun.circadian_tick))
         natural = rs.est.n_hat if (closed or shadow) else None
         return self._diag(room, rs, role, max(channel_b.values(), default=0.0), natural, target_lux)
 
