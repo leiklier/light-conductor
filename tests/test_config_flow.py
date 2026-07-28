@@ -11,11 +11,16 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.light_conductor.const import (
     CONF_HOLD_SECONDS,
+    CONF_LUX_ACTIVE_DAY,
+    CONF_LUX_ACTIVE_EVENING,
+    CONF_LUX_BACKGROUND,
     CONF_LUX_SENSOR,
     CONF_PRESENCE_PRIMARY,
+    CONF_PROFILE,
     CONF_ROOMS,
     CONF_SLEEP_ENTITY,
     DOMAIN,
+    _profile_from_options,
 )
 
 from .adapter import options, room, setup_entry
@@ -128,6 +133,76 @@ async def test_options_edit_channel(hass: HomeAssistant) -> None:
     assert ch["weight"] == 2.5
     assert ch["fixed_ct"] is None  # empty fixed_ct ⇒ CT-capable
     assert ch["dim_floor"] == 0.05
+
+
+def test_profile_parses_lux_tiers() -> None:
+    """§2.1: the profile parser wires the closed-loop lux tiers; absent ⇒ 0 (auto)."""
+    prof = _profile_from_options(
+        {CONF_LUX_ACTIVE_DAY: 500, CONF_LUX_ACTIVE_EVENING: 250, CONF_LUX_BACKGROUND: 8}
+    )
+    assert prof.lux_active_day == 500.0
+    assert prof.lux_active_evening == 250.0
+    assert prof.lux_background == 8.0
+    # An empty profile leaves every tier UNSET (0.0 = auto capacity fraction).
+    empty = _profile_from_options({})
+    assert empty.lux_active_day == 0.0
+    assert empty.lux_active_evening == 0.0
+    assert empty.lux_background == 0.0
+    # A blank ("") submission is treated as unset too.
+    assert _profile_from_options({CONF_LUX_ACTIVE_DAY: ""}).lux_active_day == 0.0
+
+
+async def test_options_room_detail_lux_tiers_round_trip(hass: HomeAssistant) -> None:
+    """Closed-loop lux tiers round-trip through room_detail and CLEAR on blank."""
+    entry = await setup_entry(hass, options([room("k", ["light.k"])]))
+
+    async def configure(flow_id: str, data: dict) -> dict:
+        return await hass.config_entries.options.async_configure(flow_id, data)
+
+    async def open_room_detail() -> dict:
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await configure(result["flow_id"], {"next_step_id": "rooms"})
+        result = await configure(result["flow_id"], {"next_step_id": "edit_room"})
+        result = await configure(result["flow_id"], {"room_id": "k"})
+        assert result["step_id"] == "room_detail"
+        return result
+
+    async def finish(result: dict) -> None:
+        result = await configure(result["flow_id"], {"next_step_id": "init"})
+        result = await configure(result["flow_id"], {"next_step_id": "finish"})
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    # (1) Set explicit lux tiers.
+    result = await open_room_detail()
+    result = await configure(
+        result["flow_id"],
+        {
+            "name": "K",
+            "shape": "presence",
+            "channels": ["light.k"],
+            CONF_LUX_ACTIVE_DAY: 500,
+            CONF_LUX_ACTIVE_EVENING: 250,
+            CONF_LUX_BACKGROUND: 8,
+        },
+    )
+    assert result["type"] == FlowResultType.MENU
+    await finish(result)
+    profile = entry.options[CONF_ROOMS][0][CONF_PROFILE]
+    assert profile[CONF_LUX_ACTIVE_DAY] == 500
+    assert profile[CONF_LUX_ACTIVE_EVENING] == 250
+    assert profile[CONF_LUX_BACKGROUND] == 8
+
+    # (2) Re-open and CLEAR them — a blank submission omits the keys ⇒ auto.
+    result = await open_room_detail()
+    result = await configure(
+        result["flow_id"], {"name": "K", "shape": "presence", "channels": ["light.k"]}
+    )
+    assert result["type"] == FlowResultType.MENU
+    await finish(result)
+    profile = entry.options[CONF_ROOMS][0][CONF_PROFILE]
+    assert CONF_LUX_ACTIVE_DAY not in profile
+    assert CONF_LUX_ACTIVE_EVENING not in profile
+    assert CONF_LUX_BACKGROUND not in profile
 
 
 async def test_options_room_detail_accepts_hold_seconds(hass: HomeAssistant) -> None:

@@ -296,23 +296,49 @@ def _bootstrap_gain(est: EstimatorState, obs_delta: float, base: float, tun: Tun
 # ---------------------------------------------------------------------------
 
 
-def target_lux(rs: RoomState, role: Role, profile, e: float, g: float, tun: Tunables) -> float:
+def target_lux(
+    rs: RoomState,
+    role: Role,
+    profile,
+    e: float,
+    g: float,
+    tun: Tunables,
+    capacity: float = 0.0,
+) -> float:
     """Sensor-relative lux target ``T'`` for a role tier (rules 2.1, 2.5, 1.5).
 
     ACTIVE interpolates ``lux_active_day``↔``lux_active_evening`` by E;
     ADJACENT scales it by ``adjacent_fraction`` (capped ``adjacent_cap``);
     BACKGROUND by ``background_fraction`` (capped ``background_cap``); OFF is 0.
     The master gain scales the target (rule 2.5), clamped to ``lux_max``.
+
+    Capacity-fraction defaults (§2.1): a tier left at 0 is UNSET and falls back
+    to a fraction of the room's calibrated capacity ``capacity`` (``C``, the sum
+    of the channels' calibrated lux gains at full output · the online gain
+    multiplier, supplied by the engine) — ``lux_day_frac``/``lux_evening_frac``/
+    ``lux_background_frac``. This keeps a freshly calibrated room targeting real
+    light instead of 0 lx (the live blackout). An explicit nonzero tier wins.
     """
     if role is Role.OFF:
         return 0.0
-    active = profile.lux_active_day * (1.0 - e) + profile.lux_active_evening * e
+    day = profile.lux_active_day or tun.lux_day_frac * capacity
+    evening = profile.lux_active_evening or tun.lux_evening_frac * capacity
+    active = day * (1.0 - e) + evening * e
     if role is Role.ACTIVE:
         t = active
     elif role is Role.ADJACENT:
         t = min(active * tun.adjacent_fraction, tun.adjacent_cap)
     elif role is Role.BACKGROUND:
-        t = min(active * tun.background_fraction, tun.background_cap)
+        # §2.1: the fraction-derived background, floored by lux_background.
+        # Only an EXPLICIT floor may exceed background_cap (operator intent);
+        # the capacity-default floor respects the cap, or a bright room's idle
+        # level would silently outgrow the design. Background never exceeds
+        # the ACTIVE target.
+        if profile.lux_background:
+            floor = profile.lux_background
+        else:
+            floor = min(tun.lux_background_frac * capacity, tun.background_cap)
+        t = min(max(min(active * tun.background_fraction, tun.background_cap), floor), active)
     else:  # NIGHT_PATH / TV are mode-driven (band_outputs), never lux tiers.
         return 0.0
     return min(t * g, profile.lux_max)

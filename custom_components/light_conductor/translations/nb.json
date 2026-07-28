@@ -95,7 +95,10 @@
           "evening_output_cap": "Utgangstak om kvelden",
           "night_output": "Nattsti-utgang",
           "tv_output": "TV-utgang (opptatt)",
-          "tv_output_empty": "TV-utgang (tomt)"
+          "tv_output_empty": "TV-utgang (tomt)",
+          "lux_active_day": "Lux-mål — aktiv (dag)",
+          "lux_active_evening": "Lux-mål — aktiv (kveld)",
+          "lux_background": "Lux-mål — bakgrunnsgulv"
         }
       },
       "channels": {

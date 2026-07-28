@@ -100,6 +100,12 @@ CONF_EVENING_CAP = "evening_output_cap"
 CONF_NIGHT_OUTPUT = "night_output"
 CONF_TV_OUTPUT = "tv_output"
 CONF_TV_OUTPUT_EMPTY = "tv_output_empty"
+#: Closed-loop lux tiers (lx) for a room with a lux sensor (§2.1). Absent or 0
+#: means UNSET ⇒ the engine auto-targets a fraction of the room's calibrated
+#: capacity; an explicit value overrides that default.
+CONF_LUX_ACTIVE_DAY = "lux_active_day"
+CONF_LUX_ACTIVE_EVENING = "lux_active_evening"
+CONF_LUX_BACKGROUND = "lux_background"
 
 # --- dispatcher / hass.data keys -------------------------------------------
 
@@ -153,6 +159,10 @@ def _profile_from_options(opts: Mapping[str, Any]) -> Profile:
     night = float(opts.get(CONF_NIGHT_OUTPUT, DEFAULT_NIGHT_OUTPUT))
     tv = float(opts.get(CONF_TV_OUTPUT, DEFAULT_TV_OUTPUT))
     tv_empty = float(opts.get(CONF_TV_OUTPUT_EMPTY, DEFAULT_TV_OUTPUT_EMPTY))
+    # Closed-loop lux tiers (§2.1): absent/blank ⇒ 0.0 = auto (capacity fraction).
+    lux_day = float(opts.get(CONF_LUX_ACTIVE_DAY) or 0.0)
+    lux_evening = float(opts.get(CONF_LUX_ACTIVE_EVENING) or 0.0)
+    lux_background = float(opts.get(CONF_LUX_BACKGROUND) or 0.0)
     return Profile(
         vacancy=vacancy,
         out_active_day=_band_map(day),
@@ -162,6 +172,9 @@ def _profile_from_options(opts: Mapping[str, Any]) -> Profile:
         night_output=_band_map(night),
         tv_output=_band_map(tv),
         tv_output_empty=_band_map(tv_empty),
+        lux_active_day=lux_day,
+        lux_active_evening=lux_evening,
+        lux_background=lux_background,
     )
 
 
