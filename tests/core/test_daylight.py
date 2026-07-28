@@ -152,6 +152,7 @@ def test_daylight_latch_prevents_hunting_while_observations_pend() -> None:
     observation is settling — command direction reversals stay tiny and
     observations still arm (the latch neither oscillates nor starves)."""
     import math
+    from itertools import pairwise
 
     chans = [Channel("c", gain=180.0, model_gain=1.0)]
     cfg = closed_config(chans, out_active_day={Band.PRIMARY: 0.8})
@@ -168,8 +169,8 @@ def test_daylight_latch_prevents_hunting_while_observations_pend() -> None:
         history.append(_commanded(eng))
         t = t + timedelta(seconds=10)
 
-    deltas = [b - a for a, b in zip(history, history[1:], strict=False) if abs(b - a) > 1e-9]
-    reversals = sum(1 for a, b in zip(deltas, deltas[1:], strict=False) if a * b < 0)
+    deltas = [b - a for a, b in pairwise(history) if abs(b - a) > 1e-9]
+    reversals = sum(1 for a, b in pairwise(deltas) if a * b < 0)
     assert reversals <= 4, f"daylight loop hunting: {reversals} reversals"
     assert seen_pending  # the latch never starved bootstrap observations
     # And the output genuinely tracked daylight (not frozen throughout).
