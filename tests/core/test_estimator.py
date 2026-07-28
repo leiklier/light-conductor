@@ -336,9 +336,13 @@ def test_target_lux_capacity_fraction_defaults() -> None:
     assert estimator.target_lux(rs, Role.ACTIVE, explicit, 0.0, 1.0, TUN, c) == 30.0
     # BACKGROUND fraction path (small C): min(0.6·40·0.25, cap 15)=6, floor 0.05·40=2.
     assert estimator.target_lux(rs, Role.BACKGROUND, auto, 0.0, 1.0, TUN, 40.0) == 6.0
-    # BACKGROUND floor lifts above the capped fraction once lux_background_frac·C
-    # exceeds background_cap: C=2000 -> floor 100 > min(0.6·2000·0.25, 15)=15.
-    assert estimator.target_lux(rs, Role.BACKGROUND, auto, 0.0, 1.0, TUN, 2000.0) == 100.0
+    # The AUTO background floor respects background_cap even on a very bright
+    # room (C=2000 -> 0.05·C=100, capped to 15): idle brightness must not
+    # silently outgrow the design; only an explicit floor may exceed the cap.
+    assert estimator.target_lux(rs, Role.BACKGROUND, auto, 0.0, 1.0, TUN, 2000.0) == 15.0
+    # Background never exceeds the ACTIVE target, even with an explicit floor.
+    dim = Profile(lux_active_day=20.0, lux_background=100.0)
+    assert estimator.target_lux(rs, Role.BACKGROUND, dim, 0.0, 1.0, TUN, 2000.0) == 20.0
     # An explicit lux_background is a floor under BACKGROUND (still capacity-fraction
     # ACTIVE): min(0.6·200·0.25,15)=15 floored by 50 -> 50.
     bg = Profile(lux_background=50.0)
