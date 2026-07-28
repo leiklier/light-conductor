@@ -329,10 +329,16 @@ def target_lux(
     elif role is Role.ADJACENT:
         t = min(active * tun.adjacent_fraction, tun.adjacent_cap)
     elif role is Role.BACKGROUND:
-        # §2.1: the fraction-derived background, floored by an explicit (or
-        # capacity-default) lux_background so a room never drops below it.
-        background = profile.lux_background or tun.lux_background_frac * capacity
-        t = max(min(active * tun.background_fraction, tun.background_cap), background)
+        # §2.1: the fraction-derived background, floored by lux_background.
+        # Only an EXPLICIT floor may exceed background_cap (operator intent);
+        # the capacity-default floor respects the cap, or a bright room's idle
+        # level would silently outgrow the design. Background never exceeds
+        # the ACTIVE target.
+        if profile.lux_background:
+            floor = profile.lux_background
+        else:
+            floor = min(tun.lux_background_frac * capacity, tun.background_cap)
+        t = min(max(min(active * tun.background_fraction, tun.background_cap), floor), active)
     else:  # NIGHT_PATH / TV are mode-driven (band_outputs), never lux tiers.
         return 0.0
     return min(t * g, profile.lux_max)
