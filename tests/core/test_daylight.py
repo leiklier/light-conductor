@@ -114,6 +114,75 @@ def test_trusted_room_uses_closed_loop_not_daylight_scaling() -> None:
     assert d.target_lux is not None  # closed-loop path, not open-loop daylight
 
 
+# --- capacity gate: low-capacity calibrated rooms stay open-loop ---------
+
+
+def _target_of(diag: list) -> float | None:
+    return next(c for c in diag if hasattr(c, "rooms")).rooms[0].target_lux
+
+
+def test_low_capacity_calibrated_room_stays_open_loop() -> None:
+    """§4.5/§4.7: a calibrated room below the capacity gate (kjøkken-like, C≈2 <
+    4 lx) runs the daylight-aware open-loop path, NOT closed loop — servoing ~1
+    lx targets against ~1 lx quantization would never visibly light."""
+    chans = [Channel("c", gain=2.0)]  # calibrated but tiny capacity C≈2
+    cfg = closed_config(chans, lux_active_day=100.0, out_active_day={Band.PRIMARY: 0.8})
+    eng = booted_engine(cfg, sun=DAY, calibrated=True)
+    _feed(eng, 60.0, START, n=3)
+    diag = eng.handle(ReviewTick(), START + timedelta(seconds=8))
+    assert _target_of(diag) is None  # below the gate → open-loop, no closed-loop target
+    # Output is daylight-scaled (N̂≈60 ⇒ D≈0.7 ⇒ 0.8·0.7≈0.56), not lux-servoed.
+    assert 0.4 < _commanded(eng) < 0.7
+
+
+def test_capacity_above_gate_uses_closed_loop() -> None:
+    """§4.5: a calibrated room above the gate (C≈10 ≥ 4) regulates in lux."""
+    chans = [Channel("c", gain=10.0)]  # C≈10 ≥ min_closed_loop_capacity
+    cfg = closed_config(chans, lux_active_day=6.0, out_active_day={Band.PRIMARY: 0.8})
+    eng = booted_engine(cfg, sun=DAY, calibrated=True)
+    _feed(eng, 3.0, START, n=3)
+    diag = eng.handle(ReviewTick(), START + timedelta(seconds=8))
+    assert _target_of(diag) is not None  # closed-loop path (above the capacity gate)
+
+
+def test_capacity_exactly_at_gate_uses_closed_loop() -> None:
+    """§4.5: the gate is inclusive — C == min_closed_loop_capacity closes the loop."""
+    chans = [Channel("c", gain=4.0)]  # C = 4.0 == min_closed_loop_capacity default
+    cfg = closed_config(chans, lux_active_day=3.0, out_active_day={Band.PRIMARY: 0.8})
+    eng = booted_engine(cfg, sun=DAY, calibrated=True)
+    _feed(eng, 1.0, START, n=3)
+    diag = eng.handle(ReviewTick(), START + timedelta(seconds=8))
+    assert _target_of(diag) is not None  # ≥ is inclusive: at-boundary room is closed-loop
+
+
+def test_capacity_gate_respects_the_tunable() -> None:
+    """§4.5: lowering min_closed_loop_capacity lets a tiny room close the loop."""
+    from datetime import datetime
+
+    from custom_components.light_conductor.core.engine import Engine
+    from custom_components.light_conductor.core.events import PresenceChanged
+    from custom_components.light_conductor.core.model import InitialSnapshot
+    from custom_components.light_conductor.core.tunables import Tunables
+
+    from .plant import calibration_for
+
+    chans = [Channel("c", gain=2.0)]  # C≈2
+    cfg = closed_config(chans, lux_active_day=1.5, out_active_day={Band.PRIMARY: 0.8})
+    tun = Tunables(min_closed_loop_capacity=1.0)  # gate below C=2
+    eng = Engine(
+        cfg,
+        InitialSnapshot(sun_elevation=DAY, occupancy={"lab": True}),
+        tunables=tun,
+        calibrations={"lab": calibration_for(cfg, "lab")},
+    )
+    base = datetime(2026, 7, 1, 12, 0, 0)
+    eng.handle(SunElevationChanged(DAY), base)
+    eng.handle(PresenceChanged("lab", True), base + timedelta(seconds=40))
+    _feed(eng, 1.0, START, n=3)
+    diag = eng.handle(ReviewTick(), START + timedelta(seconds=8))
+    assert _target_of(diag) is not None  # gate lowered → closed loop even at C≈2
+
+
 # --- a mode path (outdoor) is never daylight-scaled ---------------------
 
 

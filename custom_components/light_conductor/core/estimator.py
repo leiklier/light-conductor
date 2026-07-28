@@ -431,6 +431,25 @@ def channel_outputs_for_demand(
 # ---------------------------------------------------------------------------
 
 
+def control_deadband(tun: Tunables, capacity: float, t_prime: float) -> float:
+    """Capacity-scaled control deadband for the closed loop (rule 3.6).
+
+    ``deadband = max(min(deadband_abs, deadband_capacity_frac·C), deadband_floor,
+    deadband_rel·T')``. The absolute component is capped at a fraction of the
+    room capacity ``C`` so a low-capacity room (whose auto tiers sit below the
+    fixed 5-lx floor) can still reach its target, then floored at
+    ``deadband_floor`` (sensor noise). A high-capacity room is unchanged (the
+    ``min`` picks ``deadband_abs``); ``deadband_rel·T'`` still dominates for
+    large targets. This gates *control* only — the §3.4/§3.5 gain-arming paths
+    keep gating on the fixed ``deadband_abs`` (a safety property).
+    """
+    return max(
+        min(tun.deadband_abs, tun.deadband_capacity_frac * max(0.0, capacity)),
+        tun.deadband_floor,
+        tun.deadband_rel * t_prime,
+    )
+
+
 def should_correct(
     est: EstimatorState,
     error: float,

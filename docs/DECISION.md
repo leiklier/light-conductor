@@ -161,6 +161,46 @@ entity PR; diagnostics platform carries the full engine state on demand.
   Plejd device-settings writes (dim speed) — roadmap.
 - Scene support (`scene.tv_kveld` is half-broken today; TV mode subsumes it).
 
+## D14. Capacity-scaled deadband + closed-loop capacity gate (beta.7)
+
+The fixed 5-lx control deadband (§3.6) and the plain `calibrated OR
+bootstrap_confident` closed-loop entry condition (§3.5) both assume a room can
+put meaningful light on its *own* sensor. Two live low-capacity rooms break
+that assumption:
+
+- **sofakrok** (calibrated, single channel, gain 8.89) has capacity `C ≈ 8.8
+  lx` — its lux sensor sits in a dark corner and barely sees its own lamp. Its
+  auto ACTIVE tiers (`0.6·C ≈ 5.3` day, `0.2·C ≈ 1.8` evening) sit at/below the
+  5-lx deadband, so `should_correct` never fired and the ACTIVE role never lit
+  the room; the evening tier was mathematically unreachable.
+- **kjøkken**'s sensor reads only ~2 lx with its lights at 100 % (`C ≈ 2`).
+  Were it ever calibrated, it would servo ~1.2 lx targets against ~1 lx sensor
+  quantization and never visibly light — a regression versus its currently
+  working open-loop mode.
+
+Decision: (1) **capacity-scale the deadband** — the absolute component is
+capped at `deadband_capacity_frac × C` and floored at `deadband_floor` (sensor
+noise). Note the scaling applies to EVERY room with `C < deadband_abs /
+deadband_capacity_frac` (25 lx at defaults) — e.g. C = 10 gets a 2-lx deadband
+— not only the two motivating rooms; targets scale with the same C, so control
+error stays proportional. Only rooms with `C ≥ 25` are strictly unchanged (the
+`min` picks the 5-lx `deadband_abs`). Rooms landing in the 5–20 lx band should
+be watched for hunting against their sensor's real noise floor after
+calibration. (2) add a **capacity gate** — closed loop additionally requires
+`C ≥ min_closed_loop_capacity` (4 lx), below which the room uses the existing
+daylight-aware open-loop path (§4.7), the same code path an uncalibrated room
+takes. The gate has no hysteresis: a calibrated room whose `gain_mult` drifts
+across the boundary could oscillate closed↔open loop — accepted because both
+live rooms sit far from it (sofakrok `C ∈ [4.45, 17.78]` over the full
+`gain_mult` range; kjøkken's sub-deadband deltas freeze its `gain_mult`
+entirely); add hysteresis before configuring a room whose capacity sits near
+4–6 lx. A calibrated `C < 4` room with no explicit open-loop output tiers
+resolves role outputs to 0 via §4.7 and stays dark — configure output tiers
+for any such room. The gain-arming thresholds (§3.4/§3.5) deliberately keep
+gating on the fixed `deadband_abs` — a sub-delta room not arming bootstrap is
+a safety property, not a bug. Rejected alternative: lowering `deadband_abs`
+globally — it would make high-capacity rooms hunt on sensor noise.
+
 ## Open questions — RESOLVED (user, 2026-07-25)
 
 - **Q1 (D8):** master dimmer neutral at 50 % — confirmed (boost possible).

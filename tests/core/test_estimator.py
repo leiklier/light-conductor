@@ -152,6 +152,36 @@ def test_deadband_holds_and_sustain_gates() -> None:
     assert correct and est.error_sustain_until is None
 
 
+def test_control_deadband_scales_with_capacity() -> None:
+    """§3.6: the absolute deadband component is capped at a fraction of C.
+
+    A sofakrok-like low-capacity room (C≈8.8) gets a deadband well below the
+    fixed 5 lx, so its ~3.8-lx daytime deficit clears it and the loop corrects;
+    a high-capacity room (C≥25) is unchanged at 5.0.
+    """
+    # Low capacity: min(5, 0.2·8.8=1.76) wins over floor/rel → 1.76 lx.
+    low = estimator.control_deadband(TUN, capacity=8.8, t_prime=5.3)
+    assert abs(low - 1.76) < 1e-9
+    assert low < 5.3 - 1.5  # the 3.8-lx auto-day deficit now corrects
+    # High capacity: min(5, 0.2·200=40) → 5.0; a small target keeps rel below it.
+    high = estimator.control_deadband(TUN, capacity=200.0, t_prime=10.0)
+    assert high == TUN.deadband_abs == 5.0
+    # C ≥ 25 already pins the fixed 5-lx deadband (0.2·25 = 5).
+    assert estimator.control_deadband(TUN, capacity=25.0, t_prime=1.0) == 5.0
+
+
+def test_control_deadband_never_below_floor() -> None:
+    """§3.6: even a near-zero capacity/target never drops below deadband_floor."""
+    db = estimator.control_deadband(TUN, capacity=0.1, t_prime=0.0)
+    assert db == TUN.deadband_floor == 0.5
+
+
+def test_control_deadband_rel_dominates_for_large_targets() -> None:
+    """§3.6: deadband_rel·T' still dominates once the target is large."""
+    db = estimator.control_deadband(TUN, capacity=8.8, t_prime=100.0)
+    assert abs(db - TUN.deadband_rel * 100.0) < 1e-9  # 15 lx, above both other terms
+
+
 def test_fast_edge_shortens_sustain() -> None:
     """§3.6: a role/mode edge uses error_sustain_fast (2 s)."""
     est = EstimatorState()

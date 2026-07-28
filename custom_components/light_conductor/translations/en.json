@@ -150,7 +150,8 @@
         }
       },
       "natural_lux": { "name": "Natural light" },
-      "target_lux": { "name": "Target light" }
+      "target_lux": { "name": "Target light" },
+      "channels": { "name": "Channel outputs" }
     },
     "binary_sensor": {
       "overridden": { "name": "Overridden" }

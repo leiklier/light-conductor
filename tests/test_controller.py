@@ -112,6 +112,60 @@ async def test_poll_reconfirmation_is_not_foreign(hass: HomeAssistant, monkeypat
     assert hass.states.get(overridden).state == "on"
 
 
+async def test_command_ledger_seeded_on_start(hass: HomeAssistant) -> None:
+    """§8/§11.1: on start each channel's standing setpoint is seeded from its
+    current state — an ON light seeds its normalized level, an OFF light 0.0."""
+    set_light(hass, "light.a", "on", brightness=128, transition=True)
+    set_light(hass, "light.b", "off", transition=True)
+    hass.states.async_set("binary_sensor.pa", "off")
+    hass.states.async_set("binary_sensor.pb", "off")
+    entry = await setup_entry(
+        hass,
+        options(
+            [
+                room("a", ["light.a"], presence="binary_sensor.pa"),
+                room("bb", ["light.b"], presence="binary_sensor.pb"),
+            ]
+        ),
+        enabled=False,  # observe-only: the seed is the only ledger populator
+    )
+    controller = hass.data[DOMAIN][entry.entry_id]
+    assert abs(controller._last_commanded["light.a"] - 128 / 255) < 1e-6
+    assert controller._last_commanded["light.b"] == 0.0
+
+
+async def test_poll_reconfirmation_after_startup_seed_is_not_foreign(hass: HomeAssistant) -> None:
+    """§8: controller start seeds _last_commanded from live state, so the
+    integration's poll re-report of the standing level is consumed, not latched
+    as a false override (the reload false-latch incident). The seed path runs
+    identically on fresh setup and options reload (both via async_start); this
+    exercises it through setup. A genuinely different report still latches."""
+    set_light(hass, "light.a", "on", brightness=128, transition=True)
+    # Presence ON so the room is ACTIVE (not off-worthy) — a latched override on a
+    # vacant room would release on the next reconcile, masking the test.
+    hass.states.async_set("binary_sensor.pa", "on")
+    entry = await setup_entry(
+        hass,
+        options([room("a", ["light.a"], presence="binary_sensor.pa")]),
+        enabled=False,  # observe-only: no startup command overwrites the seed
+    )
+    controller = hass.data[DOMAIN][entry.entry_id]
+    overridden = entity_id_for(hass, entry, "a_overridden")
+    assert abs(controller._last_commanded["light.a"] - 128 / 255) < 1e-6
+
+    # Plejd's 3-min poll re-reports the standing level as a uint16/256 float.
+    set_light(hass, "light.a", "on", brightness=128.3, transition=True)
+    await hass.async_block_till_done()
+    assert hass.states.get(overridden).state == "off"
+    assert controller.engine.room_state("a").overridden is False
+
+    # A genuinely different level is still a foreign change and latches.
+    set_light(hass, "light.a", "on", brightness=255, transition=True)
+    await hass.async_block_till_done()
+    assert hass.states.get(overridden).state == "on"
+    assert controller.engine.room_state("a").overridden is True
+
+
 async def test_transition_fade_reports_no_override(hass: HomeAssistant, monkeypatch) -> None:
     """Reports tracking the fade front must NOT latch; an off-front yank does (F1)."""
     _controller, overridden, clock, env = await _partial_fade_setup(hass, monkeypatch)

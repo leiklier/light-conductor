@@ -50,7 +50,12 @@ DOC_ROWS: dict[str, tuple[tuple[str, ...], tuple[object, ...]]] = {
     ),
     "lux_stale": (("lux_stale",), (300.0,)),
     "deadband_abs / deadband_rel": (("deadband_abs", "deadband_rel"), (5.0, 0.15)),
+    "deadband_capacity_frac / deadband_floor": (
+        ("deadband_capacity_frac", "deadband_floor"),
+        (0.2, 0.5),
+    ),
     "error_sustain / error_sustain_fast": (("error_sustain", "error_sustain_fast"), (20.0, 2.0)),
+    "min_closed_loop_capacity": (("min_closed_loop_capacity",), (4.0,)),
     "calibration_levels / calibration_dwell": (
         ("calibration_levels", "calibration_dwell"),
         ((0.10, 0.25, 0.50, 0.75, 1.0), 4.0),

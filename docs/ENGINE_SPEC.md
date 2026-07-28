@@ -181,7 +181,10 @@ seamless because both paths share the §8 funnel. **Closed-loop control also
 requires a trustworthy gain model**: a room enters closed-loop only when it is
 `calibrated` (§4.4) *or* has completed the first-night bootstrap; otherwise it
 runs open-loop (safe by construction — an unknown gain cannot drive it dark or
-into hunting). **First-night bootstrap:** while an uncalibrated lux-sensor room
+into hunting). **Closed-loop also requires sufficient capacity** — see the
+capacity gate (§4.5): a trustworthy but low-capacity room (`C <
+min_closed_loop_capacity`) falls back to the SAME daylight-aware open-loop path
+(§4.7) an uncalibrated room uses. **First-night bootstrap:** while an uncalibrated lux-sensor room
 runs open-loop, the estimator observes each own commanded step in *shadow* —
 armed on the **observed** `ΔL ≥ deadband_abs` (not the model-predicted delta,
 which is structurally tiny when the gain is under-modelled) — and records the
@@ -194,9 +197,26 @@ gain > 1 (the hunting regime) — so "conservative" means erring high. The
 bootstrap gain is per-run (not persisted); a restart re-learns it.
 
 3.6 **Anti-hunting invariant.** The closed loop may not oscillate: control
-error uses a **deadband** — no action while `|T' − (N̂ + Â)| <
-max(deadband_abs, deadband_rel × T')` (defaults 5 lx, 0.15) — plus
-**sustain**: the error must persist for `error_sustain` (default 20 s;
+error uses a **deadband** — no action while `|T' − (N̂ + Â)| < deadband`, where
+
+```
+deadband = max(min(deadband_abs, deadband_capacity_frac × C), deadband_floor, deadband_rel × T')
+```
+
+(defaults `deadband_abs` 5 lx, `deadband_capacity_frac` 0.2, `deadband_floor`
+0.5 lx, `deadband_rel` 0.15; `C` is the room capacity of §4.5). The absolute
+component is itself **capacity-scaled**: capped at a fraction of the room's own
+capacity so a low-capacity room (e.g. sofakrok, `C ≈ 8.8 lx` ⇒ effective abs
+`= min(5, 1.76) = 1.76 lx`) can reach targets that sit at or below the fixed
+5-lx floor — its auto day/evening tiers (`0.6·C ≈ 5.3` / `0.2·C ≈ 1.8`) are
+otherwise unreachable and the ACTIVE role never lights the room (the live
+incident). It is floored at `deadband_floor` (sensor-noise floor) so it never
+collapses to zero, and a high-capacity room (`C ≥ 25`) is unchanged (the `min`
+picks `deadband_abs`, and `deadband_rel × T'` still dominates for large
+targets). This scaling affects **control** only — the bootstrap/gain-EMA arming
+thresholds (§3.4/§3.5) still gate on the fixed `deadband_abs`, so a sub-delta
+room deliberately never arms bootstrap. Plus **sustain**: the error must
+persist for `error_sustain` (default 20 s;
 shortened to `error_sustain_fast` 2 s for role changes and mode edges).
 Corrections command the *model-predicted* output for the new target (feed
 forward), not an incremental nudge, so one write lands near the goal and the
@@ -255,15 +275,30 @@ the light being aesthetically dominant). A `boost` band additionally requires `E
 (benkebelysning stays off in the evening, matching legacy kitchen-off
 behavior where only the accent band survives sunset).
 
+**Room capacity `C`** is `Σ_i g_i · f_i(1) · m` — the sum of the channels'
+calibrated lux gains at full output scaled by the online gain multiplier `m`
+(§3.4). It is the most light the room can put on its own sensor, and it drives
+the auto lux tiers (§2.1), the control deadband (§3.6), and the closed-loop
+**capacity gate**: closed-loop control additionally requires `C ≥
+min_closed_loop_capacity` (default 4 lx). A calibrated-but-tiny-capacity room
+(e.g. kjøkken, whose sensor reads only ~2 lx with its lights at 100 % ⇒ `C ≈
+2`) would otherwise servo ~1.2 lx targets against ~1 lx sensor quantization and
+never visibly light — a regression versus its working open-loop mode. Below the
+gate the room falls back to the daylight-aware open-loop path (§4.7), the exact
+same code path an uncalibrated room takes. `C` is computed once per room per
+cycle and shared by the gate and the closed loop (no duplicate formula).
+
 4.6 **Open-loop tables.** Without a usable lux sensor, role tiers map to
 normalized outputs per band: `out_active_day`, `out_active_evening`,
 `out_background` (profile), interpolated by E, scaled by master gain, floored
 by `dim_floor`.
 
-4.7 **Daylight-aware open-loop.** A room that *has* a lux sensor but whose
-closed loop is not *trusted* (§3.5 — neither `calibrated` nor
-bootstrap-confident) runs the open-loop tables (4.6) scaled by a **daylight
-factor** `D = clamp(1 − N̂ / daylight_full, daylight_min_factor, 1.0)`, applied
+4.7 **Daylight-aware open-loop.** A room that *has* a lux sensor but is not
+closed-loop **eligible** — either not *trusted* (§3.5 — neither `calibrated`
+nor bootstrap-confident) *or* trusted but below the capacity gate (`C <
+min_closed_loop_capacity`, §4.5) — runs the open-loop tables (4.6) scaled by a
+**daylight factor** `D = clamp(1 − N̂ / daylight_full, daylight_min_factor,
+1.0)`, applied
 multiplicatively to the ACTIVE/ADJACENT/BACKGROUND outputs *after* circadian
 interpolation and *before* the §8 funnel. `N̂` is the estimator's
 natural-light estimate, which for an untrusted room ≈ the filtered lux (its own
@@ -382,7 +417,22 @@ channel, latest-value-wins coalescing. Site-wide concurrent command cap
 8.4 **Echo ledger.** Every command is recorded (channel, value, timestamp).
 Incoming state reports matching a recent command (± `echo_tolerance`, within
 `echo_window` 10 s) are consumed as echoes; everything else is a *foreign
-change* (§9). Mirrors sonos-conductor's controller ledger.
+change* (§9). Mirrors sonos-conductor's controller ledger. In addition to the
+time-boxed echoes, the adapter keeps a **standing setpoint** per channel (the
+last commanded normalized level) so an integration's periodic true-state poll
+(Plejd re-reports every ~3 min, as a `uint16/256` float) that re-confirms our
+own value long after the echo TTL is not misread as a foreign change.
+
+**Ledger seeding across startup/reload.** On controller start — a fresh setup
+*and* an options reload — the standing setpoint of every configured channel is
+seeded from its current live state (its normalized brightness if on, `0.0` if
+off) *before* subscriptions arm. A reload rebuilds the controller and would
+otherwise wipe the standing setpoints; the next poll re-report of the
+unchanged pre-reload level then has no ledger match and latches a **false**
+manual override within seconds (a live incident). Seeding makes that first
+re-report tolerance-match and be consumed. Accepted trade-off: a genuine manual
+change made in the snapshot→first-report gap is absorbed once (the same
+grossly-different report will re-latch on any subsequent change).
 
 8.5 **Availability.** A channel (or the whole Plejd gateway) unavailable ⇒
 skip its writes this cycle and re-reconcile on recovery — never queue against
@@ -426,6 +476,13 @@ resulting state lands inside echo tolerance.
   (measurement, publish-gated: 5-point buckets + ≥ 10 s interval — recorder
   discipline per presence-conductor lesson), `sensor.<room>_target_lux`,
   `binary_sensor.<room>_overridden`.
+- Per-room debug sensor `sensor.<room>_channels` (`DIAGNOSTIC`, **disabled by
+  default** — registry opt-in while debugging): state is the room's peak
+  commanded output as a whole percent; attributes carry one `{output_pct, ct,
+  on}` entry per channel from the engine's commanded state. ALL attributes are
+  `MATCH_ALL`-unrecorded and pushes are gated to a changed commanded value + a
+  ≥ 10 s interval (piggybacking the publish signal — no new timers), so even
+  when enabled it never lands in the recorder.
 - `button.<room>_record_light_response` (4.4) + calibration result event
   entity.
 - All volatile values live in engine state / diagnostics platform, never in
@@ -467,7 +524,9 @@ override latches (not restored — cleared on restart).
 | bootstrap_min_obs / bootstrap_margin | 3 / 1.5 | 3.5, 4.4 |
 | lux_stale | 300 s | 3.5 |
 | deadband_abs / deadband_rel | 5 lx / 0.15 | 3.6 |
+| deadband_capacity_frac / deadband_floor | 0.2 / 0.5 lx | 3.6 |
 | error_sustain / error_sustain_fast | 20 s / 2 s | 3.6 |
+| min_closed_loop_capacity | 4 lx | 4.5, 4.7 |
 | calibration_levels / calibration_dwell | 10,25,50,75,100 % / 4 s | 4.4 |
 | daylight_full / daylight_min_factor | 200 lx / 0.0 | 4.7 |
 | band_overlap / boost_evening_max | 0.15 / 0.5 | 4.5 |
