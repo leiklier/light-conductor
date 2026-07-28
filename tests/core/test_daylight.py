@@ -144,3 +144,33 @@ def test_outdoor_mode_output_ignores_daylight_factor() -> None:
     eng.handle(ReviewTick(), t + timedelta(seconds=60))  # past startup grace
     # out_background is 0.3 — unscaled by D (which would give ~0.075).
     assert abs(eng.state.rooms["lab"].channels["c"].commanded_b - 0.3) < 0.03
+
+
+def test_daylight_latch_prevents_hunting_while_observations_pend() -> None:
+    """§4.7 latch invariant: with a high-own-gain untrusted room under swinging
+    daylight, the daylight factor must not re-command output while a shadow
+    observation is settling — command direction reversals stay tiny and
+    observations still arm (the latch neither oscillates nor starves)."""
+    import math
+
+    chans = [Channel("c", gain=180.0, model_gain=1.0)]
+    cfg = closed_config(chans, out_active_day={Band.PRIMARY: 0.8})
+    eng = booted_engine(cfg, sun=DAY, calibrated=False)
+
+    t = START
+    seen_pending = False
+    history: list[float] = []
+    for i in range(240):  # 40 min at 10 s cadence
+        lux = 75.0 + 75.0 * math.sin(i / 24.0)  # slow 0-150 lx swell
+        eng.handle(LuxReport("lab", lux), t)
+        est = eng.state.rooms["lab"].est
+        seen_pending = seen_pending or est.pending_valid
+        history.append(_commanded(eng))
+        t = t + timedelta(seconds=10)
+
+    deltas = [b - a for a, b in zip(history, history[1:], strict=False) if abs(b - a) > 1e-9]
+    reversals = sum(1 for a, b in zip(deltas, deltas[1:], strict=False) if a * b < 0)
+    assert reversals <= 4, f"daylight loop hunting: {reversals} reversals"
+    assert seen_pending  # the latch never starved bootstrap observations
+    # And the output genuinely tracked daylight (not frozen throughout).
+    assert max(history) - min(history) > 0.2

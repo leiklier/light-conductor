@@ -457,6 +457,8 @@ class LightConductorOptionsFlow(OptionsFlow):
             updated[CONF_TV_MODE] = user_input.get(CONF_TV_MODE, False)
             if user_input.get(CONF_HOLD_SECONDS):
                 updated[CONF_HOLD_SECONDS] = user_input[CONF_HOLD_SECONDS]
+            else:
+                updated.pop(CONF_HOLD_SECONDS, None)  # blank clears the room override
             profile = dict(room.get(CONF_PROFILE, _default_profile()))
             for key in (
                 CONF_VACANCY,

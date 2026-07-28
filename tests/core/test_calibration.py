@@ -365,16 +365,20 @@ def test_abort_on_sensor_going_stale_mid_sweep() -> None:
     assert results and results[0].reason == "sensor_stale"
 
 
-def test_dead_channel_gets_zero_gain_default_curve() -> None:
-    """§4.4: a channel that produces no measurable light gets gain 0, no crash."""
+def test_dead_channel_rejects_at_commit_not_on_reload() -> None:
+    """§4.4: a channel that produces no measurable light must reject the sweep
+    at commit time (reason dark_channel) — a zero-gain commit would pass
+    in-memory but be discarded by RoomCalibration.validate on the next load,
+    silently reverting the room after a restart."""
     chans = [Channel("dead", gain=0.0, band=Band.PRIMARY)]
     eng = _cal_engine(chans)
     plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 0.0)
     start = BASE + timedelta(seconds=70)
     eng.handle(StartCalibration("lab"), start)
     results = _drive_sweep(eng, plant, start + timedelta(seconds=1))
-    assert results and results[0].ok
-    assert eng.calibration_of("lab").gains["dead"] == 0.0
+    assert results and not results[0].ok
+    assert results[0].reason == "dark_channel"
+    assert not eng._photo["lab"].calibrated
 
 
 # --- F3: guards that were mutation-invisible ----------------------------

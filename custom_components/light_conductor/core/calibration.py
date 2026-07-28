@@ -232,6 +232,16 @@ def _commit(rs: RoomState, plan: Plan, now: datetime, tun: Tunables) -> Outcome:
     for cid in cal.channel_order:
         meas = cal.measurements.get(cid, {})
         gains[cid], curves[cid] = _fit_channel(base, meas, tun.calibration_levels)
+    if any(g <= 0.0 for g in gains.values()):
+        # A channel whose sampled levels never rose above the off baseline
+        # yields gain 0 — RoomCalibration.validate would reject it on the next
+        # load anyway, silently reverting the room after a restart. Reject at
+        # commit time instead so the operator sees it.
+        _restore_light(rs, plan, now)
+        rs.cal = None
+        return Outcome(
+            done=True, ok=False, reason="dark_channel", coverage=coverage, restore_light=True
+        )
     calibration = RoomCalibration(room_id="", gains=gains, curves=curves)
     rs.cal = None
     return Outcome(done=True, ok=True, reason="ok", calibration=calibration, coverage=coverage)
