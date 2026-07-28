@@ -8,12 +8,15 @@ never write engine state directly.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import Entity
+from homeassistant.helpers.entity_platform import EntityPlatform
+from homeassistant.util import slugify
 
 from .const import DOMAIN, signal_update
 
@@ -52,7 +55,29 @@ class LightConductorEntity(Entity):
         self.controller = controller
         self._entry = controller.entry
         self._attr_unique_id = f"{self._entry.entry_id}_{suffix}"
+        #: English, language-stable object-id fragment (§10, presence-conductor
+        #: idiom): the ``suffix`` already encodes ``<room>_<kind>`` or the global
+        #: kind, so no room name is doubled and the id never follows HA language.
+        self._object_id_suffix = suffix
         self._attr_device_info = hub_device_info(self._entry)
+
+    @callback
+    def add_to_platform_start(
+        self,
+        hass: HomeAssistant,
+        platform: EntityPlatform,
+        parallel_updates: asyncio.Semaphore | None,
+    ) -> None:
+        """Pin a language-stable ``light_conductor_<suffix>`` object id (§10).
+
+        Only sets it for a fresh entity (``entity_id`` unset); an entry already
+        in the registry keeps its stored id, so this never renames live entities
+        — the operator does that separately.
+        """
+        if self.entity_id is None:
+            object_id = slugify(f"light_conductor_{self._object_id_suffix}")
+            self.entity_id = f"{platform.domain}.{object_id}"
+        super().add_to_platform_start(hass, platform, parallel_updates)
 
     @callback
     def _on_engine_update(self) -> None:
