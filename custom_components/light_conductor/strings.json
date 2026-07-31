@@ -119,7 +119,9 @@
           "band": "Allocation band",
           "weight": "Weight",
           "fixed_ct": "Fixed colour temperature (K, empty = CT-capable)",
-          "dim_floor": "Dim floor"
+          "dim_floor": "Dim floor",
+          "response_slope": "Response slope (empty = 1.0)",
+          "response_offset": "Response offset (empty = 0.0)"
         }
       },
       "tunables": {

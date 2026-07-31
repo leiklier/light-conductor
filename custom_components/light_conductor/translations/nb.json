@@ -119,7 +119,9 @@
           "band": "Tildelingsbånd",
           "weight": "Vekt",
           "fixed_ct": "Fast fargetemperatur (K, tom = CT-kapabel)",
-          "dim_floor": "Dimmegulv"
+          "dim_floor": "Dimmegulv",
+          "response_slope": "Responshelning (tom = 1.0)",
+          "response_offset": "Responsforskyvning (tom = 0.0)"
         }
       },
       "tunables": {

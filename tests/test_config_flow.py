@@ -118,9 +118,16 @@ async def test_options_edit_channel(hass: HomeAssistant) -> None:
     assert result["step_id"] == "pick_channel"
     result = await configure(result["flow_id"], {"entity": "light.k"})
     assert result["step_id"] == "channel_detail"
-    # Edit band/weight/dim_floor; omit fixed_ct ⇒ CT-capable.
+    # Edit band/weight/dim_floor + the response mapping; omit fixed_ct ⇒ CT-capable.
     result = await configure(
-        result["flow_id"], {"band": "accent", "weight": 2.5, "dim_floor": 0.05}
+        result["flow_id"],
+        {
+            "band": "accent",
+            "weight": 2.5,
+            "dim_floor": 0.05,
+            "response_slope": 0.8,
+            "response_offset": -0.5,
+        },
     )
     assert result["type"] == FlowResultType.MENU  # back at the rooms menu
     result = await configure(result["flow_id"], {"next_step_id": "init"})
@@ -133,6 +140,62 @@ async def test_options_edit_channel(hass: HomeAssistant) -> None:
     assert ch["weight"] == 2.5
     assert ch["fixed_ct"] is None  # empty fixed_ct ⇒ CT-capable
     assert ch["dim_floor"] == 0.05
+    assert ch["response_slope"] == 0.8
+    assert ch["response_offset"] == -0.5
+
+
+async def test_options_edit_channel_response_blank_defaults(hass: HomeAssistant) -> None:
+    """§4.5: omitting the response fields in the channel form ⇒ no-op defaults."""
+    entry = await setup_entry(hass, options([room("k", ["light.k"])]))
+
+    async def configure(flow_id: str, data: dict) -> dict:
+        return await hass.config_entries.options.async_configure(flow_id, data)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await configure(result["flow_id"], {"next_step_id": "rooms"})
+    result = await configure(result["flow_id"], {"next_step_id": "channels"})
+    result = await configure(result["flow_id"], {"room_id": "k"})
+    result = await configure(result["flow_id"], {"entity": "light.k"})
+    # Submit without the response fields (a cleared/blank form).
+    result = await configure(
+        result["flow_id"], {"band": "primary", "weight": 1.0, "dim_floor": 0.02}
+    )
+    result = await configure(result["flow_id"], {"next_step_id": "init"})
+    result = await configure(result["flow_id"], {"next_step_id": "finish"})
+
+    ch = entry.options[CONF_ROOMS][0]["channels"][0]
+    assert ch["response_slope"] == 1.0
+    assert ch["response_offset"] == 0.0
+
+
+def test_build_engine_config_maps_response_mapping() -> None:
+    """§4.5 adapter: build_engine_config threads response_slope/offset onto the
+    ChannelConfig; a channel without the keys defaults to the no-op (1.0/0.0)."""
+    from custom_components.light_conductor.const import build_engine_config
+
+    mapped = room(
+        "kj",
+        ["light.benke"],
+        channels=[
+            {
+                "entity": "light.benke",
+                "band": "boost",
+                "weight": 1.0,
+                "fixed_ct": 2700,
+                "dim_floor": 0.02,
+                "response_slope": 0.8,
+                "response_offset": -0.5,
+            }
+        ],
+    )
+    plain = room("stue", ["light.tak"])  # legacy channel dict, no response keys
+    cfg = build_engine_config(None, options([mapped, plain]))
+    benke = cfg.room("kj").channel("light.benke")
+    assert benke.response_slope == 0.8
+    assert benke.response_offset == -0.5
+    tak = cfg.room("stue").channel("light.tak")
+    assert tak.response_slope == 1.0
+    assert tak.response_offset == 0.0
 
 
 def test_profile_parses_lux_tiers() -> None:

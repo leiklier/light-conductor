@@ -26,7 +26,7 @@ from custom_components.light_conductor.core.model import (
     InitialSnapshot,
     RoomCalibration,
 )
-from custom_components.light_conductor.core.plan import CalibrationResult
+from custom_components.light_conductor.core.plan import CalibrationResult, SetChannel
 from custom_components.light_conductor.core.tunables import Tunables
 
 from .plant import Channel, Plant, closed_config
@@ -124,6 +124,40 @@ def test_sweep_recovers_gains_within_tolerance() -> None:
     assert dict(results[0].coverage) == {"acc": 1.0, "pri": 1.0}
     # The room is now marked calibrated (photometry committed).
     assert eng._photo["lab"].calibrated
+
+
+def test_sweep_bypasses_response_mapping() -> None:
+    """§4.4/§4.5: a calibration sweep commands each channel at its RAW prescribed
+    dwell levels, bypassing the §4.5 response mapping. A benke-like channel
+    (slope 0.8, offset -0.5, which would map every level <= 0.625 to 0) is swept
+    at the true levels and recovered - never falsely rejected as dark_channel."""
+    chans = [
+        Channel("benke", gain=120.0, band=Band.BOOST, response_slope=0.8, response_offset=-0.5)
+    ]
+    eng = _cal_engine(chans)
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 0.0)
+
+    start = BASE + timedelta(seconds=70)
+    eng.handle(StartCalibration("lab"), start)
+
+    levels: set[float] = set()
+    results: list[CalibrationResult] = []
+    t = start + timedelta(seconds=1)
+    for _ in range(200):
+        cmds = plant.tick(t)
+        for c in cmds:
+            if isinstance(c, SetChannel) and c.channel_id == "benke" and c.level > 0.0:
+                levels.add(round(c.level, 4))
+        results.extend(c for c in cmds if isinstance(c, CalibrationResult))
+        if eng.state.rooms["lab"].cal is None and results:
+            break
+        t = t + timedelta(seconds=1)
+
+    # Emitted command levels equal the prescribed dwell levels, not mapped values.
+    assert levels == set(Tunables().calibration_levels)
+    assert len(results) == 1 and results[0].ok and results[0].reason == "ok"
+    cal = eng.calibration_of("lab")
+    assert abs(cal.gains["benke"] - 120.0) / 120.0 < 0.05
 
 
 def test_sweep_recovers_a_nonlinear_curve() -> None:

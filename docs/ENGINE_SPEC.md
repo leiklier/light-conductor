@@ -259,6 +259,12 @@ a result event and marks the room `calibrated`. Uncalibrated rooms run
 open-loop until the first-night bootstrap (§3.5) has learned a conservative
 room-scalar gain over the default curve, then enter closed-loop with bounded
 influence; a full sweep later replaces that estimate with per-channel `g_i`/`f_i`.
+The sweep commands each channel at its exact prescribed dwell level directly
+(single writer for the room), **bypassing** both the §8 slew governor and the
+§4.5 response mapping — it must measure the fixture's *true* lux response, so a
+response-mapped channel (e.g. a benke curve of slope 0.8/offset −0.5, which
+would map every level ≤ 0.625 to 0) is still swept at the raw prescribed levels
+and never falsely rejected as `dark_channel`.
 
 4.5 **Allocation bands.** A room's channels are ordered into bands:
 `accent` (fills first, e.g. kjøkken downlights), `primary` (main body, e.g.
@@ -274,6 +280,36 @@ sensor sits next to benkebelysning; its gain dwarfs the taklys gain without
 the light being aesthetically dominant). A `boost` band additionally requires `E < boost_evening_max`
 (benkebelysning stays off in the evening, matching legacy kitchen-off
 behavior where only the accent band survives sunset).
+
+**Per-channel response mapping.** After weight sharing and the boost evening
+lockout, each channel applies an affine RESPONSE MAPPING to its post-weight
+band output `out`: the emitted command is `clamp(response_slope · out +
+response_offset, 0, 1)`. This aligns fixtures whose physical dimming curves
+differ — a steep LED strip (kjøkken `benkebelysning`) versus flat spots — so a
+lone-channel band, whose weight normalizes away, no longer blasts over its
+neighbours at full demand. A **zero band output always stays 0**: the mapping
+runs only when `out > 0`, so a positive offset can never light a channel whose
+band is off, and it can never resurrect the evening-locked boost band. The
+defaults (`response_slope` 1.0, `response_offset` 0.0) are an exact
+byte-identical no-op for every existing config. The mapping is the **LAST step**
+of open-loop channel mapping — after tier selection, circadian interpolation,
+the daylight factor `D` (§4.7), the evening cap (§2.4), master gain (§7), weight
+share, and the boost evening lockout — matching the legacy semantics, where the
+kitchen's `0.8·base − 50` applied to the *final* base %. Master gain multiplies
+the band outputs (`gain.scale`) *before* `allocate()` in the §8 funnel, so the
+mapping sees the already-gained output. Because both open-loop consumers of
+`allocate()` — the mode-resolution table path (night/TV/outdoor/off) and the
+tier/daylight open-loop path — flow every band output through this one function
+before the §8 governor, the mapping automatically covers the ACTIVE/ADJACENT/
+BACKGROUND tiers and the night-path and TV mode tables alike. The **closed-loop**
+path (§3.6/§4.5) is deliberately untouched: there the calibrated lux curves own
+the physical response, so no response mapping applies (ADR D16). The estimator
+stays consistent for free — `Â`/bootstrap/`record_step` read the channel's
+actual `commanded_b` (the mapped value the governor wrote to the ledger) and
+`f_i` maps `commanded_b` → flux, so the mapping changes *what* is commanded, not
+how observations are interpreted; nothing recomputes an expected level from the
+band outputs while bypassing the mapping, so the echo ledger and the gain
+observation see the mapped value as the target end to end.
 
 **Room capacity `C`** is `Σ_i g_i · f_i(1) · m` — the sum of the channels'
 calibrated lux gains at full output scaled by the online gain multiplier `m`
