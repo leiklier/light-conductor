@@ -925,9 +925,15 @@ class Controller:
             return  # our own command echo (incl. an intermediate fade sample)
         # Re-confirmation of the standing setpoint (e.g. Plejd's 3-min true-
         # state poll re-reporting our value as a float): not a foreign change.
+        # Only a NO-OP re-report qualifies — if the light actually moved to
+        # reach the setpoint value (old level differs materially), that is a
+        # genuine change (a wall dial restoring the previous level lands
+        # exactly on our last command) and must latch (§9.1/§11.1).
         last = self._last_commanded.get(entity_id)
         if last is not None and abs(level - last) <= ECHO_LEVEL_TOL:
-            return
+            old_level = _obs_level(old) if old is not None else None
+            if old_level is None or abs(old_level - last) <= ECHO_LEVEL_TOL:
+                return
         # level is 0.0 (off) or > 0 here — pass it through verbatim; the engine
         # reads 0/None alike as "off" but 0.0 must not become a spurious None.
         self.submit(ForeignChange(channel_id=entity_id, level=level, ct=ct))

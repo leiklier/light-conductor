@@ -230,6 +230,9 @@ def build_engine_config(hass: HomeAssistant | None, options: Mapping[str, Any]) 
                 night_path=room_id in night_path_rooms,
                 tv_mode=bool(room.get(CONF_TV_MODE, False)),
                 has_lux_sensor=bool(room.get(CONF_LUX_SENSOR)),
+                presence_capable=bool(
+                    room.get(CONF_PRESENCE_PRIMARY) or room.get(CONF_OCCUPANCY_FALLBACK)
+                ),
             )
         )
     return EngineConfig(rooms=tuple(rooms))

@@ -417,7 +417,7 @@ class Engine:
                 pass  # night path suspends the override → fall through
             elif res is not None and res.off:
                 override.release(rs)  # sleep/away hard-off releases + wins
-            elif override.should_release(rs, s, off_worthy, now, tun):
+            elif override.should_release(rs, s, off_worthy, room.presence_capable, now, tun):
                 override.release(rs)
             else:
                 # Still adjusting nothing, but keep both clocks alive: the

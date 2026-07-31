@@ -166,6 +166,35 @@ async def test_poll_reconfirmation_after_startup_seed_is_not_foreign(hass: HomeA
     assert controller.engine.room_state("a").overridden is True
 
 
+async def test_dial_transition_onto_standing_setpoint_latches(hass: HomeAssistant) -> None:
+    """§9.1/§11.1: a REAL transition landing on the standing setpoint must
+    latch — a Plejd dial turn-on restores the previous level, which is exactly
+    our last command (the soverom dial incident). Only NO-OP re-reports (old
+    level already at the setpoint) are consumed as poll re-confirmations."""
+    set_light(hass, "light.a", "on", brightness=128, transition=True)
+    hass.states.async_set("binary_sensor.pa", "on")
+    entry = await setup_entry(
+        hass,
+        options([room("a", ["light.a"], presence="binary_sensor.pa")]),
+        enabled=False,  # observe-only: _last_commanded stays at the seed (128/255)
+    )
+    controller = hass.data[DOMAIN][entry.entry_id]
+
+    # User turns the light off at the wall: foreign (0 vs setpoint), adopts off.
+    set_light(hass, "light.a", "off", transition=True)
+    await hass.async_block_till_done()
+    assert controller.engine.room_state("a").overridden is True
+    assert controller.engine.room_state("a").channels["light.a"].commanded_b == 0.0
+
+    # Dial back on — Plejd restores the previous level, exactly the standing
+    # setpoint. old(off) → new(128) is a genuine transition: it must be adopted,
+    # not swallowed as a poll re-confirmation (pre-fix: commanded_b stayed 0.0).
+    set_light(hass, "light.a", "on", brightness=128, transition=True)
+    await hass.async_block_till_done()
+    assert controller.engine.room_state("a").overridden is True
+    assert abs(controller.engine.room_state("a").channels["light.a"].commanded_b - 128 / 255) < 1e-6
+
+
 async def test_transition_fade_reports_no_override(hass: HomeAssistant, monkeypatch) -> None:
     """Reports tracking the fade front must NOT latch; an off-front yank does (F1)."""
     _controller, overridden, clock, env = await _partial_fade_setup(hass, monkeypatch)
