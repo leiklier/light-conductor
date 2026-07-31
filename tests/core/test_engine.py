@@ -211,7 +211,8 @@ def test_override_latches_then_releases_on_away() -> None:
 def test_blind_room_dial_survives_hold_expiry() -> None:
     """§9.2: soverom incident regression — a manual dial in a blind door room
     after its trigger hold expired must latch and HOLD; the OFF-decayed role
-    must not release it and counter the light to 0 within a review."""
+    must not release it and counter the light to 0 at the next review. (Test
+    reviews run minutes apart; live the counter came 6-16 s after the dial.)"""
     eng = _engine()
     # Door opens; the room lights, then the trigger hold (300 s) expires → off.
     eng.handle(TriggerFired("soverom"), at(1, 20, 0))
