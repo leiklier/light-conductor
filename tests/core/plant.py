@@ -55,6 +55,9 @@ class Channel:
     curve: Callable[[float], float] = square_law
     weight: float = 1.0
     model_gain: float | None = None  # None ⇒ calibrated to the true gain
+    #: Affine open-loop response mapping (§4.5); defaults are a no-op.
+    response_slope: float = 1.0
+    response_offset: float = 0.0
 
     @property
     def engine_gain(self) -> float:
@@ -187,6 +190,8 @@ def closed_config(
                         ct_range=CT_RANGE if c.band is Band.ACCENT else None,
                         weight=c.weight,
                         gain=c.engine_gain,
+                        response_slope=c.response_slope,
+                        response_offset=c.response_offset,
                     )
                     for c in channels
                 ),

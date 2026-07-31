@@ -7,6 +7,8 @@ reproduces or deliberately fixes.
 
 from __future__ import annotations
 
+from math import isclose
+
 from custom_components.light_conductor.core.engine import Engine
 from custom_components.light_conductor.core.events import (
     ActivityChanged,
@@ -27,7 +29,17 @@ from custom_components.light_conductor.core.events import (
     TvChanged,
     VacationChanged,
 )
-from custom_components.light_conductor.core.model import Activity, InitialSnapshot, Role
+from custom_components.light_conductor.core.model import (
+    Activity,
+    Band,
+    ChannelConfig,
+    EngineConfig,
+    InitialSnapshot,
+    Profile,
+    Role,
+    RoomConfig,
+    Vacancy,
+)
 from custom_components.light_conductor.core.plan import SetChannel, TurnOffChannel
 
 from .helpers import apartment, at, diag, offs, review, sets
@@ -471,3 +483,54 @@ def test_role_arbitration_through_engine() -> None:
     eng2.handle(PresenceChanged("spisebord", True), at(1, 20, 0))
     eng2.handle(TvChanged(True), at(1, 20, 1))
     assert eng2.state.rooms["spisebord"].role is Role.TV
+
+
+# --- §4.5: per-channel response mapping, end to end ---------------------
+
+
+def _response_room() -> EngineConfig:
+    """A kjøkken-like room with a benke boost channel that carries the normalized
+    legacy response mapping (slope 0.8, offset -0.5). Dedicated config so the
+    shared apartment fixture stays untouched (no perturbation of other tests)."""
+    return EngineConfig(
+        rooms=(
+            RoomConfig(
+                room_id="respkj",
+                channels=(
+                    ChannelConfig("respkj_taklys", band=Band.PRIMARY, fixed_ct=2700),
+                    ChannelConfig(
+                        "respkj_benke",
+                        band=Band.BOOST,
+                        fixed_ct=2700,
+                        response_slope=0.8,
+                        response_offset=-0.5,
+                    ),
+                ),
+                profile=Profile(
+                    vacancy=Vacancy.DIM,
+                    out_active_day={Band.PRIMARY: 1.0, Band.BOOST: 1.0},
+                    out_active_evening={Band.PRIMARY: 0.3, Band.BOOST: 0.6},
+                    out_background={Band.PRIMARY: 0.06},
+                    evening_output_cap=1.0,
+                ),
+            ),
+        )
+    )
+
+
+def test_response_mapping_end_to_end_benke() -> None:
+    """§4.5: at daytime full ACTIVE the benke boost channel is commanded ~0.3 (the
+    mapping 0.8*1.0 - 0.5) while the primary sits at full; the evening lockout
+    then zeroes benke before the mapping could resurrect it."""
+    eng = Engine(_response_room(), None)
+    eng.handle(SunElevationChanged(DAY_SUN), at(1, 18, 0))
+    day = sets(eng.handle(PresenceChanged("respkj", True), at(1, 18, 1)))
+    # Primary at full (flux-space quantization lands it a hair under 1.0).
+    assert isclose(day["respkj_taklys"].level, 1.0, abs_tol=0.01)
+    # Benke reshaped to 0.3 — no longer blasting equal to the primary.
+    assert isclose(day["respkj_benke"].level, 0.3, abs_tol=1e-6)
+
+    # Evening (sun down): the boost band locks out, benke goes off.
+    cmds = eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))
+    assert "respkj_benke" in offs(cmds)
+    assert not eng.state.rooms["respkj"].channels["respkj_benke"].on

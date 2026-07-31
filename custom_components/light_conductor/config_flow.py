@@ -47,6 +47,8 @@ from .const import (
     CONF_CH_DIM_FLOOR,
     CONF_CH_ENTITY,
     CONF_CH_FIXED_CT,
+    CONF_CH_RESPONSE_OFFSET,
+    CONF_CH_RESPONSE_SLOPE,
     CONF_CH_WEIGHT,
     CONF_CHANNELS,
     CONF_EVENING_CAP,
@@ -629,6 +631,11 @@ class LightConductorOptionsFlow(OptionsFlow):
             # Empty ⇒ CT-capable (read the kelvin range from the entity, const.py).
             ch[CONF_CH_FIXED_CT] = None if fixed in (None, 0, "") else int(fixed)
             ch[CONF_CH_DIM_FLOOR] = user_input[CONF_CH_DIM_FLOOR]
+            # Affine response mapping (rule 4.5); blank ⇒ no-op defaults.
+            slope = user_input.get(CONF_CH_RESPONSE_SLOPE)
+            ch[CONF_CH_RESPONSE_SLOPE] = 1.0 if slope in (None, "") else float(slope)
+            offset = user_input.get(CONF_CH_RESPONSE_OFFSET)
+            ch[CONF_CH_RESPONSE_OFFSET] = 0.0 if offset in (None, "") else float(offset)
             channels[idx] = ch
             updated = dict(room)
             updated[CONF_CHANNELS] = channels
@@ -660,6 +667,21 @@ class LightConductorOptionsFlow(OptionsFlow):
                 vol.Required(
                     CONF_CH_DIM_FLOOR, default=float(current.get(CONF_CH_DIM_FLOOR, 0.02))
                 ): _pct(0.02),
+                # Affine response mapping (rule 4.5); blank ⇒ no-op defaults
+                # (slope 1.0, offset 0.0). Prefilled via suggested_value so a
+                # cleared field submits nothing ⇒ default.
+                vol.Optional(
+                    CONF_CH_RESPONSE_SLOPE,
+                    description={"suggested_value": current.get(CONF_CH_RESPONSE_SLOPE)},
+                ): NumberSelector(
+                    NumberSelectorConfig(min=0.1, max=2, step=0.05, mode=NumberSelectorMode.BOX)
+                ),
+                vol.Optional(
+                    CONF_CH_RESPONSE_OFFSET,
+                    description={"suggested_value": current.get(CONF_CH_RESPONSE_OFFSET)},
+                ): NumberSelector(
+                    NumberSelectorConfig(min=-1, max=1, step=0.05, mode=NumberSelectorMode.BOX)
+                ),
             }
         )
         return self.async_show_form(

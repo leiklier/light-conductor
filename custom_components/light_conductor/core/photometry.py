@@ -145,6 +145,13 @@ def allocate(
     calibrated sensor gain (§3.1). The boost band is gated off once
     ``E >= boost_evening_max`` (benkebelysning evening lockout, rule 4.5).
     The lux ``band_overlap`` crossfade is a closed-loop mechanism (estimator).
+
+    The per-channel affine RESPONSE MAPPING (rule 4.5) is the LAST step: after
+    weight sharing and the boost evening lockout the post-weight output ``out``
+    becomes ``clamp(response_slope · out + response_offset, 0, 1)``. A zero
+    ``out`` ALWAYS stays 0 (the mapping runs only when ``out > 0``) so a
+    positive offset never lights an off channel and the evening lockout can
+    never be resurrected. Defaults (1.0/0.0) are an exact byte-identical no-op.
     """
     max_weight: dict[Band, float] = {}
     for ch in channels:
@@ -156,5 +163,10 @@ def allocate(
             out = 0.0  # rule 4.5 evening lockout
         peak = max_weight.get(ch.band, 0.0)
         share = ch.weight / peak if peak > 0.0 else 1.0
-        result[ch.channel_id] = max(0.0, min(1.0, out * share))
+        channel_out = max(0.0, min(1.0, out * share))
+        # Affine response mapping (rule 4.5), applied last. A zero band output
+        # stays 0 — a positive offset must never light an off channel.
+        if channel_out > 0.0:
+            channel_out = max(0.0, min(1.0, ch.response_slope * channel_out + ch.response_offset))
+        result[ch.channel_id] = channel_out
     return result

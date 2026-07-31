@@ -89,6 +89,11 @@ CONF_CH_BAND = "band"
 CONF_CH_WEIGHT = "weight"
 CONF_CH_FIXED_CT = "fixed_ct"  # None/0 => CT-capable, read range from entity
 CONF_CH_DIM_FLOOR = "dim_floor"
+#: Affine response mapping (rule 4.5): open-loop command =
+#: clamp(response_slope · out + response_offset, 0, 1). Blank => defaults 1.0/0.0
+#: (exact no-op). See ADR D16 for the benke calibration.
+CONF_CH_RESPONSE_SLOPE = "response_slope"
+CONF_CH_RESPONSE_OFFSET = "response_offset"
 
 # --- profile option keys ----------------------------------------------------
 
@@ -203,6 +208,8 @@ def _channel_from_options(hass: HomeAssistant | None, opts: Mapping[str, Any]) -
         ct_range=_ct_range(hass, entity_id) if ct_capable else None,
         dim_floor=float(opts.get(CONF_CH_DIM_FLOOR, 0.02)),
         weight=float(opts.get(CONF_CH_WEIGHT, 1.0)),
+        response_slope=float(opts.get(CONF_CH_RESPONSE_SLOPE, 1.0)),
+        response_offset=float(opts.get(CONF_CH_RESPONSE_OFFSET, 0.0)),
     )
 
 

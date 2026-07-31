@@ -225,6 +225,48 @@ transition landing on the setpoint — a Plejd dial turn-on restores the
 previous level, which is typically exactly our last command — now latches.
 Sleep/away hard-offs still win over overrides (unchanged, by design).
 
+## D16. Per-channel affine response mapping for the open-loop allocator (beta.9)
+
+Motivating calibration (live kjøkken). The kitchen has three channels:
+`downlights` (accent), `taklys` (primary), `benkebelysning` (boost, an LED
+strip). The bench strip has a far steeper perceived-brightness curve than the
+spots; the user's legacy script commanded it `benke% = clamp(0.8·base − 50, 0,
+100)` — off below base 62.5 %, only 30 % when the others sit at 100 %. The
+open-loop allocator gives a *lone-channel* band the full band output (the
+within-band weight normalizes away for a single channel), so at daytime full
+demand `benke` would be commanded EQUAL to the spots and visually blast over
+them. No existing knob covers this: `weight` is relative *within* a band (a
+lone channel is always its own peak ⇒ share 1), and `dim_floor` is a floor, not
+a ceiling or a slope.
+
+Decision. Add two frozen per-channel fields, `response_slope` (default 1.0) and
+`response_offset` (default 0.0), forming an affine RESPONSE MAPPING applied as
+the LAST step of open-loop channel mapping: `command = clamp(response_slope ·
+out + response_offset, 0, 1)` on the post-weight, post-evening-lockout band
+output `out`. A zero band output always stays 0 (the mapping runs only when
+`out > 0`) so a positive offset never lights an off channel and never resurrects
+the evening-locked boost band. The defaults are an exact byte-identical no-op,
+so every existing config and all existing tests are unaffected. Normalized to
+the engine's [0, 1] output space, the legacy benke formula becomes **slope 0.8,
+offset −0.5** (`0.8·base% − 50%`). The kjøkken values are *user config*, applied
+live through the options flow after deployment — never hardcoded in the engine.
+
+Closed-loop boundary. The mapping applies ONLY on the open-loop path. The
+closed-loop path (calibrated room above the §4.5 capacity gate) servos the
+calibrated lux curves, which already own each fixture's true physical response;
+layering a perceptual affine remap on top would double-compensate, so lux
+servoing deliberately supersedes it. If a response-mapped channel's room later
+calibrates and crosses the capacity gate, the mapping simply stops applying —
+no conflict, no double-compensation, a clean handover. Kjøkken today is
+open-loop (its sensor reads only ~2 lx at full output, `C ≈ 2 < gate 4`), so
+the mapping governs it; that is the intended state. Calibration sweeps
+(`RecordLightResponse`) also bypass the mapping — they command raw prescribed
+dwell levels to measure the true response, so a benke-like channel is not
+falsely rejected as a `dark_channel`. Estimator consistency is automatic:
+`Â`/bootstrap/`record_step` read the channel's post-mapping `commanded_b` and
+`f_i` maps that to flux, so the mapping changes what is commanded, not how the
+observation is interpreted.
+
 ## Open questions — RESOLVED (user, 2026-07-25)
 
 - **Q1 (D8):** master dimmer neutral at 50 % — confirmed (boost possible).

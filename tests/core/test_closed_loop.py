@@ -328,3 +328,30 @@ def test_probe_A_uncalibrated_bootstraps_then_closes_no_hunt() -> None:
     cs = eng.state.rooms["lab"].channels["c"]
     assert cs.commanded_b > 0.05  # did NOT park dark
     assert plant.reversals("c") <= 2  # no hunting (the probe-A regression)
+
+
+def test_response_mapping_ignored_by_closed_loop() -> None:
+    """§4.5/D16 boundary guard: closed loop commands via the calibrated curve
+    and must IGNORE the open-loop response mapping. A mapped channel (benke-like
+    slope 0.8/offset -0.5) must be commanded identically to an unmapped twin —
+    if the mapping ever leaked into channel_outputs_for_demand, the mapped run
+    would command 0.8·b-0.5 and settle far off target."""
+    plain = [Channel("c", gain=180.0)]
+    mapped = [Channel("c", gain=180.0, response_slope=0.8, response_offset=-0.5)]
+    settle = START + timedelta(seconds=80)
+
+    results = []
+    for chans in (plain, mapped):
+        eng = booted_engine(closed_config(chans), sun=20.0)
+        plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 40.0)
+        _run(plant, START, 40)
+        results.append(
+            (
+                eng.state.rooms["lab"].channels["c"].commanded_b,
+                plant.true_lux(settle),
+            )
+        )
+    (plain_b, plain_lux), (mapped_b, mapped_lux) = results
+    assert mapped_b == plain_b  # identical command: mapping not applied
+    assert abs(mapped_lux - 120.0) < 16.0  # still converges on the lux target
+    assert abs(plain_lux - mapped_lux) < 1e-9

@@ -121,6 +121,18 @@ class ChannelConfig:
     #: Calibrated lux gain at the sensor (observation model, §3.1). 1.0 until
     #: a calibration sweep (§4.4) lands; never used for allocation (rule 4.5).
     gain: float = 1.0
+    #: Affine per-channel RESPONSE MAPPING (rule 4.5). In the open-loop path the
+    #: channel's command is ``clamp(response_slope · out + response_offset, 0, 1)``
+    #: where ``out`` is the channel's post-weight band output (after weight share
+    #: and the boost evening lockout). It aligns fixtures whose physical dimming
+    #: curves differ (a steep LED strip vs. flat spots) so a lone-channel band no
+    #: longer blasts over its neighbours. Defaults (1.0/0.0) are an exact no-op.
+    #: A zero band output ALWAYS stays 0 — a positive offset must never light a
+    #: channel whose band is off (the mapping applies only when ``out > 0``). The
+    #: CLOSED-loop path is untouched: there the calibrated lux curves own the
+    #: physical response (§3.1, ADR D16).
+    response_slope: float = 1.0
+    response_offset: float = 0.0
 
     @property
     def ct_capable(self) -> bool:
