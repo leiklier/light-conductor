@@ -452,9 +452,15 @@ stops adjusting everything except mode hard-offs (sleep/away still win; night
 path suspends the override).
 
 9.2 **Override release.** The override clears on: room OFF-worthy vacancy
-(hold expiry at OFF tier), sleep on, away, master gain off/on cycle, or
-`override_timeout` (default 4 h). Release re-enters normal control with slew
-ramps (no jumps).
+(hold expiry at OFF tier) — **presence-capable rooms only**, sleep on, away,
+master gain off/on cycle, or `override_timeout` (default 4 h). Release
+re-enters normal control with slew ramps (no jumps). A room is
+presence-capable when a presence or occupancy-fallback sensor is configured;
+in a blind room (door/corridor triggers only) OFF-decay merely means the
+trigger hold expired while the occupant may still be present, so the latch
+holds until one of the other release conditions — otherwise a wall-dial
+adjustment is countered by the vacancy tier within one review (the soverom
+incident, 2026-07-29..31).
 
 9.3 **Manual-on respect.** A room turned on manually while the FSM wanted OFF
 is an override (9.1) — the legacy "only auto-on if the light is currently
@@ -494,7 +500,12 @@ resulting state lands inside echo tolerance.
 levels are adopted as ledger baselines (no startup flash, mirroring
 grow-conductor's restore-before-enforce), roles evaluate from live presence,
 and rooms whose lights differ grossly from the computed goal converge with
-`slew_step_empty` ramps only after `startup_grace` (30 s).
+`slew_step_empty` ramps only after `startup_grace` (30 s). The adapter's
+standing-setpoint consume (a report matching the last commanded level is a
+poll re-confirmation, not a foreign change) applies only to NO-OP re-reports:
+if the previous state differed materially from the setpoint, the light
+actually moved there — a wall dial restoring the previous level lands exactly
+on the last command — and it latches (§9.1).
 
 11.2 Restorable entities: master gain, enabled, occupational switches,
 override latches (not restored — cleared on restart).

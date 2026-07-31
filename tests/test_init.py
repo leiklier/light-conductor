@@ -26,3 +26,30 @@ async def test_unload_cleans_up(hass: HomeAssistant) -> None:
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
     assert entry.entry_id not in hass.data[DOMAIN]
+
+
+def test_presence_capable_derivation() -> None:
+    """§9.2/D15: presence_capable derives from configured sensing — the live
+    soverom option shape (presence_primary null, occupancy_fallback []) must
+    derive False; a fallback-only room (kontor's PIR) and a primary-sensor
+    room derive True."""
+    from custom_components.light_conductor.const import build_engine_config
+
+    from .adapter import options, room
+
+    blind = room("soverom", ["light.s"], shape="door")
+    blind["presence_primary"] = None  # exact live-entry shape of the incident
+    blind["occupancy_fallback"] = []
+    cfg = build_engine_config(
+        None,
+        options(
+            [
+                blind,
+                room("kontor", ["light.k"], fallback=["binary_sensor.pir"]),
+                room("sofakrok", ["light.f"], presence="binary_sensor.p"),
+            ]
+        ),
+    )
+    assert cfg.room("soverom").presence_capable is False
+    assert cfg.room("kontor").presence_capable is True
+    assert cfg.room("sofakrok").presence_capable is True

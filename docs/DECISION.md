@@ -201,6 +201,30 @@ gating on the fixed `deadband_abs` — a sub-delta room not arming bootstrap is
 a safety property, not a bug. Rejected alternative: lowering `deadband_abs`
 globally — it would make high-capacity rooms hunt on sensor noise.
 
+## D15. Blind rooms hold manual overrides; consume only no-op re-reports (beta.8)
+
+Live incident (soverom, 2026-07-29..31): every manual wall-dial/wall-press
+adjustment was countered to 0 within seconds. Root cause: soverom is a *blind*
+room — door-triggered, no presence sensing — so its natural role decays to OFF
+whenever the trigger hold expires, with nobody having left. Rule 9.2's
+"OFF-worthy vacancy releases the latch" therefore fired at the first review
+after every latch (the latch lived so briefly it never published), and
+`vacancy: off` re-asserted darkness. The release rule conflated "role decayed
+to OFF" with "room observed vacant"; those only coincide when the room can
+actually observe vacancy.
+
+Decision: (1) `RoomConfig.presence_capable` (set by the adapter when a
+presence or occupancy-fallback sensor is configured) gates the OFF-worthy
+release — blind rooms (soverom, gang, balkong today) hold a manual latch until
+`override_timeout` (4 h), sleep, away, or a master power cycle. Accepted
+consequence: a forgotten manual light in a blind room burns until the timeout
+or sleep. (2) The controller's standing-setpoint consume is transition-aware:
+a report matching `_last_commanded` is consumed only when the OLD level also
+matched (a true no-op re-report, e.g. Plejd's 3-min poll float). A genuine
+transition landing on the setpoint — a Plejd dial turn-on restores the
+previous level, which is typically exactly our last command — now latches.
+Sleep/away hard-offs still win over overrides (unchanged, by design).
+
 ## Open questions — RESOLVED (user, 2026-07-25)
 
 - **Q1 (D8):** master dimmer neutral at 50 % — confirmed (boost possible).

@@ -147,6 +147,7 @@ def _gang() -> RoomConfig:
         ),
         shape=RoomShape.CORRIDOR,
         neighbours=("sofakrok", "spisebord", "kjokken", "kontor"),
+        presence_capable=False,  # live gang has no occupancy sensing
         tv_mode=True,
         night_path=True,
     )
@@ -164,6 +165,7 @@ def _soverom() -> RoomConfig:
             evening_output_cap=0.4,
         ),
         shape=RoomShape.DOOR,
+        presence_capable=False,  # live soverom: door trigger only, blind
     )
 
 
@@ -178,6 +180,7 @@ def _balkong() -> RoomConfig:
             out_background={Band.PRIMARY: 0.2},
         ),
         shape=RoomShape.OUTDOOR,
+        presence_capable=False,  # live balkong: occupational switch only
     )
 
 

@@ -208,6 +208,35 @@ def test_override_latches_then_releases_on_away() -> None:
     assert "kontor_taklys" in offs(gone)
 
 
+def test_blind_room_dial_survives_hold_expiry() -> None:
+    """§9.2: soverom incident regression — a manual dial in a blind door room
+    after its trigger hold expired must latch and HOLD; the OFF-decayed role
+    must not release it and counter the light to 0 at the next review. (Test
+    reviews run minutes apart; live the counter came 6-16 s after the dial.)"""
+    eng = _engine()
+    # Door opens; the room lights, then the trigger hold (300 s) expires → off.
+    eng.handle(TriggerFired("soverom"), at(1, 20, 0))
+    eng.handle(ReviewTick(), at(1, 20, 6))
+    assert eng.state.rooms["soverom"].role is Role.OFF
+
+    # The occupant dials the wall to 60 % — the room is already OFF-worthy.
+    eng.handle(ForeignChange("soverom_taklys", 0.6), at(1, 20, 7))
+    assert eng.state.rooms["soverom"].overridden
+
+    # Reviews keep coming; the latch must hold and the engine must not write.
+    for minute in (8, 10, 20):
+        plan = eng.handle(ReviewTick(), at(1, 20, minute))
+        assert eng.state.rooms["soverom"].overridden
+        assert "soverom_taklys" not in sets(plan)
+        assert "soverom_taklys" not in offs(plan)
+    assert eng.state.rooms["soverom"].channels["soverom_taklys"].commanded_b == 0.6
+
+    # override_timeout (4 h) still ends it: released and driven to vacancy OFF.
+    late = eng.handle(ReviewTick(), at(2, 0, 8))
+    assert not eng.state.rooms["soverom"].overridden
+    assert "soverom_taklys" in offs(late)
+
+
 def test_override_suspended_by_night_path() -> None:
     """§9.1: night path suspends an override (safety path wins)."""
     eng = _engine()

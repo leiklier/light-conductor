@@ -32,20 +32,37 @@ def test_release_set_sleep_away_timeout_offworthy() -> None:
     """§9.2: release on sleep, away, override_timeout, or OFF-worthy vacancy."""
     base = RoomState(overridden=True, override_since=at(1, 20, 0))
 
-    assert override.should_release(base, EngineState(sleep=True), False, at(1, 20, 1), TUN)
-    assert override.should_release(base, EngineState(anyone_home=False), False, at(1, 20, 1), TUN)
-    assert override.should_release(base, EngineState(vacation=True), False, at(1, 20, 1), TUN)
-    # OFF-worthy vacancy (hold expiry at OFF tier) releases.
-    assert override.should_release(base, EngineState(), True, at(1, 20, 1), TUN)
+    assert override.should_release(base, EngineState(sleep=True), False, True, at(1, 20, 1), TUN)
+    assert override.should_release(
+        base, EngineState(anyone_home=False), False, True, at(1, 20, 1), TUN
+    )
+    assert override.should_release(base, EngineState(vacation=True), False, True, at(1, 20, 1), TUN)
+    # OFF-worthy vacancy (hold expiry at OFF tier) releases a presence-capable room.
+    assert override.should_release(base, EngineState(), True, True, at(1, 20, 1), TUN)
     # 4 h timeout.
-    assert override.should_release(base, EngineState(), False, at(2, 0, 0), TUN)
+    assert override.should_release(base, EngineState(), False, True, at(2, 0, 0), TUN)
     # None of the above while still active and home: hold the override.
-    assert not override.should_release(base, EngineState(), False, at(1, 20, 1), TUN)
+    assert not override.should_release(base, EngineState(), False, True, at(1, 20, 1), TUN)
+
+
+def test_blind_room_holds_latch_through_off_decay() -> None:
+    """§9.2: OFF-worthy decay must NOT release a blind room's latch — the
+    trigger hold expiring says nothing about vacancy (soverom incident: the
+    wall dial was countered to 0 within one review)."""
+    base = RoomState(overridden=True, override_since=at(1, 20, 0))
+
+    assert not override.should_release(base, EngineState(), True, False, at(1, 20, 1), TUN)
+    # The other release conditions still apply to blind rooms.
+    assert override.should_release(base, EngineState(sleep=True), True, False, at(1, 20, 1), TUN)
+    assert override.should_release(
+        base, EngineState(anyone_home=False), True, False, at(1, 20, 1), TUN
+    )
+    assert override.should_release(base, EngineState(), True, False, at(2, 0, 0), TUN)
 
 
 def test_release_noop_when_not_overridden() -> None:
     assert not override.should_release(
-        RoomState(), EngineState(sleep=True), True, at(1, 20, 0), TUN
+        RoomState(), EngineState(sleep=True), True, True, at(1, 20, 0), TUN
     )
 
 

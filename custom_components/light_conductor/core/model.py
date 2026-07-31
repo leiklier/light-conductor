@@ -179,6 +179,11 @@ class RoomConfig:
     #: Whether a usable lux sensor exists (§3.5). Always False this PR —
     #: every room runs open-loop; the flag is the closed-loop seam.
     has_lux_sensor: bool = False
+    #: Whether the room can OBSERVE vacancy (a presence or occupancy sensor is
+    #: configured). Blind rooms (door/corridor with triggers only) decay to the
+    #: OFF role on hold expiry without anyone having left — their manual
+    #: overrides must not release on that decay (rule 9.2).
+    presence_capable: bool = True
 
     def channel(self, channel_id: str) -> ChannelConfig | None:
         return next((c for c in self.channels if c.channel_id == channel_id), None)

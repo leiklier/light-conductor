@@ -57,6 +57,7 @@ def should_release(
     rs: RoomState,
     state: EngineState,
     off_worthy: bool,
+    presence_capable: bool,
     now: datetime,
     tun: Tunables,
 ) -> bool:
@@ -64,7 +65,13 @@ def should_release(
 
     Master power cycles are handled at the event site (the latch is cleared
     when the master light toggles). ``off_worthy`` is True when the room's
-    natural role has decayed to OFF (hold expiry at the OFF tier).
+    natural role has decayed to OFF (hold expiry at the OFF tier) — it releases
+    the latch only for ``presence_capable`` rooms, where OFF-decay means the
+    room was OBSERVED vacant. In a blind room (door/corridor triggers only)
+    OFF-decay merely means the trigger hold ran out while the occupant may
+    still be there; releasing would instantly counter their manual setting
+    with the vacancy tier (the soverom wall-dial incident), so blind rooms
+    hold the latch until timeout/sleep/away/master-cycle.
     """
     if not rs.overridden:
         return False
@@ -72,7 +79,7 @@ def should_release(
         return True
     if timed_out(rs, now, tun):
         return True
-    return off_worthy
+    return off_worthy and presence_capable
 
 
 def override_review(rs: RoomState, now: datetime, tun: Tunables) -> datetime | None:
