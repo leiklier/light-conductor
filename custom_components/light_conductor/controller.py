@@ -881,14 +881,18 @@ class Controller:
     def _resolve_restart_button(self, entity_id: str) -> str | None:
         """Resolve the ESP reboot button on the SAME device as a lux sensor.
 
-        sensor entity -> ``device_id`` -> that device's ``button`` entities ->
-        the one whose registry ``original_device_class`` is
+        sensor entity -> ``device_id`` -> that device's ENABLED ``button``
+        entities -> the one whose effective registry device class
+        (``device_class`` override, else ``original_device_class``) is
         :attr:`ButtonDeviceClass.RESTART` (the state may be unavailable while the
-        sensor is wedged, so trust the registry, not the live attribute). Returns
-        the first match sorted by entity_id (deterministic if a device somehow
-        exposes several restart buttons), or ``None`` when the sensor is not in
-        the registry, has no device, or the device has no restart button — in
-        which case the wedge issue stays non-fixable.
+        sensor is wedged, so trust the registry, not the live attribute; a
+        DISABLED button cannot be pressed — offering it would make Fix a silent
+        no-op, so disabled entities are excluded and the issue falls back to the
+        manual notice). Returns the first match sorted by entity_id
+        (deterministic if a device somehow exposes several restart buttons), or
+        ``None`` when the sensor is not in the registry, has no device, or the
+        device has no enabled restart button — in which case the wedge issue
+        stays non-fixable.
         """
         ent_reg = er.async_get(self.hass)
         entry = ent_reg.async_get(entity_id)
@@ -896,10 +900,9 @@ class Controller:
             return None
         candidates = [
             e.entity_id
-            for e in er.async_entries_for_device(
-                ent_reg, entry.device_id, include_disabled_entities=True
-            )
-            if e.domain == BUTTON_DOMAIN and e.original_device_class == ButtonDeviceClass.RESTART
+            for e in er.async_entries_for_device(ent_reg, entry.device_id)
+            if e.domain == BUTTON_DOMAIN
+            and (e.device_class or e.original_device_class) == ButtonDeviceClass.RESTART
         ]
         if not candidates:
             return None

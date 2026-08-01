@@ -137,3 +137,31 @@ async def test_fix_flow_without_button_data_is_noop_press(hass: HomeAssistant) -
     result = await flow.async_step_confirm(user_input={})
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert len(press) == 0
+
+
+async def test_fix_flow_press_timeout_completes_without_grace(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    """Review F2: a hung button.press is bounded by PRESS_TIMEOUT — the flow
+    completes (warning logged) and stamps NO grace, so an honest immediate
+    re-raise remains possible (the reboot likely never happened)."""
+    import asyncio
+
+    from custom_components.light_conductor import repairs as repairs_mod
+
+    controller, _entry = await _raise_fixable_issue(hass)
+    monkeypatch.setattr(repairs_mod, "PRESS_TIMEOUT", 0.05)
+
+    async def hang(call) -> None:
+        await asyncio.sleep(5)
+
+    hass.services.async_register("button", "press", hang)
+
+    flow_manager = hass.data["repairs"]["flow_manager"]
+    result = await flow_manager.async_init(
+        DOMAIN, context={"source": "repairs"}, data={"issue_id": ISSUE_ID}
+    )
+    result = await flow_manager.async_configure(result["flow_id"], {})
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert "sensor.klux" not in controller._wedge_fix_pressed

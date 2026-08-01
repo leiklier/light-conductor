@@ -614,3 +614,32 @@ async def test_wedge_grace_reraises_after_window_if_still_silent(hass: HomeAssis
     issue = ir.async_get(hass).async_get_issue(DOMAIN, "lux_wedged_sensor.klux")
     assert issue is not None
     assert issue.is_fixable is True
+
+
+async def test_disabled_restart_button_falls_back_non_fixable(hass: HomeAssistant) -> None:
+    """Review F1: a DISABLED restart button cannot be pressed — offering it would
+    make Fix a silent no-op, so it is excluded and the manual notice is used."""
+    controller, _ = await _wedge_setup_with_device(hass, buttons=["esp_reboot"])
+    er.async_get(hass).async_update_entity(
+        "button.esp_reboot", disabled_by=er.RegistryEntryDisabler.USER
+    )
+    controller.submit(ReviewTick())
+    await hass.async_block_till_done()
+
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, "lux_wedged_sensor.klux")
+    assert issue is not None
+    assert issue.is_fixable is False
+    assert issue.translation_key == "lux_wedged"
+
+
+async def test_registry_device_class_override_resolves(hass: HomeAssistant) -> None:
+    """Review F3: the resolver honours the EFFECTIVE registry class — a button
+    the user re-classified to restart via the registry override resolves."""
+    controller, _ = await _wedge_setup_with_device(hass, buttons=[])
+    ent_reg = er.async_get(hass)
+    device = dr.async_get(hass).async_get_device(identifiers={("apollo", "msr2")})
+    ent_reg.async_get_or_create(
+        "button", "apollo", "btn_plain", device_id=device.id, suggested_object_id="plain"
+    )
+    ent_reg.async_update_entity("button.plain", device_class=ButtonDeviceClass.RESTART)
+    assert controller._resolve_restart_button("sensor.klux") == "button.plain"

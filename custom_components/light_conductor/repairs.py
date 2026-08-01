@@ -11,6 +11,8 @@ while the sensor boots.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import TYPE_CHECKING
 
 import voluptuous as vol
@@ -30,6 +32,11 @@ if TYPE_CHECKING:
 
 type IssueData = dict[str, str | int | float | None] | None
 
+_LOGGER = logging.getLogger(__name__)
+
+#: Upper bound on the blocking button.press inside the fix flow (review F2).
+PRESS_TIMEOUT = 15.0
+
 
 class LuxWedgedFixFlow(RepairsFlow):
     """Confirm flow: press the sensor's ESP reboot button to unwedge it."""
@@ -47,20 +54,38 @@ class LuxWedgedFixFlow(RepairsFlow):
         """Show the confirm form, then press the reboot button on submit."""
         if user_input is not None:
             button = self._data.get("button_entity_id")
+            pressed = False
             if button:
-                await self.hass.services.async_call(
-                    BUTTON_DOMAIN,
-                    SERVICE_PRESS,
-                    {ATTR_ENTITY_ID: button},
-                    blocking=True,
-                )
+                # blocking so the press is dispatched before the issue goes away,
+                # but bounded: a genuinely stalled ESPHome link must surface as a
+                # warning, not hang the repairs dialog forever (review F2).
+                try:
+                    async with asyncio.timeout(PRESS_TIMEOUT):
+                        await self.hass.services.async_call(
+                            BUTTON_DOMAIN,
+                            SERVICE_PRESS,
+                            {ATTR_ENTITY_ID: button},
+                            blocking=True,
+                        )
+                    pressed = True
+                except TimeoutError:
+                    _LOGGER.warning(
+                        "Pressing %s timed out after %ss; the device link may be "
+                        "down — the wedge notice will re-raise if readings do "
+                        "not resume",
+                        button,
+                        PRESS_TIMEOUT,
+                    )
             # Reach the owning controller to stamp the post-press grace window so
-            # the still-silent sensor is not immediately re-flagged (§3.5).
-            entry_id = self._data.get("entry_id")
-            sensor = self._data.get("sensor_entity_id")
-            controller: Controller | None = self.hass.data.get(DOMAIN, {}).get(entry_id)
-            if controller is not None and isinstance(sensor, str):
-                controller.note_wedge_fix_pressed(sensor)
+            # the still-silent sensor is not immediately re-flagged (§3.5). No
+            # grace on a timed-out press: the reboot likely never happened, so an
+            # honest immediate re-raise is preferable.
+            if pressed:
+                entry_id = self._data.get("entry_id")
+                sensor = self._data.get("sensor_entity_id")
+                controller: Controller | None = self.hass.data.get(DOMAIN, {}).get(entry_id)
+                if controller is not None and isinstance(sensor, str):
+                    controller.note_wedge_fix_pressed(sensor)
             # HA deletes the issue once this entry is created.
             return self.async_create_entry(title="", data={})
 
@@ -80,5 +105,11 @@ async def async_create_fix_flow(
     issue_id: str,
     data: IssueData,
 ) -> RepairsFlow:
-    """Create the fix flow for a ``lux_wedged_*`` issue."""
+    """Create the fix flow for a ``lux_wedged_*`` issue.
+
+    Guarded by prefix so a future fixable issue in this domain cannot be
+    routed here by accident (review F4).
+    """
+    if not issue_id.startswith("lux_wedged_"):
+        raise ValueError(f"no fix flow for issue {issue_id}")
     return LuxWedgedFixFlow(data)
