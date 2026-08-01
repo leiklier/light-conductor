@@ -1221,7 +1221,7 @@ wheels = [
 
 [[package]]
 name = "light-conductor"
-version = "0.1.0b9"
+version = "0.1.0b10"
 source = { virtual = "." }
 
 [package.dev-dependencies]

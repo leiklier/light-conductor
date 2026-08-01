@@ -20,6 +20,7 @@ import time
 from collections import deque
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from homeassistant.components.light import (
@@ -42,6 +43,7 @@ from homeassistant.const import (
     STATE_UNKNOWN,
 )
 from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, State, callback
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import (
     async_call_later,
@@ -65,6 +67,7 @@ from .const import (
     CONF_TV_ENTITIES,
     CONF_VACATION_ENTITY,
     CONF_WALL_EVENTS,
+    DOMAIN,
     EVENT_CALIBRATION,
     build_engine_config,
     build_tunables,
@@ -488,6 +491,8 @@ class Controller:
         self._sem = asyncio.Semaphore(self.tun.max_inflight)
         self._writers: dict[str, ChannelWriter] = {}
         self._write_tasks: set[asyncio.Task] = set()
+        #: Lux sensor entity ids with an active "wedged" repairs issue (§3.5).
+        self._wedged: set[str] = set()
 
         # Published snapshot the entities read (rule §10).
         self.diagnostics: dict[str, RoomDiagnostics] = {}
@@ -669,6 +674,14 @@ class Controller:
 
     async def async_stop(self) -> None:
         self._started = False
+        # Withdraw outstanding lux-wedge repairs issues: `_wedged` is
+        # per-instance state, so an issue surviving stop would never be
+        # deleted by the next controller (stale false notice after a
+        # recovery-during-reload; orphaned forever on entry removal). A
+        # still-wedged sensor is simply re-flagged by the fresh controller.
+        for entity_id in self._wedged:
+            ir.async_delete_issue(self.hass, DOMAIN, f"lux_wedged_{entity_id}")
+        self._wedged.clear()
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
@@ -758,7 +771,49 @@ class Controller:
         self.master_pct = cmd.master_pct
         self.master_on = cmd.master_on
         self.enabled = cmd.enabled
+        # Piggyback the lux-wedge check on the publish cadence (§3.5) — no new
+        # timer; every recompute publishes and re-checks every configured sensor.
+        self._check_lux_wedge(dt_util.utcnow())
         async_dispatcher_send(self.hass, signal_update(self.entry.entry_id))
+
+    def _check_lux_wedge(self, now: datetime) -> None:
+        """Raise/clear a repairs issue for a wedged lux sensor (§3.5).
+
+        A wedged sensor's entity stays AVAILABLE but stops reporting (a known
+        Apollo MSR-2 LTR390 hardware quirk, fix = its ESP reboot button). We
+        detect it off the estimator's ``last_report_at`` ageing past
+        ``lux_wedge_warn`` while the entity is still available, and clear the
+        issue the moment reports resume. Ordinary unavailability (§8.5) is NOT a
+        wedge and never raises the issue.
+        """
+        threshold = self.tun.lux_wedge_warn
+        for entity_id, room_id in self._lux_room.items():
+            st = self.hass.states.get(entity_id)
+            available = st is not None and st.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+            rs = self.engine.state.rooms.get(room_id)
+            last = rs.est.last_report_at if rs is not None else None
+            wedged = available and last is not None and (now - last).total_seconds() > threshold
+            if wedged and entity_id not in self._wedged:
+                self._wedged.add(entity_id)
+                _LOGGER.warning(
+                    "Lux sensor %s (room %s) appears wedged: available but no report in "
+                    "%.0f s — press its ESP reboot button",
+                    entity_id,
+                    room_id,
+                    threshold,
+                )
+                ir.async_create_issue(
+                    self.hass,
+                    DOMAIN,
+                    f"lux_wedged_{entity_id}",
+                    is_fixable=False,
+                    severity=ir.IssueSeverity.WARNING,
+                    translation_key="lux_wedged",
+                    translation_placeholders={"entity_id": entity_id, "room": room_id},
+                )
+            elif not wedged and entity_id in self._wedged:
+                self._wedged.discard(entity_id)
+                ir.async_delete_issue(self.hass, DOMAIN, f"lux_wedged_{entity_id}")
 
     def _exec_review(self, cmd: ScheduleReview) -> None:
         if self._review_cancel is not None:
@@ -942,7 +997,20 @@ class Controller:
     def _on_wall_event(self, event: Event) -> None:
         entity_id = event.data["entity_id"]
         new: State | None = event.data.get("new_state")
+        old: State | None = event.data.get("old_state")
         if new is None or new.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            return
+        # §9.4: an availability-recovery republish never latches. ESPHome event
+        # entities re-emit their PREVIOUS event timestamp when the device
+        # reconnects (unavailable/unknown/None -> old timestamp), which is not a
+        # human press — a genuine press always transitions from one valid event
+        # timestamp to a strictly NEWER one. Guard the recovery edge (old None or
+        # unavailable) and the identical-timestamp republish (new == old). This
+        # is what falsely latched gang + sofakrok in the same second (08:08:23)
+        # during a Plejd/ESPHome availability blip.
+        if old is None or old.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            return
+        if new.state == old.state:
             return
         room_id = self._wall_room[entity_id]
         # A wall press latches override for the whole room, adopting each

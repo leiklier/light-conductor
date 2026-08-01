@@ -195,6 +195,20 @@ deliberately **over**-models the gain: an over-modelled gain gives loop gain
 < 1 (a stable undershoot that converges), whereas under-modelling gives loop
 gain > 1 (the hunting regime) — so "conservative" means erring high. The
 bootstrap gain is per-run (not persisted); a restart re-learns it.
+**Dispersion sanity (arm guard).** Before committing, the collected ratios must
+*agree*: with `m = median(ratios)`, require `max(ratios) ≤
+bootstrap_dispersion_max × m` **and** `min(ratios) ≥ m / bootstrap_dispersion_max`
+(default 3.0). Genuine own-light observations cluster tightly; an
+ambient-contaminated set — morning clouds swinging daylight while the room's
+lights happen to toggle — scatters wildly (the kjøkken false-promotion incident,
+live ratios `[8.73, 95.31, 14.21]`, promoted a deliberately open-loop room into
+closed loop chasing an unreachable target). A failing set is **dropped** (the
+collected ratios are cleared, not accumulated) so a later quiet period can
+bootstrap cleanly. **Wedge notice.** A configured lux sensor whose entity stays
+AVAILABLE but produces no state update for `lux_wedge_warn` (default 1800 s)
+raises a non-fixable HA repairs issue (one per sensor) suggesting its ESP reboot
+button (a known LTR390 quirk); it clears automatically when reports resume.
+Ordinary unavailability (§8.5) is not a wedge and never raises it.
 
 3.6 **Anti-hunting invariant.** The closed loop may not oscillate: control
 error uses a **deadband** — no action while `|T' − (N̂ + Â)| < deadband`, where
@@ -504,7 +518,14 @@ off" behavior falls out of this rule.
 
 9.4 **Plejd wall-event awareness.** Configured `wall_event` entities
 (WRT-01/WPH-01 `event.*`) count as foreign changes for their room even if the
-resulting state lands inside echo tolerance.
+resulting state lands inside echo tolerance. **Recovery republishes never
+latch:** an ESPHome event entity re-emits its previous event timestamp when the
+device reconnects (`unavailable`→old timestamp), which is not a human press — a
+genuine press always transitions from one valid event timestamp to a strictly
+newer one. A wall event latches the override only when the old state is present
+and valid (not `unavailable`/`unknown`/absent) *and* the new timestamp differs
+from it; the recovery edge and an identical-timestamp republish are ignored
+(the gang + sofakrok false-latch during a 2026-08-01 availability blip).
 
 ## 10. Entities (adapter contract)
 
@@ -569,7 +590,9 @@ override latches (not restored — cleared on restart).
 | night_prior_deg / tau_night_prior | −6° / 600 s | 3.3 |
 | gain_learn_rate | 0.1 | 3.4 |
 | bootstrap_min_obs / bootstrap_margin | 3 / 1.5 | 3.5, 4.4 |
+| bootstrap_dispersion_max | 3.0 | 3.5 |
 | lux_stale | 300 s | 3.5 |
+| lux_wedge_warn | 1800 s | 3.5 |
 | deadband_abs / deadband_rel | 5 lx / 0.15 | 3.6 |
 | deadband_capacity_frac / deadband_floor | 0.2 / 0.5 lx | 3.6 |
 | error_sustain / error_sustain_fast | 20 s / 2 s | 3.6 |

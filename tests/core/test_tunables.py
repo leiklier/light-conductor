@@ -48,7 +48,9 @@ DOC_ROWS: dict[str, tuple[tuple[str, ...], tuple[object, ...]]] = {
         ("bootstrap_min_obs", "bootstrap_margin"),
         (3, 1.5),
     ),
+    "bootstrap_dispersion_max": (("bootstrap_dispersion_max",), (3.0,)),
     "lux_stale": (("lux_stale",), (300.0,)),
+    "lux_wedge_warn": (("lux_wedge_warn",), (1800.0,)),
     "deadband_abs / deadband_rel": (("deadband_abs", "deadband_rel"), (5.0, 0.15)),
     "deadband_capacity_frac / deadband_floor": (
         ("deadband_capacity_frac", "deadband_floor"),

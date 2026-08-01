@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import timedelta
 
-from homeassistant.const import ATTR_ENTITY_ID, EVENT_STATE_REPORTED
+from homeassistant.const import ATTR_ENTITY_ID, EVENT_STATE_REPORTED, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
@@ -15,6 +17,7 @@ from pytest_homeassistant_custom_component.common import (
 
 from custom_components.light_conductor import controller as lc_controller
 from custom_components.light_conductor.const import CONF_TUNABLES, DOMAIN
+from custom_components.light_conductor.core.events import ReviewTick
 
 from .adapter import entity_id_for, options, room, set_light, setup_entry
 
@@ -348,3 +351,139 @@ async def test_fresh_install_and_restore_miss_boot_observe_only(hass, monkeypatc
     hass.states.async_set("binary_sensor.pa", "on")
     await hass.async_block_till_done()
     assert not calls  # occupied room, but observe-only: zero commands
+
+
+# --- §9.4 wall-event availability-recovery guard (beta.10 Fix 2) ------------
+
+_WALL_T0 = "2026-08-01T08:00:00.000000+00:00"
+_WALL_T1 = "2026-08-01T09:15:00.000000+00:00"
+
+
+async def _wall_room_setup(hass: HomeAssistant):
+    """A presence-ON room (not off-worthy, so a latch would hold) with a wall."""
+    set_light(hass, "light.a", transition=True)
+    hass.states.async_set("binary_sensor.pa", "on")
+    entry = await setup_entry(
+        hass,
+        options([room("a", ["light.a"], presence="binary_sensor.pa", wall=["event.wall_a"])]),
+    )
+    async_mock_service(hass, "light", "turn_on")
+    controller = hass.data[DOMAIN][entry.entry_id]
+    return controller
+
+
+async def test_wall_event_recovery_republish_does_not_latch(hass: HomeAssistant) -> None:
+    """§9.4: an event entity that goes unavailable and reconnects republishing its
+    PREVIOUS timestamp (unavailable→old ts) must NOT latch a false whole-room
+    override (the gang + sofakrok 08:08:23 availability-blip signature)."""
+    hass.states.async_set("event.wall_a", _WALL_T0)  # a prior press, pre-subscription
+    controller = await _wall_room_setup(hass)
+    assert controller.engine.room_state("a").overridden is False
+
+    hass.states.async_set("event.wall_a", STATE_UNAVAILABLE)  # device drops offline
+    await hass.async_block_till_done()
+    hass.states.async_set("event.wall_a", _WALL_T0)  # reconnect republishes old ts
+    await hass.async_block_till_done()
+    assert controller.engine.room_state("a").overridden is False  # no latch
+
+
+async def test_wall_event_genuine_press_latches(hass: HomeAssistant) -> None:
+    """§9.4: a real press moves from one valid timestamp to a strictly newer one
+    → latches the whole-room override exactly as before."""
+    hass.states.async_set("event.wall_a", _WALL_T0)
+    controller = await _wall_room_setup(hass)
+    assert controller.engine.room_state("a").overridden is False
+
+    hass.states.async_set("event.wall_a", _WALL_T1)  # newer timestamp = human press
+    await hass.async_block_till_done()
+    assert controller.engine.room_state("a").overridden is True
+
+
+async def test_wall_event_first_appearance_does_not_latch(hass: HomeAssistant) -> None:
+    """§9.4: the entity's first appearance (old_state None) is not a press."""
+    controller = await _wall_room_setup(hass)  # no initial wall state
+    assert controller.engine.room_state("a").overridden is False
+
+    hass.states.async_set("event.wall_a", _WALL_T0)  # first-ever state (old None)
+    await hass.async_block_till_done()
+    assert controller.engine.room_state("a").overridden is False
+
+
+# --- §3.5 lux-wedge repair notice (beta.10 Fix 3) --------------------------
+
+
+async def _wedge_setup(hass: HomeAssistant):
+    """A room whose lux sensor has reported once, then its report is aged out."""
+    set_light(hass, "light.k", transition=True)
+    hass.states.async_set("binary_sensor.pk", "on")
+    hass.states.async_set("sensor.klux", "40")
+    entry = await setup_entry(
+        hass,
+        options([room("k", ["light.k"], presence="binary_sensor.pk", lux="sensor.klux")]),
+    )
+    async_mock_service(hass, "light", "turn_on")
+    controller = hass.data[DOMAIN][entry.entry_id]
+    # One real report sets last_report_at, then age it past lux_wedge_warn (1800 s).
+    hass.states.async_set("sensor.klux", "41")
+    await hass.async_block_till_done()
+    est = controller.engine.room_state("k").est
+    assert est.last_report_at is not None
+    est.last_report_at = dt_util.utcnow() - timedelta(seconds=2000)
+    return controller
+
+
+async def test_lux_wedge_raises_repair_issue_once(hass: HomeAssistant, caplog) -> None:
+    """§3.5: an AVAILABLE lux sensor silent past lux_wedge_warn raises a
+    non-fixable WARNING repairs issue and logs a warning exactly once."""
+    controller = await _wedge_setup(hass)
+
+    with caplog.at_level(logging.WARNING):
+        controller.submit(ReviewTick())
+        await hass.async_block_till_done()
+        controller.submit(ReviewTick())  # second publish must not re-warn
+        await hass.async_block_till_done()
+
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, "lux_wedged_sensor.klux")
+    assert issue is not None
+    assert issue.severity == ir.IssueSeverity.WARNING
+    assert issue.is_fixable is False
+    assert sum("appears wedged" in r.getMessage() for r in caplog.records) == 1
+
+
+async def test_lux_wedge_clears_when_reports_resume(hass: HomeAssistant) -> None:
+    """§3.5: the issue is deleted automatically once the sensor reports again."""
+    controller = await _wedge_setup(hass)
+    controller.submit(ReviewTick())
+    await hass.async_block_till_done()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, "lux_wedged_sensor.klux") is not None
+
+    hass.states.async_set("sensor.klux", "44")  # a fresh report resumes
+    await hass.async_block_till_done()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, "lux_wedged_sensor.klux") is None
+    assert "sensor.klux" not in controller._wedged
+
+
+async def test_unavailable_lux_sensor_is_not_a_wedge(hass: HomeAssistant) -> None:
+    """§3.5: an UNAVAILABLE sensor is ordinary unavailability (§8.5), not a wedge
+    — it must never raise the wedge issue."""
+    controller = await _wedge_setup(hass)
+    hass.states.async_set("sensor.klux", STATE_UNAVAILABLE)  # ordinary unavailability
+    await hass.async_block_till_done()
+    controller.submit(ReviewTick())
+    await hass.async_block_till_done()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, "lux_wedged_sensor.klux") is None
+
+
+async def test_lux_wedge_issue_withdrawn_on_unload(hass: HomeAssistant) -> None:
+    """Review F1: `_wedged` is per-controller state, so async_stop must delete
+    outstanding wedge issues — otherwise a recovery during the next controller's
+    life never clears them (stale false notice) and entry removal orphans them."""
+    controller = await _wedge_setup(hass)
+    controller.submit(ReviewTick())
+    await hass.async_block_till_done()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, "lux_wedged_sensor.klux") is not None
+
+    entry = next(iter(hass.config_entries.async_entries(DOMAIN)))
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, "lux_wedged_sensor.klux") is None
