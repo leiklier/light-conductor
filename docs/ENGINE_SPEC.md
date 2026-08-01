@@ -91,6 +91,14 @@ freezes its current role for `presence_blind_hold`, then demotes one step per
 `trigger_hold` (restartable); closing edge ⇒ shortened hold `door_close_hold`.
 Sleep mode overrides per §6.1.
 
+1.10 **Occupational presence** (outdoor rooms). An outdoor room's occupational
+switch is a *declaration* of presence: while on, the room is self-active — its
+neighbours qualify for ADJACENT and, when flagged `living_group`, it keeps
+`living_recently_active` alive (§1.6) so the interior does not go dark around
+an occupant the sensors cannot see (the balcony-sitting incident). The falling
+edge stamps the normal `living_memory` decay. Away/sleep hard-offs (§6.1/§6.4)
+still win, and §6.5's away-mode handling of the switch is unchanged.
+
 ## 2. Illuminance targets & circadian shaping
 
 2.1 **Tiered targets.** Each room profile defines target lux per role tier:

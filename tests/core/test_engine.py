@@ -534,3 +534,88 @@ def test_response_mapping_end_to_end_benke() -> None:
     cmds = eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))
     assert "respkj_benke" in offs(cmds)
     assert not eng.state.rooms["respkj"].channels["respkj_benke"].on
+
+
+# --- §1.10: occupational presence (balcony-sitting incident) --------------
+
+
+def _balcony_apartment() -> EngineConfig:
+    from custom_components.light_conductor.core.model import RoomShape
+
+    stue = RoomConfig(
+        room_id="stue",
+        channels=(ChannelConfig("stue_taklys", band=Band.PRIMARY, fixed_ct=2700),),
+        profile=Profile(
+            vacancy=Vacancy.DIM,
+            out_active_day={Band.PRIMARY: 0.7},
+            out_active_evening={Band.PRIMARY: 0.3},
+            out_background={Band.PRIMARY: 0.06},
+            evening_output_cap=0.3,
+        ),
+        neighbours=("balkong",),
+        living_group=True,
+    )
+    balkong = RoomConfig(
+        room_id="balkong",
+        channels=(ChannelConfig("balkong_taklys", band=Band.PRIMARY, fixed_ct=None),),
+        profile=Profile(
+            out_active_evening={Band.PRIMARY: 0.5},
+            out_background={Band.PRIMARY: 0.2},
+        ),
+        shape=RoomShape.OUTDOOR,
+        living_group=True,
+        presence_capable=False,
+    )
+    return EngineConfig(rooms=(stue, balkong))
+
+
+def test_occupational_balcony_keeps_interior_lit() -> None:
+    """§1.10 regression (balcony-sitting incident): while the occupational
+    switch is on, the balcony is self-active — the neighbouring living room
+    holds ADJACENT instead of decaying to OFF 15 minutes after the occupant
+    stepped outside; flipping the switch off starts the normal living_memory
+    decay to OFF."""
+    eng = Engine(_balcony_apartment(), InitialSnapshot(sun_elevation=NIGHT_SUN))
+    eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))
+    lit = eng.handle(OccupationalChanged("balkong", True), at(1, 22, 1))
+    assert eng.state.rooms["balkong"].self_active
+    assert eng.state.rooms["stue"].role is Role.ADJACENT
+    assert "stue_taklys" in sets(lit)
+
+    # Half an hour later (double the old 15-min decay) it STILL glows.
+    later = eng.handle(ReviewTick(), at(1, 22, 31))
+    assert eng.state.rooms["stue"].role is Role.ADJACENT
+    assert "stue_taklys" not in offs(later)
+
+    # Switch off: adjacency drops, living_memory (900 s) holds BACKGROUND,
+    # then the room decays to OFF.
+    eng.handle(OccupationalChanged("balkong", False), at(1, 22, 40))
+    assert eng.state.rooms["stue"].role is Role.BACKGROUND
+    gone = eng.handle(ReviewTick(), at(1, 23, 0))
+    assert eng.state.rooms["stue"].role is Role.OFF
+    assert "stue_taklys" in offs(gone)
+
+
+def test_occupational_balcony_does_not_defeat_away() -> None:
+    """§1.10/§6.4: away hard-off still wins over occupational self-activity."""
+    eng = Engine(_balcony_apartment(), InitialSnapshot(sun_elevation=NIGHT_SUN))
+    eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))
+    eng.handle(OccupationalChanged("balkong", True), at(1, 22, 1))
+    gone = eng.handle(HomeChanged(False), at(1, 22, 2))
+    assert eng.state.rooms["stue"].role is Role.OFF
+    assert "stue_taklys" in offs(gone)
+
+
+def test_occupational_balcony_holds_manual_override_inside() -> None:
+    """§1.10/§9.2: while the balcony is in use the living room is BACKGROUND —
+    not OFF-worthy — so a manual dial inside STICKS instead of releasing on
+    vacancy (the incident's second failure mode)."""
+    eng = Engine(_balcony_apartment(), InitialSnapshot(sun_elevation=NIGHT_SUN))
+    eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))
+    eng.handle(OccupationalChanged("balkong", True), at(1, 22, 1))
+
+    eng.handle(ForeignChange("stue_taklys", 0.8), at(1, 22, 5))
+    assert eng.state.rooms["stue"].overridden
+    plan = eng.handle(ReviewTick(), at(1, 22, 10))
+    assert eng.state.rooms["stue"].overridden  # latch holds while balcony in use
+    assert "stue_taklys" not in offs(plan)

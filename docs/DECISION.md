@@ -361,6 +361,23 @@ Two more robustness fixes from the same morning ship together:
   non-fixable fallback keeps its `title` + `description` manual instruction.
   Both texts exist in en + nb.
 
+## D18. Occupational switch counts as presence (beta.12)
+
+Live incident (2026-08-01 evening): the user sat on the glassed balcony with
+its occupational switch on; 15 minutes after they left the interior,
+`living_recently_active` expired and every interior light went dark around
+them. The balcony's ACTIVE role is mode-resolved from the occupational switch
+and never set `self_active` — the only flag adjacency (`neighbour_active`) and
+`_living_active` read — so configuring balkong as a neighbour/living-group
+member was structurally inert, and a manual dial inside would not stick either
+(vacant presence rooms release the override latch as OFF-worthy).
+
+Decision: `roles.step` for OUTDOOR rooms sets `self_active = occupational`
+(rule 1.10). Everything else falls out of existing machinery: adjacency, the
+living-group memory, and override retention (a living room is BACKGROUND, not
+OFF-worthy, while the balcony is in use). Away/sleep mode hard-offs still
+resolve before the role path and win unchanged.
+
 ## Open questions — RESOLVED (user, 2026-07-25)
 
 - **Q1 (D8):** master dimmer neutral at 50 % — confirmed (boost possible).

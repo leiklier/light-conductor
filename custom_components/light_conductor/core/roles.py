@@ -97,7 +97,17 @@ def step(
 ) -> None:
     """Advance ``self_active`` and its holds up to ``now`` (rules 1.3-1.9)."""
     if shape is RoomShape.OUTDOOR:
-        return  # outdoor rooms ignore presence (rule 6.5); modes.py owns them
+        # Outdoor rooms ignore presence SENSING (rule 6.5); modes.py owns their
+        # own lighting. But the occupational switch is a *declaration* of
+        # presence (rule 1.10): while it is on, the room counts as self-active
+        # so neighbours can glow ADJACENT and a living-group balcony keeps
+        # living_recently_active alive (the balcony-sitting incident — the
+        # interior went dark around an occupant the sensors cannot see). The
+        # falling edge stamps last_active_end so living_memory decays normally.
+        if rs.self_active and not rs.occupational:
+            rs.last_active_end = now
+        rs.self_active = rs.occupational
+        return
     if shape in (RoomShape.CORRIDOR, RoomShape.DOOR):
         _step_trigger(rs, now)
         return
