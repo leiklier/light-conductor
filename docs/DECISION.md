@@ -299,6 +299,16 @@ bootstrap is designed to serve; it would kill the feature. Dispersion is the
 correct guard: it distinguishes genuine own-light steps (which agree) from
 ambient contamination (which scatters), independent of the room's capacity.
 
+Accepted residual: *systematically consistent* contamination (e.g. three cloud
+swings of similar magnitude coinciding with three own transitions) passes the
+scatter test and still arms. The remaining backstops are the 1.5 over-model
+margin (stable undershoot, not hunting) and the fact that such coincidence
+across ≥3 independent transitions is far rarer than the single-outlier case
+this incident showed. Likewise, the wedge notice's piggyback on the publish
+cadence means a wedge starting during a fully-quiet deep-night plateau is
+flagged at the next clock-boundary review rather than within `lux_wedge_warn`
+— acceptable latency for a hardware-quirk notice.
+
 Two more robustness fixes from the same morning ship together:
 
 - **Fix 2 — wall-event recovery guard (§9.4).** A brief Plejd/ESPHome

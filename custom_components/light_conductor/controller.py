@@ -674,6 +674,14 @@ class Controller:
 
     async def async_stop(self) -> None:
         self._started = False
+        # Withdraw outstanding lux-wedge repairs issues: `_wedged` is
+        # per-instance state, so an issue surviving stop would never be
+        # deleted by the next controller (stale false notice after a
+        # recovery-during-reload; orphaned forever on entry removal). A
+        # still-wedged sensor is simply re-flagged by the fresh controller.
+        for entity_id in self._wedged:
+            ir.async_delete_issue(self.hass, DOMAIN, f"lux_wedged_{entity_id}")
+        self._wedged.clear()
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()

@@ -472,3 +472,18 @@ async def test_unavailable_lux_sensor_is_not_a_wedge(hass: HomeAssistant) -> Non
     controller.submit(ReviewTick())
     await hass.async_block_till_done()
     assert ir.async_get(hass).async_get_issue(DOMAIN, "lux_wedged_sensor.klux") is None
+
+
+async def test_lux_wedge_issue_withdrawn_on_unload(hass: HomeAssistant) -> None:
+    """Review F1: `_wedged` is per-controller state, so async_stop must delete
+    outstanding wedge issues — otherwise a recovery during the next controller's
+    life never clears them (stale false notice) and entry removal orphans them."""
+    controller = await _wedge_setup(hass)
+    controller.submit(ReviewTick())
+    await hass.async_block_till_done()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, "lux_wedged_sensor.klux") is not None
+
+    entry = next(iter(hass.config_entries.async_entries(DOMAIN)))
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, "lux_wedged_sensor.klux") is None
