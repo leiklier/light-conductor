@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from homeassistant.components.button import DOMAIN as BUTTON_DOMAIN
+from homeassistant.components.button import ButtonDeviceClass
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
@@ -43,6 +45,7 @@ from homeassistant.const import (
     STATE_UNKNOWN,
 )
 from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, State, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import (
@@ -114,6 +117,13 @@ STEP_INTERVAL = 1.0
 #: Floor for the fade-corridor overshoot margin: deadline = start + ramp +
 #: max(ENVELOPE_MARGIN, 0.5*ramp) so a congested mesh tail never latches (§8.4, F1).
 ENVELOPE_MARGIN = 2.0
+
+#: After a lux-wedge Fix flow presses the sensor's ESP reboot button, suppress
+#: re-raising the wedge issue for this grace window (§3.5, D17 beta.11) — the
+#: sensor takes a moment to boot and resume reporting, so re-raising immediately
+#: would just re-nag the user. If it is still silent past the window the reboot
+#: did not help and the issue is re-raised.
+WEDGE_FIX_GRACE = 120.0
 
 
 def _monotonic() -> float:
@@ -493,6 +503,11 @@ class Controller:
         self._write_tasks: set[asyncio.Task] = set()
         #: Lux sensor entity ids with an active "wedged" repairs issue (§3.5).
         self._wedged: set[str] = set()
+        #: Lux sensor entity id -> utcnow() at which its Fix flow last pressed the
+        #: ESP reboot button. Consulted by ``_check_lux_wedge`` to grace-suppress
+        #: an immediate re-raise (§3.5, D17 beta.11). Per-controller: cleared on
+        #: reload with the rest of the wedge state.
+        self._wedge_fix_pressed: dict[str, datetime] = {}
 
         # Published snapshot the entities read (rule §10).
         self.diagnostics: dict[str, RoomDiagnostics] = {}
@@ -682,6 +697,7 @@ class Controller:
         for entity_id in self._wedged:
             ir.async_delete_issue(self.hass, DOMAIN, f"lux_wedged_{entity_id}")
         self._wedged.clear()
+        self._wedge_fix_pressed.clear()
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
@@ -793,15 +809,65 @@ class Controller:
             rs = self.engine.state.rooms.get(room_id)
             last = rs.est.last_report_at if rs is not None else None
             wedged = available and last is not None and (now - last).total_seconds() > threshold
-            if wedged and entity_id not in self._wedged:
-                self._wedged.add(entity_id)
-                _LOGGER.warning(
-                    "Lux sensor %s (room %s) appears wedged: available but no report in "
-                    "%.0f s — press its ESP reboot button",
-                    entity_id,
-                    room_id,
-                    threshold,
+
+            if not wedged:
+                # Reports resumed (or the sensor went unavailable): clear any
+                # outstanding issue and the post-Fix grace. Ordinary
+                # unavailability (§8.5) reaches here too and never raises.
+                self._wedge_fix_pressed.pop(entity_id, None)
+                if entity_id in self._wedged:
+                    self._wedged.discard(entity_id)
+                    ir.async_delete_issue(self.hass, DOMAIN, f"lux_wedged_{entity_id}")
+                continue
+
+            if entity_id in self._wedged:
+                continue  # already flagged; do not re-warn or re-raise (log once)
+
+            # Fix-flow grace (§3.5, D17 beta.11): the reboot button was pressed
+            # for this sensor within WEDGE_FIX_GRACE — give the ESP time to boot
+            # before re-nagging. Past the window a still-silent sensor means the
+            # reboot did not help, so fall through and re-raise.
+            pressed = self._wedge_fix_pressed.get(entity_id)
+            if pressed is not None and (now - pressed).total_seconds() < WEDGE_FIX_GRACE:
+                continue
+
+            self._wedged.add(entity_id)
+            _LOGGER.warning(
+                "Lux sensor %s (room %s) appears wedged: available but no report in "
+                "%.0f s — press its ESP reboot button",
+                entity_id,
+                room_id,
+                threshold,
+            )
+            button = self._resolve_restart_button(entity_id)
+            if button is not None:
+                # A restart button on the same device exists — offer a one-press
+                # Fix. Stash what repairs.py's flow needs (HA passes issue.data to
+                # async_create_fix_flow): the button to press, the sensor it heals,
+                # the room for text, and the owning entry so the flow can reach
+                # this controller to mark the grace timestamp.
+                ir.async_create_issue(
+                    self.hass,
+                    DOMAIN,
+                    f"lux_wedged_{entity_id}",
+                    is_fixable=True,
+                    severity=ir.IssueSeverity.WARNING,
+                    translation_key="lux_wedged_fixable",
+                    translation_placeholders={
+                        "entity_id": entity_id,
+                        "room": room_id,
+                        "button": button,
+                    },
+                    data={
+                        "entry_id": self.entry.entry_id,
+                        "sensor_entity_id": entity_id,
+                        "button_entity_id": button,
+                        "room": room_id,
+                    },
                 )
+            else:
+                # No restart button resolvable — keep the beta.10 non-fixable
+                # notice with its manual instruction (fallback path).
                 ir.async_create_issue(
                     self.hass,
                     DOMAIN,
@@ -811,9 +877,46 @@ class Controller:
                     translation_key="lux_wedged",
                     translation_placeholders={"entity_id": entity_id, "room": room_id},
                 )
-            elif not wedged and entity_id in self._wedged:
-                self._wedged.discard(entity_id)
-                ir.async_delete_issue(self.hass, DOMAIN, f"lux_wedged_{entity_id}")
+
+    def _resolve_restart_button(self, entity_id: str) -> str | None:
+        """Resolve the ESP reboot button on the SAME device as a lux sensor.
+
+        sensor entity -> ``device_id`` -> that device's ``button`` entities ->
+        the one whose registry ``original_device_class`` is
+        :attr:`ButtonDeviceClass.RESTART` (the state may be unavailable while the
+        sensor is wedged, so trust the registry, not the live attribute). Returns
+        the first match sorted by entity_id (deterministic if a device somehow
+        exposes several restart buttons), or ``None`` when the sensor is not in
+        the registry, has no device, or the device has no restart button — in
+        which case the wedge issue stays non-fixable.
+        """
+        ent_reg = er.async_get(self.hass)
+        entry = ent_reg.async_get(entity_id)
+        if entry is None or entry.device_id is None:
+            return None
+        candidates = [
+            e.entity_id
+            for e in er.async_entries_for_device(
+                ent_reg, entry.device_id, include_disabled_entities=True
+            )
+            if e.domain == BUTTON_DOMAIN and e.original_device_class == ButtonDeviceClass.RESTART
+        ]
+        if not candidates:
+            return None
+        return sorted(candidates)[0]
+
+    @callback
+    def note_wedge_fix_pressed(self, entity_id: str) -> None:
+        """Record that a Fix flow just pressed ``entity_id``'s reboot button.
+
+        Called from ``repairs.py`` after the ``button.press``. Stamps the grace
+        window and drops the sensor from ``_wedged`` — HA deletes the issue when
+        the fix flow finishes, so ``_wedged`` would otherwise disagree with the
+        registry and never re-raise (or re-clear). The next ``_check_lux_wedge``
+        pass then honours the grace window before re-raising.
+        """
+        self._wedge_fix_pressed[entity_id] = dt_util.utcnow()
+        self._wedged.discard(entity_id)
 
     def _exec_review(self, cmd: ScheduleReview) -> None:
         if self._review_cancel is not None:

@@ -169,6 +169,18 @@
     "lux_wedged": {
       "title": "Illuminance sensor appears stuck",
       "description": "The illuminance sensor `{entity_id}` (room {room}) is still available but has stopped reporting new readings — a known LTR390 sensor quirk where the entity stays online but wedges. Light Conductor has fallen back to open-loop control for this room. Press the sensor's ESP reboot button to restore readings; this notice clears automatically once it reports again."
+    },
+    "lux_wedged_fixable": {
+      "title": "Illuminance sensor appears stuck",
+      "description": "The illuminance sensor `{entity_id}` (room {room}) is still available but has stopped reporting new readings — a known LTR390 sensor quirk where the entity stays online but wedges. Light Conductor has fallen back to open-loop control for this room. Use the Fix button to reboot it; this notice clears automatically once it reports again.",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Reboot the illuminance sensor",
+            "description": "This presses `{button}` to reboot the sensor's ESP. Lights are unaffected; the sensor resumes reporting within a minute."
+          }
+        }
+      }
     }
   }
 }

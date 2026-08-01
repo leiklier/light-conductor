@@ -1,6 +1,9 @@
 {
   "domain": "light_conductor",
   "name": "Light Conductor",
+  "after_dependencies": [
+    "repairs"
+  ],
   "codeowners": [
     "@leiklier"
   ],
@@ -15,5 +18,5 @@
   ],
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.1.0-beta.10"
+  "version": "0.1.0-beta.11"
 }

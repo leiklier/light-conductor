@@ -6,11 +6,15 @@ import asyncio
 import logging
 from datetime import timedelta
 
+from homeassistant.components.button import ButtonDeviceClass
 from homeassistant.const import ATTR_ENTITY_ID, EVENT_STATE_REPORTED, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
     async_fire_time_changed,
     async_mock_service,
 )
@@ -487,3 +491,126 @@ async def test_lux_wedge_issue_withdrawn_on_unload(hass: HomeAssistant) -> None:
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
     assert ir.async_get(hass).async_get_issue(DOMAIN, "lux_wedged_sensor.klux") is None
+
+
+# --- beta.11: fixable wedge notice + restart-button resolution + grace ------
+
+
+async def _register_apollo_device(hass: HomeAssistant, *, buttons: list[str]) -> None:
+    """Register a lux sensor (``sensor.klux``) on an Apollo-like device, plus a
+    restart ``button`` entity per name in ``buttons`` on that SAME device."""
+    dev_reg = dr.async_get(hass)
+    ent_reg = er.async_get(hass)
+    dev_entry = MockConfigEntry(domain="apollo", data={})
+    dev_entry.add_to_hass(hass)
+    device = dev_reg.async_get_or_create(
+        config_entry_id=dev_entry.entry_id,
+        identifiers={("apollo", "msr2")},
+    )
+    ent_reg.async_get_or_create(
+        "sensor",
+        "apollo",
+        "lux1",
+        device_id=device.id,
+        original_device_class="illuminance",
+        suggested_object_id="klux",
+    )
+    for name in buttons:
+        ent_reg.async_get_or_create(
+            "button",
+            "apollo",
+            f"btn_{name}",
+            device_id=device.id,
+            original_device_class=ButtonDeviceClass.RESTART,
+            suggested_object_id=name,
+        )
+
+
+async def _wedge_setup_with_device(hass: HomeAssistant, *, buttons: list[str]):
+    """As :func:`_wedge_setup`, but ``sensor.klux`` is a registry entity on a
+    device that also exposes the given restart button entity ids."""
+    await _register_apollo_device(hass, buttons=buttons)
+    controller = await _wedge_setup(hass)
+    entry = next(iter(hass.config_entries.async_entries(DOMAIN)))
+    return controller, entry
+
+
+async def test_wedge_fixable_when_restart_button_on_same_device(hass: HomeAssistant) -> None:
+    """A wedged sensor whose device has a restart button raises a FIXABLE issue
+    carrying the button/sensor/room/entry_id the fix flow needs."""
+    controller, entry = await _wedge_setup_with_device(hass, buttons=["esp_reboot"])
+    controller.submit(ReviewTick())
+    await hass.async_block_till_done()
+
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, "lux_wedged_sensor.klux")
+    assert issue is not None
+    assert issue.is_fixable is True
+    assert issue.translation_key == "lux_wedged_fixable"
+    assert issue.data == {
+        "entry_id": entry.entry_id,
+        "sensor_entity_id": "sensor.klux",
+        "button_entity_id": "button.esp_reboot",
+        "room": "k",
+    }
+
+
+async def test_wedge_falls_back_non_fixable_without_restart_button(hass: HomeAssistant) -> None:
+    """A device with NO restart button keeps beta.10's non-fixable notice."""
+    controller, _ = await _wedge_setup_with_device(hass, buttons=[])
+    controller.submit(ReviewTick())
+    await hass.async_block_till_done()
+
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, "lux_wedged_sensor.klux")
+    assert issue is not None
+    assert issue.is_fixable is False
+    assert issue.translation_key == "lux_wedged"
+
+
+async def test_restart_button_resolution_is_deterministic(hass: HomeAssistant) -> None:
+    """Multiple restart buttons → the first sorted by entity_id is chosen."""
+    controller, _ = await _wedge_setup_with_device(hass, buttons=["z_reboot", "a_reboot"])
+    assert controller._resolve_restart_button("sensor.klux") == "button.a_reboot"
+    # A sensor absent from the registry resolves to no button (fallback path).
+    assert controller._resolve_restart_button("sensor.not_registered") is None
+
+
+async def test_wedge_grace_suppresses_immediate_reraise(hass: HomeAssistant) -> None:
+    """After a fix-flow press, the still-silent sensor is not re-flagged within
+    the grace window (§3.5, D17 beta.11)."""
+    controller, _ = await _wedge_setup_with_device(hass, buttons=["esp_reboot"])
+    controller.submit(ReviewTick())
+    await hass.async_block_till_done()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, "lux_wedged_sensor.klux") is not None
+
+    # Simulate the fix flow: press stamps grace + drops _wedged; HA deletes issue.
+    controller.note_wedge_fix_pressed("sensor.klux")
+    ir.async_delete_issue(hass, DOMAIN, "lux_wedged_sensor.klux")
+
+    # Sensor is still silent; the next pass must NOT re-raise during the window.
+    controller.engine.room_state("k").est.last_report_at = dt_util.utcnow() - timedelta(
+        seconds=2000
+    )
+    controller.submit(ReviewTick())
+    await hass.async_block_till_done()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, "lux_wedged_sensor.klux") is None
+    assert "sensor.klux" not in controller._wedged
+
+
+async def test_wedge_grace_reraises_after_window_if_still_silent(hass: HomeAssistant) -> None:
+    """Past the grace window a still-silent sensor is re-raised — the reboot
+    did not help."""
+    controller, _ = await _wedge_setup_with_device(hass, buttons=["esp_reboot"])
+    controller.note_wedge_fix_pressed("sensor.klux")
+    # Age the press past the grace window.
+    controller._wedge_fix_pressed["sensor.klux"] = dt_util.utcnow() - timedelta(
+        seconds=lc_controller.WEDGE_FIX_GRACE + 30
+    )
+    controller.engine.room_state("k").est.last_report_at = dt_util.utcnow() - timedelta(
+        seconds=2000
+    )
+    controller.submit(ReviewTick())
+    await hass.async_block_till_done()
+
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, "lux_wedged_sensor.klux")
+    assert issue is not None
+    assert issue.is_fixable is True

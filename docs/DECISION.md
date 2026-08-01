@@ -332,6 +332,30 @@ Two more robustness fixes from the same morning ship together:
   recorder, so no new recorded entity is added. Ordinary unavailability (§8.5)
   is not a wedge and never raises it.
 
+  **beta.11 — the notice becomes FIXABLE.** Fix 3's non-fixable notice still made
+  the operator walk to the sensor. Each Apollo MSR-2 exposes a `button` entity
+  with `device_class: restart` on the *same device* that unwedges the LTR390, so
+  the notice now carries a one-press Fix. When raising the issue the controller
+  resolves that button via the entity registry (sensor entity → `device_id` →
+  the device's button entities → the one whose registry `original_device_class`
+  is `ButtonDeviceClass.RESTART`; trust the registry, not the live state, which
+  is unavailable while wedged; first by `entity_id` if several). If found, the
+  issue is raised `is_fixable=True` with `translation_key="lux_wedged_fixable"`
+  and `data` carrying the button, sensor, room, and owning `entry_id`; if not,
+  the beta.10 non-fixable notice is kept verbatim (the fallback path is
+  load-bearing — no restart button, no Fix button). `repairs.py`'s
+  `async_create_fix_flow` returns a `RepairsFlow` confirm dialog whose confirm
+  handler presses the button and finishes; HA then deletes the issue. Because
+  the rebooted sensor takes ~a minute to resume, the confirm handler stamps a
+  per-controller grace (`_wedge_fix_pressed[entity_id]`, `WEDGE_FIX_GRACE` 120 s
+  — a module constant, not a new tunable) and drops the sensor from `_wedged` so
+  registry and controller agree; `_check_lux_wedge` suppresses re-raising within
+  the window and re-raises only if the sensor is still silent afterward (the
+  reboot did not help). Grace is per-controller and cleared on reload alongside
+  `_wedged`; `async_stop`'s withdrawal is unchanged. The `repairs` platform is a
+  discovered platform (not in `PLATFORMS`); `manifest.after_dependencies` lists
+  `repairs` to satisfy hassfest's import-dependency check.
+
 ## Open questions — RESOLVED (user, 2026-07-25)
 
 - **Q1 (D8):** master dimmer neutral at 50 % — confirmed (boost possible).

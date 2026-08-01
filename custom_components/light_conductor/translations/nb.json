@@ -169,6 +169,18 @@
     "lux_wedged": {
       "title": "Lyssensor ser ut til å ha låst seg",
       "description": "Lyssensoren `{entity_id}` (rom {room}) er fortsatt tilgjengelig, men har sluttet å sende nye målinger — en kjent LTR390-feil der enheten holder seg på nett, men henger seg opp. Light Conductor har falt tilbake til åpen sløyfe-styring for dette rommet. Trykk på ESP-omstartsknappen på sensoren for å gjenopprette målinger; dette varselet forsvinner automatisk når den rapporterer igjen."
+    },
+    "lux_wedged_fixable": {
+      "title": "Lyssensor ser ut til å ha låst seg",
+      "description": "Lyssensoren `{entity_id}` (rom {room}) er fortsatt tilgjengelig, men har sluttet å sende nye målinger — en kjent LTR390-feil der enheten holder seg på nett, men henger seg opp. Light Conductor har falt tilbake til åpen sløyfe-styring for dette rommet. Bruk Løs-knappen for å starte den på nytt; dette varselet forsvinner automatisk når den rapporterer igjen.",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Start lyssensoren på nytt",
+            "description": "Dette trykker på `{button}` for å starte sensorens ESP på nytt. Lysene påvirkes ikke; sensoren gjenopptar rapportering innen ett minutt."
+          }
+        }
+      }
     }
   }
 }
