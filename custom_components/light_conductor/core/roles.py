@@ -94,10 +94,27 @@ def step(
     tun: Tunables,
     shape: RoomShape,
     hold_seconds: float | None,
+    e: float = 0.0,
 ) -> None:
     """Advance ``self_active`` and its holds up to ``now`` (rules 1.3-1.9)."""
     if shape is RoomShape.OUTDOOR:
-        return  # outdoor rooms ignore presence (rule 6.5); modes.py owns them
+        # Outdoor rooms ignore presence SENSING (rule 6.5); modes.py owns their
+        # own lighting. But the occupational switch is a *declaration* of
+        # presence (rule 1.10): while it is on AND the evening is deep enough
+        # to light the balcony itself (``e >= outdoor_on_threshold`` — the same
+        # window as §6.5), the room counts as self-active so neighbours can
+        # glow ADJACENT and a living-group balcony keeps living_recently_active
+        # alive (the balcony-sitting incident — the interior went dark around
+        # an occupant the sensors cannot see). Ungated, a switch left on would
+        # light the interior in full daylight (the open-loop tier path has no
+        # daylight damping for sensorless rooms). The falling edge — switch off
+        # OR morning E-descent — stamps last_active_end so living_memory decays
+        # normally.
+        active = rs.occupational and e >= tun.outdoor_on_threshold
+        if rs.self_active and not active:
+            rs.last_active_end = now
+        rs.self_active = active
+        return
     if shape in (RoomShape.CORRIDOR, RoomShape.DOOR):
         _step_trigger(rs, now)
         return
