@@ -206,9 +206,13 @@ closed loop chasing an unreachable target). A failing set is **dropped** (the
 collected ratios are cleared, not accumulated) so a later quiet period can
 bootstrap cleanly. **Wedge notice.** A configured lux sensor whose entity stays
 AVAILABLE but produces no state update for `lux_wedge_warn` (default 1800 s)
-raises a non-fixable HA repairs issue (one per sensor) suggesting its ESP reboot
-button (a known LTR390 quirk); it clears automatically when reports resume.
-Ordinary unavailability (§8.5) is not a wedge and never raises it.
+raises an HA repairs issue (one per sensor) suggesting its ESP reboot button (a
+known LTR390 quirk); it clears automatically when reports resume. When a restart
+button (`ButtonDeviceClass.RESTART`) exists on the sensor's own device the issue
+is **fixable** — its Fix button presses that reboot button and a short grace
+window suppresses an immediate re-raise while the sensor boots; otherwise the
+issue stays non-fixable with the manual instruction. Ordinary unavailability
+(§8.5) is not a wedge and never raises it.
 
 3.6 **Anti-hunting invariant.** The closed loop may not oscillate: control
 error uses a **deadband** — no action while `|T' − (N̂ + Â)| < deadband`, where
