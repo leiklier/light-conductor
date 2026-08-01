@@ -354,7 +354,12 @@ Two more robustness fixes from the same morning ship together:
   reboot did not help). Grace is per-controller and cleared on reload alongside
   `_wedged`; `async_stop`'s withdrawal is unchanged. The `repairs` platform is a
   discovered platform (not in `PLATFORMS`); `manifest.after_dependencies` lists
-  `repairs` to satisfy hassfest's import-dependency check.
+  `repairs` to satisfy hassfest's import-dependency check. hassfest's
+  translations schema makes an issue's `description` and `fix_flow` mutually
+  exclusive, so the fixable variant carries only `title` + `fix_flow` (the
+  confirm step's own description names the sensor, room, and button); the
+  non-fixable fallback keeps its `title` + `description` manual instruction.
+  Both texts exist in en + nb.
 
 ## Open questions — RESOLVED (user, 2026-07-25)
 
