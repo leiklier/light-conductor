@@ -596,6 +596,27 @@ def test_occupational_balcony_keeps_interior_lit() -> None:
     assert "stue_taklys" in offs(gone)
 
 
+def test_occupational_daytime_switch_does_not_light_interior() -> None:
+    """§1.10: the presence declaration is gated on E >= outdoor_on_threshold —
+    a switch left on through the morning must not keep (or turn) the interior
+    lit in full daylight."""
+    eng = Engine(_balcony_apartment(), InitialSnapshot(sun_elevation=NIGHT_SUN))
+    eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))
+    eng.handle(OccupationalChanged("balkong", True), at(1, 22, 1))
+    assert eng.state.rooms["stue"].role is Role.ADJACENT
+
+    # Morning: sun rises, E collapses to day — the declaration ends, the stue
+    # decays through living_memory and goes OFF despite the switch being on.
+    eng.handle(SunElevationChanged(30.0), at(2, 9, 0))
+    assert not eng.state.rooms["balkong"].self_active
+    gone = eng.handle(ReviewTick(), at(2, 9, 20))
+    assert eng.state.rooms["stue"].role is Role.OFF
+    assert (
+        "stue_taklys" in offs(gone)
+        or eng.state.rooms["stue"].channels["stue_taklys"].commanded_b == 0.0
+    )
+
+
 def test_occupational_balcony_does_not_defeat_away() -> None:
     """§1.10/§6.4: away hard-off still wins over occupational self-activity."""
     eng = Engine(_balcony_apartment(), InitialSnapshot(sun_elevation=NIGHT_SUN))
@@ -608,8 +629,9 @@ def test_occupational_balcony_does_not_defeat_away() -> None:
 
 def test_occupational_balcony_holds_manual_override_inside() -> None:
     """§1.10/§9.2: while the balcony is in use the living room is BACKGROUND —
-    not OFF-worthy — so a manual dial inside STICKS instead of releasing on
-    vacancy (the incident's second failure mode)."""
+    ADJACENT via the neighbour link (not OFF-worthy either way) — so a manual
+    dial inside STICKS instead of releasing on vacancy (the incident's second
+    failure mode)."""
     eng = Engine(_balcony_apartment(), InitialSnapshot(sun_elevation=NIGHT_SUN))
     eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))
     eng.handle(OccupationalChanged("balkong", True), at(1, 22, 1))

@@ -92,7 +92,9 @@ freezes its current role for `presence_blind_hold`, then demotes one step per
 Sleep mode overrides per §6.1.
 
 1.10 **Occupational presence** (outdoor rooms). An outdoor room's occupational
-switch is a *declaration* of presence: while on, the room is self-active — its
+switch is a *declaration* of presence: while on AND ``E >= outdoor_on_threshold``
+(the same window in which §6.5 lights the room itself — ungated, a switch left
+on would light the interior in full daylight), the room is self-active — its
 neighbours qualify for ADJACENT and, when flagged `living_group`, it keeps
 `living_recently_active` alive (§1.6) so the interior does not go dark around
 an occupant the sensors cannot see (the balcony-sitting incident). The falling

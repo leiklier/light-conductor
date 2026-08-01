@@ -340,7 +340,7 @@ class Engine:
 
         # Pass 1: advance every room's FSM so adjacency reads settled state.
         for room in self.config.rooms:
-            roles.step(self.state.rooms[room.room_id], now, tun, room.shape, room.hold_seconds)
+            roles.step(self.state.rooms[room.room_id], now, tun, room.shape, room.hold_seconds, e)
         living = self._living_active(now)
 
         # Calibration pass (§4.4): start/reject requests and advance any running
