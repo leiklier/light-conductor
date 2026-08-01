@@ -442,6 +442,70 @@ def test_bootstrap_skips_tiny_or_wrong_sign_observation() -> None:
     assert est2.bootstrap_ratios == []  # observed ΔL -10 < 0 -> sign disagreement
 
 
+def _feed_bootstrap_ratios(est: EstimatorState, ratios: tuple[float, ...], tun: Tunables) -> None:
+    """Drive ``ratios`` (ΔL/Δflux) through the real §3.5 shadow-bootstrap path."""
+    for r in ratios:
+        # base_delta 1.0 -> observed ΔL == ratio; must clear deadband_abs (5).
+        _settled_obs_tun(est, l_before=0.0, l_now=r, base=1.0, tun=tun)
+
+
+def _settled_obs_tun(
+    est: EstimatorState, *, l_before: float, l_now: float, base: float, tun: Tunables
+) -> None:
+    est.l_filt = l_now
+    est.last_filt_at = at(1, 20, 0, 0)
+    est.pending_l_before = l_before
+    est.pending_base_delta = base
+    est.pending_settle_at = at(1, 20, 0, 1)
+    est.pending_valid = True
+    est.pending_shadow = True
+    estimator.ingest_lux(est, l_now, at(1, 20, 5, 0), DAY, 0.0, tun, calibrated=False)
+
+
+def test_bootstrap_rejects_dispersed_ratios_incident() -> None:
+    """§3.5/D17 regression (kjøkken, 2026-08-01): an ambient-contaminated ratio
+    set [8.73, 95.31, 14.21] is wildly dispersed and must NOT arm the bootstrap;
+    the contaminated ratios are dropped, not accumulated (a corrupted first-night
+    bootstrap otherwise promoted a deliberately open-loop room into closed loop)."""
+    est = EstimatorState()
+    _feed_bootstrap_ratios(est, (8.73, 95.31, 14.21), TUN)
+    assert not est.bootstrap_confident
+    assert est.bootstrap_ratios == []  # dropped so a later quiet period can retry
+    assert est.gain_mult == 1.0  # gain untouched
+
+
+def test_bootstrap_arms_on_consistent_ratios() -> None:
+    """§3.5: a tight, agreeing set arms exactly as before (median x margin)."""
+    est = EstimatorState()
+    _feed_bootstrap_ratios(est, (12.0, 14.2, 15.1), TUN)
+    assert est.bootstrap_confident
+    assert est.gain_mult == estimator._median([12.0, 14.2, 15.1]) * TUN.bootstrap_margin
+
+
+def test_bootstrap_recovers_after_contaminated_set() -> None:
+    """§3.5/D17: a rejected set is cleared, so a subsequent consistent set arms."""
+    est = EstimatorState()
+    _feed_bootstrap_ratios(est, (8.73, 95.31, 14.21), TUN)
+    assert not est.bootstrap_confident and est.bootstrap_ratios == []
+    _feed_bootstrap_ratios(est, (12.0, 14.2, 15.1), TUN)
+    assert est.bootstrap_confident  # contamination cleared, clean set arms
+
+
+def test_bootstrap_dispersion_max_tunable_respected() -> None:
+    """§3.5: the dispersion bound is the tunable — a set that arms at the default
+    3.0 is rejected at a tighter 1.2."""
+    from dataclasses import replace
+
+    ratios = (10.0, 14.2, 15.1)  # median 14.2; min 10 < 14.2/1.2 = 11.83
+    loose = EstimatorState()
+    _feed_bootstrap_ratios(loose, ratios, TUN)  # default 3.0
+    assert loose.bootstrap_confident  # 15.1 <= 42.6 and 10 >= 4.73 -> arms
+
+    tight = EstimatorState()
+    _feed_bootstrap_ratios(tight, ratios, replace(TUN, bootstrap_dispersion_max=1.2))
+    assert not tight.bootstrap_confident  # min 10 < 14.2/1.2 -> rejected
+
+
 def test_band_fill_zero_demand_is_all_off() -> None:
     """§4.5: zero demand (natural light already sufficient) leaves all bands 0."""
     chans = (ChannelConfig("c", band=Band.PRIMARY, fixed_ct=2700, gain=100.0),)

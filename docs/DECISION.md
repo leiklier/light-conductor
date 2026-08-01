@@ -267,6 +267,61 @@ falsely rejected as a `dark_channel`. Estimator consistency is automatic:
 `f_i` maps that to flux, so the mapping changes what is commanded, not how the
 observation is interpreted.
 
+## D17. Bootstrap arming dispersion sanity + robustness fixes (beta.10)
+
+Live incident (kjøkken, 2026-08-01). Kjøkken has three channels with a true
+own-light gain of only ~2 lx at its sensor, and is deliberately kept OPEN-loop
+by the §4.5 capacity gate (`C ≈ 2 < min_closed_loop_capacity 4`). A corrupted
+first-night bootstrap promoted it into closed loop anyway: morning clouds swung
+daylight 10–17 lx while the room's lights happened to toggle, so the §3.5
+shadow-bootstrap — which arms on observed `ΔL ≥ deadband_abs` during own
+transitions — recorded ambient swings as own-light response. The live ratios
+`[8.73, 95.31, 14.21]` gave `median × bootstrap_margin 1.5 → gain_mult 21.3`, so
+capacity `3 × 21.3 = 64 ≫ 4` cleared the gate. The room then chased an
+unreachable ~40 lx auto target: banded fill saturated accent+primary and never
+reached boost (benkebelysning stayed dark — a user-visible failure). A real
+lamp's own-step ratios agree closely; an ambient-contaminated set is wildly
+dispersed.
+
+Decision (Fix 1): before the bootstrap commits, require the collected ratios to
+**agree** — with `m = median(ratios)`, `max(ratios) ≤ bootstrap_dispersion_max ×
+m` and `min(ratios) ≥ m / bootstrap_dispersion_max` (new tunable, default 3.0).
+A failing set is **dropped** (ratios cleared) rather than accumulated, so a
+later quiet period bootstraps cleanly instead of the contamination latching
+forever. Everything else about arming is unchanged (the `deadband_abs` observed
+threshold, per-run best-effort, the 1.5 over-model margin).
+
+Rejected alternative: exclude the bootstrap `gain_mult` from the §4.5 capacity
+gate (gate on the calibrated base capacity only). Rejected — an *uncalibrated*
+room's base capacity is just its channel count (default gains 1.0), so the gate
+would reduce to "≥ 4 channels" and be meaningless for the 1–3-channel rooms that
+bootstrap is designed to serve; it would kill the feature. Dispersion is the
+correct guard: it distinguishes genuine own-light steps (which agree) from
+ambient contamination (which scatters), independent of the room's capacity.
+
+Two more robustness fixes from the same morning ship together:
+
+- **Fix 2 — wall-event recovery guard (§9.4).** A brief Plejd/ESPHome
+  availability blip re-emitted each event entity's *previous* timestamp on
+  reconnect (`unavailable`→old timestamp), which `_on_wall_event` accepted and
+  latched as a whole-room manual override — gang + sofakrok "pressed their
+  dials" in the same second (08:08:23, no human present), and again during a
+  later proxy restart. A genuine press always moves from one valid event
+  timestamp to a strictly newer one, so the handler now returns early when
+  `old_state` is absent/`unavailable`/`unknown` or when the new timestamp equals
+  the old (identical-timestamp republish).
+
+- **Fix 3 — lux-wedge repair notice (§3.5).** Both Apollo MSR-2 LTR390 sensors
+  "wedged" (entity stays available but stops reporting; fix = press its ESP
+  reboot button) with no operator visibility. A sensor available but silent past
+  `lux_wedge_warn` (new tunable, default 1800 s — much longer than `lux_stale`'s
+  open-loop fallback) now raises a non-fixable WARNING repairs issue (one per
+  sensor, en+nb strings), cleared automatically when reports resume. The check
+  piggybacks the existing publish cadence (no new timer) and drives off the
+  estimator's existing `last_report_at`; repairs issues never touch the
+  recorder, so no new recorded entity is added. Ordinary unavailability (§8.5)
+  is not a wedge and never raises it.
+
 ## Open questions — RESOLVED (user, 2026-07-25)
 
 - **Q1 (D8):** master dimmer neutral at 50 % — confirmed (boost possible).

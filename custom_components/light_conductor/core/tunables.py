@@ -69,7 +69,21 @@ class Tunables:
     #: bootstrap_margin so the resulting loop gain is < 1 (stable undershoot).
     bootstrap_min_obs: int = 3  # 3.5/4.4
     bootstrap_margin: float = 1.5  # 3.5/4.4
+    #: Bootstrap arming dispersion guard (§3.5): before committing a bootstrap
+    #: gain the collected own-step ratios must agree — with m = median(ratios),
+    #: ``max(r) <= bootstrap_dispersion_max·m`` AND ``min(r) >= m /
+    #: bootstrap_dispersion_max``. Genuine own-light observations cluster
+    #: tightly; ambient contamination (clouds swinging daylight while lights
+    #: happen to toggle) scatters. A failing set is dropped so a later quiet
+    #: period can bootstrap cleanly (the kjøkken false-promotion incident).
+    bootstrap_dispersion_max: float = 3.0  # 3.5
     lux_stale: float = 300.0  # 3.5 (60 s publish cadence with dedup: 120 s was flappy)
+    #: Lux-sensor "wedge" warning threshold (§3.5): a configured lux sensor whose
+    #: entity stays AVAILABLE but has produced no state update for this many
+    #: seconds raises a (non-fixable) HA repairs issue suggesting its ESP reboot
+    #: button. Much longer than ``lux_stale`` (open-loop fallback) — a wedge is a
+    #: hardware quirk needing operator action, not routine unavailability.
+    lux_wedge_warn: float = 1800.0  # 3.5
     deadband_abs: float = 5.0  # 3.6
     deadband_rel: float = 0.15  # 3.6
     #: Capacity-scaled control deadband (§3.6): the absolute deadband component is
@@ -139,6 +153,8 @@ class Tunables:
             raise ValueError("sun_low_deg must be below sun_high_deg")
         if not self.morning_start_min < self.morning_full_min < self.evening_start_min:
             raise ValueError("circadian clock boundaries out of order")
+        if self.bootstrap_dispersion_max < 1.0:
+            raise ValueError("bootstrap_dispersion_max must be >= 1.0")
 
 
 def gain_multiplier(pct: float, stops: float) -> float:

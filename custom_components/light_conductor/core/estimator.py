@@ -277,11 +277,22 @@ def _bootstrap_gain(est: EstimatorState, obs_delta: float, base: float, tun: Tun
         return
     est.bootstrap_ratios.append(ratio)
     if len(est.bootstrap_ratios) >= tun.bootstrap_min_obs:
+        # Dispersion sanity (§3.5, D17): genuine own-light steps produce ratios
+        # that agree; an ambient-contaminated set (clouds swinging daylight while
+        # the lights happen to toggle — the kjøkken false-promotion incident,
+        # live ratios [8.73, 95.31, 14.21]) scatters wildly. Require the ratios
+        # to cluster around their median before arming; a failing set is DROPPED
+        # (not accumulated) so a later quiet period can bootstrap cleanly.
+        m = _median(est.bootstrap_ratios)
+        dmax = tun.bootstrap_dispersion_max
+        if m <= 0.0 or max(est.bootstrap_ratios) > dmax * m or min(est.bootstrap_ratios) < m / dmax:
+            est.bootstrap_ratios.clear()
+            return
         # Over-model deliberately (x margin): a modelled gain ABOVE the truth
         # gives loop gain < 1 (stable undershoot that converges); under-modelling
         # gives loop gain > 1 (the hunting regime). Conservative = err high.
         old = est.gain_mult
-        est.gain_mult = _median(est.bootstrap_ratios) * tun.bootstrap_margin
+        est.gain_mult = m * tun.bootstrap_margin
         est.bootstrap_confident = True
         # Re-sync the filtered Â to the new gain scale so N̂ is consistent the
         # instant closed-loop takes over (no switchover transient).
