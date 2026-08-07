@@ -184,6 +184,9 @@ class Engine:
                     s.night_hold_until = now + timedelta(seconds=self.tun.night_hold)
             case OccupationalChanged():
                 if (rs := s.rooms.get(event.room_id)) is not None:
+                    room = self.config.room(event.room_id)
+                    if room is not None and room.shape is RoomShape.OUTDOOR:
+                        self._occupational_edge(room, rs, event.on, now)
                     rs.occupational = event.on
             case MasterGainChanged():
                 s.master_pct = max(0.0, min(100.0, event.pct))
@@ -229,8 +232,106 @@ class Engine:
         estimator.invalidate_pending(rs.est)
         if rs.cal is not None:
             rs.cal.foreign = True  # the next calibration.step aborts (rule 4.4)
+        # Room-level on/off edge, read BEFORE adopt overwrites the engine's
+        # belief (§6.5b needs "was the room lit" as the engine knew it).
+        was_lit = any(cs.on for cs in rs.channels.values())
+        others_on = any(cs.on for cid, cs in rs.channels.items() if cid != event.channel_id)
         override.latch(rs, now)  # rules 9.1, 9.4 (wall events always latch)
         override.adopt(rs.channels[event.channel_id], event.level, event.ct)
+        if room.shape is RoomShape.OUTDOOR:
+            self._foreign_outdoor_edge(room, rs, event, now, was_lit, others_on)
+
+    def _foreign_outdoor_edge(
+        self,
+        room: RoomConfig,
+        rs: RoomState,
+        event: ForeignChange,
+        now: datetime,
+        was_lit: bool,
+        others_on: bool,
+    ) -> None:
+        """Manual on/off on an outdoor room declares presence (rule 6.5b).
+
+        An outdoor room has no presence sensing — the occupational switch IS
+        its presence, a declaration (§1.10). A manual light action on such a
+        room (wall-dimmer button, app, voice) is the same declaration made
+        physically, so the edges mirror into ``occupational``:
+
+        * ON edge (room dark -> lit): occupational ON — pressing the balcony
+          button as you step out is "sitting outside" without reaching for
+          HomeKit.
+        * OFF edge (room lit -> dark) while occupational is ON: occupational
+          OFF — done sitting; the room returns to mode resolution (dusk
+          backdrop, or dark by day).
+        * OFF edge while occupational is already OFF: NOT a declaration —
+          the user is suppressing the ambient backdrop; the plain §9.1 latch
+          stands and the room stays dark until a normal release.
+        * A level change with no edge (dial while lit) adjusts brightness,
+          not presence: the latch stands, occupational is untouched.
+
+        Whether the just-latched override then releases so the conductor's
+        tier takes over is decided by :meth:`_occupational_edge`.
+
+        No declaration is minted while a sleep/away hard-off governs the room:
+        the resolution will win a moment later anyway, and the mirrored flag
+        would outlive the episode (button presses during sleep are all ON
+        edges — the hard-off zeroes the channels each cycle — so a stuck flag
+        could never be cleared by the button, and §1.10 would then light the
+        interior around a phantom occupant at the next dusk). A ``None`` level
+        (channel momentarily unavailable — a wall event during a Plejd blip)
+        is no declaration either.
+
+        Known residual (D20): a lost mesh write corrected to zero by the 3-min
+        true-state poll is indistinguishable from a genuine off-press here and
+        will cancel a sitting session (backdrop returns; press again). The
+        recovery and echo paths are guarded upstream; only the lost-write
+        correction leaks through.
+        """
+        if self.state.sleep or modes.is_away(self.state):
+            return
+        if event.level is None:
+            return
+        level_on = event.level > 0.0
+        if not was_lit and level_on:
+            self._occupational_edge(room, rs, True, now)
+            rs.occupational = True
+        elif was_lit and not level_on and not others_on and rs.occupational:
+            self._occupational_edge(room, rs, False, now)
+            rs.occupational = False
+
+    def _occupational_edge(self, room: RoomConfig, rs: RoomState, on: bool, now: datetime) -> None:
+        """Release the room's override on an occupational edge (rule 6.5b).
+
+        A declaration supersedes stale manual state, whichever entity made it
+        (wall button via §6.5b, or the switch/HomeKit via OccupationalChanged):
+
+        * falling edge: release always — the room returns to mode resolution
+          (dusk backdrop, or off by day). Without this, "sitting outside" off
+          would leave a latched dial level burning for up to override_timeout.
+        * rising edge: release only when the dusk ramp is at least
+          ``outdoor_presence_factor`` deep — the same "deep enough to matter"
+          threshold §1.10 uses. Any weaker gate steps the user DOWN: below
+          ~0.25 the sitting tier quantizes to the dim floor, so releasing on
+          a shallow-dusk press would rewrite a 90 % press to 2 % within one
+          cycle (the beta.8 cardinal sin, reproduced — review F1). Below the
+          threshold the §9.1 latch keeps the user's level; occupational is
+          still set, so adjacency and living-memory follow when the ramp
+          deepens.
+
+        No-op when nothing changes (an unchanged re-submit — e.g. HomeKit
+        re-sending ON — is not an edge) and inside the startup grace (the
+        switch's restore re-submit at boot is ordered before any foreign
+        change today, but that safety is queue ordering, not a guarantee —
+        review F5).
+        """
+        if on == rs.occupational or not rs.overridden or self._in_grace(now):
+            return
+        if not on:
+            override.release(rs)
+            return
+        e = circadian.factor(self.state.sun_elevation, now, self.tun)
+        if self._outdoor_dusk(room, now, e) >= self.tun.outdoor_presence_factor:
+            override.release(rs)
 
     # -- recompute pipeline -------------------------------------------------
 
@@ -442,6 +543,15 @@ class Engine:
         if rs.overridden:
             if res is not None and res.suppress_override:
                 pass  # night path suspends the override → fall through
+            elif res is not None and res.off and res.respect_override:
+                # A respected daylight-OFF (§6.5b): only the timeout releases.
+                # should_release's off_worthy path must not reach it — a
+                # presence-capable outdoor room (occupancy fallback configured)
+                # would otherwise release-and-counter the press (review F4).
+                if not override.timed_out(rs, now, tun):
+                    plan.review_at(override.override_review(rs, now, tun))
+                    return self._diag(room, rs, rs.role)
+                override.release(rs)
             elif res is not None and res.off:
                 override.release(rs)  # sleep/away hard-off releases + wins
             elif override.should_release(rs, s, off_worthy, room.presence_capable, now, tun):

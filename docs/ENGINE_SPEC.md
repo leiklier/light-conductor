@@ -99,7 +99,9 @@ this is exactly `E >= outdoor_on_threshold`), the room is self-active — its
 neighbours qualify for ADJACENT and, when flagged `living_group`, it keeps
 `living_recently_active` alive (§1.6) so the interior does not go dark around
 an occupant the sensors cannot see (the balcony-sitting incident). The falling
-edge stamps the normal `living_memory` decay. Away/sleep hard-offs (§6.1/§6.4)
+edge stamps the normal `living_memory` decay. The switch need not be flipped
+from HomeKit: a manual light action on the room makes the same declaration
+(§6.5b). Away/sleep hard-offs (§6.1/§6.4)
 still win, and §6.5's away-mode handling of the switch is unchanged.
 
 ## 2. Illuminance targets & circadian shaping
@@ -456,6 +458,51 @@ or the bootstrap (§4.4) — its sensor is a dusk measurement, not a control
 feedback path — so it exposes no target-lux and no calibration button, and its
 own contribution to that sensor (a balcony lamp seen through a window) stays in
 N̂'s own-light term rather than driving a loop.
+
+6.5b **Manual light action declares presence** (outdoor rooms). An outdoor
+room has no presence sensing — its occupational switch IS its presence, a
+declaration (§1.10). A manual on/off on the room's lights (wall-dimmer button,
+app, voice — any §9.1 foreign change) is the same declaration made physically:
+
+- **ON edge** (room dark → lit): occupational turns ON.
+- **OFF edge** (room lit → dark) while occupational is ON: occupational turns
+  OFF; the room returns to mode resolution (dusk backdrop per 6.5/6.5a, or
+  dark by day).
+- **OFF edge** while occupational is already OFF is *not* a declaration — the
+  user is suppressing the ambient backdrop; the plain §9.1 latch stands.
+- A level change with no edge (dialing while lit) adjusts brightness, not
+  presence: latch stands, occupational untouched.
+
+The OFF edge requires the whole room dark (every channel off), and a `None`
+level (channel momentarily unavailable) is no declaration. No declaration is
+minted while a sleep/away hard-off governs the room — the mirrored flag would
+outlive the episode (under a hard-off every press is an ON edge) and light the
+interior around a phantom occupant at the next dusk.
+
+An occupational edge (6.5b edge or the outdoor room's switch entity) also
+arbitrates the room's override latch: a falling edge releases it always (a
+declared absence must not leave a latched dial level burning for
+`override_timeout`); a rising edge releases it only when
+`D_out >= outdoor_presence_factor` — the same "deep enough to matter"
+threshold as §1.10. Any weaker gate steps the user DOWN: below `D_out` ≈ 0.25
+the sitting tier quantizes to the dim floor, so releasing on a shallow-dusk
+press would rewrite a bright press to ~2 % within one cycle. Below the
+threshold the latch keeps the user's level (occupational is still set, so
+adjacency follows when the ramp deepens). To make that hold, the outdoor
+daylight-OFF resolution *respects* a latched override while occupational is
+on — only `override_timeout` releases it (never `should_release`'s off-worthy
+path, even on a presence-capable outdoor room); sleep/away hard-offs still
+release and win, and with occupational off the morning descent still
+hard-offs a stray dialed level. Re-submitting an unchanged state is not an
+edge, and the arbitration is inert inside the startup grace (the switch's
+restore re-submit must never clear a latch at boot).
+
+Known residual: a mesh write lost and corrected to zero by the ~3-min
+true-state poll is indistinguishable from a genuine off-press and cancels a
+sitting session (the backdrop returns; press again). Pressing OFF while
+sitting returns the backdrop within a second by design, and because wall
+buttons are hardware toggles, arriving at a lit backdrop takes two presses to
+reach the sitting tier.
 
 6.6 **Vacation.** If `vacation_entity` is configured and on, away rules apply
 regardless of presence, except an optional simple presence-simulation is out
