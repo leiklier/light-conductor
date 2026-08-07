@@ -435,12 +435,27 @@ plain latch stands, room stays dark); dial-while-lit ⇒ brightness only.
 Override arbitration on the edge (any source, button or switch): falling edge
 always releases (declared absence returning to mode resolution — backdrop at
 dusk, off by day; without this, HomeKit-off after a dial would leave the dialed
-level burning for override_timeout). Rising edge releases only at D_out > 0:
-at dusk the conductor's sitting tier takes over within a cycle; in daylight
-the mode resolves OFF and releasing would counter the very press that made the
-declaration (the beta.8/soverom cardinal sin) — there the latch keeps the
-user's level. Re-submitting an unchanged state never releases (the switch's
-RestoreEntity re-submit at boot must not clear latches).
+level burning for override_timeout). Rising edge releases only at
+D_out >= outdoor_presence_factor. The first cut gated on D_out > 0 with the
+argument "only D_out = 0 resolves OFF and counters the press"; the adversarial
+review (F1) measured that the argument condemns the whole shallow half of the
+ramp equally — below D_out ≈ 0.25 the sitting tier quantizes to the dim floor,
+so a 90 % press was rewritten to 2 % within one cycle, the beta.8 incident
+reproduced by the very mechanism built to prevent it. The §1.10 threshold is
+the honest gate and makes 6.5b and 1.10 consistent. Review also found (F2) that
+presses under a sleep/away hard-off minted un-clearable declarations (every
+press is an ON edge once the hard-off zeroes the channels) that would light the
+interior around a phantom occupant at the next dusk — no declaration is minted
+under a governing hard-off; (F4) that should_release's off_worthy path defeated
+respect_override the moment anyone gives the balcony an occupancy fallback —
+a respected latch now releases only on timeout; (F5) that the restore-resubmit
+safety was queue ordering, not the documented guard — the arbitration is now
+inert inside the startup grace; (F8) that a None level (wall event during a
+Plejd blip) read as an off-press. Accepted residual (F3): a mesh write lost
+and corrected to zero by the 3-min poll is indistinguishable from a genuine
+off-press and cancels the session — backdrop returns, press again; the
+recovery and echo paths are guarded upstream. Re-submitting an unchanged
+state never releases.
 
 Building the daylight case surfaced a pre-existing behaviour: the outdoor
 daylight-OFF resolution was shaped exactly like a sleep/away hard-off, so ANY

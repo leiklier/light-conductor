@@ -473,18 +473,36 @@ app, voice — any §9.1 foreign change) is the same declaration made physically
 - A level change with no edge (dialing while lit) adjusts brightness, not
   presence: latch stands, occupational untouched.
 
-An occupational edge from ANY source (6.5b edge or the switch entity) also
+The OFF edge requires the whole room dark (every channel off), and a `None`
+level (channel momentarily unavailable) is no declaration. No declaration is
+minted while a sleep/away hard-off governs the room — the mirrored flag would
+outlive the episode (under a hard-off every press is an ON edge) and light the
+interior around a phantom occupant at the next dusk.
+
+An occupational edge (6.5b edge or the outdoor room's switch entity) also
 arbitrates the room's override latch: a falling edge releases it always (a
 declared absence must not leave a latched dial level burning for
-`override_timeout`); a rising edge releases it only when `D_out > 0`, so the
-conductor's sitting tier takes over at dusk while a daylight press keeps the
-user's own level (releasing at `D_out = 0` would resolve OFF and instantly
-counter the press). To make the daylight case hold, the outdoor daylight-OFF
-resolution *respects* a latched override while occupational is on (it is the
-one OFF that does; sleep/away hard-offs still release and win, and with
-occupational off the morning descent still hard-offs a stray dialed level).
-Re-submitting an unchanged state (e.g. the switch's restore re-submit at boot)
-never releases anything.
+`override_timeout`); a rising edge releases it only when
+`D_out >= outdoor_presence_factor` — the same "deep enough to matter"
+threshold as §1.10. Any weaker gate steps the user DOWN: below `D_out` ≈ 0.25
+the sitting tier quantizes to the dim floor, so releasing on a shallow-dusk
+press would rewrite a bright press to ~2 % within one cycle. Below the
+threshold the latch keeps the user's level (occupational is still set, so
+adjacency follows when the ramp deepens). To make that hold, the outdoor
+daylight-OFF resolution *respects* a latched override while occupational is
+on — only `override_timeout` releases it (never `should_release`'s off-worthy
+path, even on a presence-capable outdoor room); sleep/away hard-offs still
+release and win, and with occupational off the morning descent still
+hard-offs a stray dialed level. Re-submitting an unchanged state is not an
+edge, and the arbitration is inert inside the startup grace (the switch's
+restore re-submit must never clear a latch at boot).
+
+Known residual: a mesh write lost and corrected to zero by the ~3-min
+true-state poll is indistinguishable from a genuine off-press and cancels a
+sitting session (the backdrop returns; press again). Pressing OFF while
+sitting returns the backdrop within a second by design, and because wall
+buttons are hardware toggles, arriving at a lit backdrop takes two presses to
+reach the sitting tier.
 
 6.6 **Vacation.** If `vacation_entity` is configured and on, away rules apply
 regardless of presence, except an optional simple presence-simulation is out

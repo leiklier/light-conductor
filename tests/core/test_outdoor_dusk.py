@@ -14,6 +14,7 @@ from custom_components.light_conductor.core import modes, targets
 from custom_components.light_conductor.core.engine import Engine
 from custom_components.light_conductor.core.events import (
     ForeignChange,
+    HomeChanged,
     LuxReport,
     OccupationalChanged,
     ReviewTick,
@@ -390,3 +391,114 @@ def test_morning_descent_still_cleans_up_an_undeclared_override() -> None:
     rs = eng.state.rooms["balkong"]
     assert rs.overridden is False
     assert _commanded(eng) == 0.0
+
+
+# --- review round (F1, F2, F4, F5, F8) ------------------------------------
+
+
+def test_shallow_dusk_press_keeps_the_users_level() -> None:
+    """F1: below outdoor_presence_factor the sitting tier quantizes toward the
+    dim floor — releasing would rewrite a 90 % press to ~2 %. The latch must
+    keep the adopted level across the whole shallow half of the ramp."""
+    for lux, dusk in ((14.35, 0.05), (12.4, 0.2)):
+        eng, t = _booted()
+        t = _feed(eng, lux, t, n=40)
+        # Ensure the room is dark so the press is an ON edge (suppress any
+        # shallow backdrop the ramp may have lit).
+        if _commanded(eng) > 0.0:
+            t += timedelta(seconds=10)
+            eng.handle(ForeignChange("balkong_taklys", 0.0), t)
+        t += timedelta(seconds=10)
+        eng.handle(ForeignChange("balkong_taklys", 0.9), t)
+        rs = eng.state.rooms["balkong"]
+        assert rs.occupational is True, dusk  # the declaration is still made
+        assert rs.overridden is True, dusk  # ...but the latch protects the press
+        assert rs.channels["balkong_taklys"].commanded_b == 0.9, dusk
+        # And later recomputes never step it down either.
+        t += timedelta(seconds=300)
+        eng.handle(ReviewTick(), t)
+        assert eng.state.rooms["balkong"].channels["balkong_taklys"].commanded_b == 0.9, dusk
+
+
+def test_press_during_sleep_or_away_mints_no_declaration() -> None:
+    """F2: the hard-off wins a moment later and would strand occupational ON
+    (every press under a hard-off is an ON edge) — lighting the interior
+    around a phantom occupant at the next dusk. No declaration is minted."""
+    for mode_event in (SleepChanged(True), HomeChanged(False)):
+        eng, t = _dusk_engine()
+        t += timedelta(seconds=10)
+        eng.handle(mode_event, t)
+        if isinstance(mode_event, SleepChanged):
+            assert _commanded(eng) == 0.0  # sleep hard-off
+        else:
+            assert abs(_commanded(eng) - 0.2) < 0.05  # away keeps the 6.4 backdrop
+        for _ in range(3):  # presses under the mode: edges of either direction
+            t += timedelta(seconds=10)
+            eng.handle(ForeignChange("balkong_taklys", 0.9), t)
+            t += timedelta(seconds=10)
+            eng.handle(ForeignChange("balkong_taklys", 0.0), t)
+        assert eng.state.rooms["balkong"].occupational is False, mode_event
+
+
+def test_respected_latch_survives_off_worthy_on_a_presence_capable_room() -> None:
+    """F4: adding an occupancy fallback to the balcony (presence_capable=True)
+    must not re-arm the daylight release-and-counter via should_release."""
+    cfg = _config()
+    balkong = cfg.rooms[0]
+    assert balkong.room_id == "balkong"
+    from dataclasses import replace
+
+    cfg = EngineConfig(rooms=(replace(balkong, presence_capable=True), cfg.rooms[1]))
+    eng = Engine(cfg, InitialSnapshot(sun_elevation=DAY))
+    t = START
+    eng.handle(SunElevationChanged(DAY), t)
+    t += timedelta(seconds=40)
+    t += timedelta(seconds=TUN.lux_stale + 60)
+    eng.handle(ReviewTick(), t)
+    t += timedelta(seconds=10)
+    eng.handle(ForeignChange("balkong_taklys", 0.7), t)
+    t += timedelta(seconds=300)
+    eng.handle(ReviewTick(), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.overridden is True
+    assert rs.channels["balkong_taklys"].commanded_b == 0.7
+
+
+def test_respected_latch_still_times_out() -> None:
+    """F4: the respected latch is not immortal — override_timeout releases it
+    and the daylight-OFF then darkens the room."""
+    eng, t = _booted()
+    t += timedelta(seconds=TUN.lux_stale + 60)
+    eng.handle(ReviewTick(), t)
+    t += timedelta(seconds=10)
+    eng.handle(ForeignChange("balkong_taklys", 0.7), t)
+    t += timedelta(seconds=TUN.override_timeout + 60)
+    eng.handle(ReviewTick(), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.overridden is False
+    assert _commanded(eng) == 0.0
+
+
+def test_occupational_edge_is_inert_inside_startup_grace() -> None:
+    """F5: a restore re-submit racing a foreign change at boot must not clear
+    the latch — the edge arbitration is gated on the startup grace."""
+    eng = Engine(_config(), InitialSnapshot(sun_elevation=-10.0))  # E = 1: dusk
+    t = START
+    eng.handle(SunElevationChanged(-10.0), t)
+    t += timedelta(seconds=5)  # inside startup_grace (30 s)
+    eng.handle(ForeignChange("balkong_taklys", 0.9), t)
+    assert eng.state.rooms["balkong"].overridden is True
+    t += timedelta(seconds=5)
+    eng.handle(OccupationalChanged("balkong", True), t)  # restored ON re-submit
+    rs = eng.state.rooms["balkong"]
+    assert rs.occupational is True
+    assert rs.overridden is True  # NOT released inside the grace
+
+
+def test_none_level_is_no_declaration() -> None:
+    """F8: a wall event during a Plejd blip reports level None — that is an
+    availability artefact, not an off-press; occupational must not clear."""
+    eng, t = _dusk_engine(occupational=True)
+    t += timedelta(seconds=10)
+    eng.handle(ForeignChange("balkong_taklys", None), t)
+    assert eng.state.rooms["balkong"].occupational is True
