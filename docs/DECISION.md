@@ -451,10 +451,35 @@ respect_override the moment anyone gives the balcony an occupancy fallback —
 a respected latch now releases only on timeout; (F5) that the restore-resubmit
 safety was queue ordering, not the documented guard — the arbitration is now
 inert inside the startup grace; (F8) that a None level (wall event during a
-Plejd blip) read as an off-press. Accepted residual (F3): a mesh write lost
-and corrected to zero by the 3-min poll is indistinguishable from a genuine
-off-press and cancels the session — backdrop returns, press again; the
-recovery and echo paths are guarded upstream. Re-submitting an unchanged
+Plejd blip) read as an off-press. F3 (stale/lost zero cancelling a
+session) was first accepted as a residual — then materialized on the FIRST
+live field test (2026-08-07 21:02:48 UTC): a context-free device report of
+the superseded off-state arrived 14 s after the conductor's sitting-tier
+write and cancelled the session the two-press arrival had just started. The
+two-press sequence is precisely what leaves a stale zero in flight, so the
+flagship interaction was unreliable, not an edge case. beta.15 adds the
+stale-zero guard. Round 2 of review rejected the first cut (suppress but
+adopt): adopting the suspect zero consumed the room's only OFF edge, so the
+documented poll-zero recovery was unreachable — the session could never be
+cancelled, tier control froze under the latch, and a real press inside the
+window stranded 4 h of phantom adjacency ending in a nocturnal relight. The
+shipped design treats a suspect zero as carrying NO information: latched but
+NOT adopted (belief and OFF edge survive, suspect_zero_at stamped), resolved
+by the next report — corroborating lit (matches the pre-adopt belief within
+echo tolerance) ⇒ latch undone, tier control resumes; non-matching lit = a
+user dial ⇒ suspicion consumed, latch keeps their level (round 3 found the
+uncorroborated release rewrote a 95 % dial to the 49 % tier — beta.8 again;
+the first corroboration attempt then compared post-adopt and matched
+everything); zero ⇒ falling declaration fires (session ends, backdrop
+returns; covers both the genuinely lost write and a real press held in
+suspense, at ≤ poll-interval latency). Round 3 also pinned the stamp
+lifecycle: cleared at session boundaries (OccupationalChanged), under
+hard-offs, and by a 2-poll-interval TTL, so a leaked suspicion can never
+discard a later session's first dial; and suspect zeros never re-stamp
+override_since.
+outdoor_stale_zero_window is dataclass-validated < 175 s so the poll's
+correction can never be swallowed. Deliberately asymmetric — ON edges are not
+windowed, so the arrival sequence is never suppressed. Re-submitting an unchanged
 state never releases.
 
 Building the daylight case surfaced a pre-existing behaviour: the outdoor

@@ -497,9 +497,27 @@ hard-offs a stray dialed level. Re-submitting an unchanged state is not an
 edge, and the arbitration is inert inside the startup grace (the switch's
 restore re-submit must never clear a latch at boot).
 
-Known residual: a mesh write lost and corrected to zero by the ~3-min
-true-state poll is indistinguishable from a genuine off-press and cancels a
-sitting session (the backdrop returns; press again). Pressing OFF while
+A foreign ZERO within `outdoor_stale_zero_window` of the engine's own last
+write to the room is a SUSPECT stale report, not a declaration (the Plejd
+gateway re-delivers superseded off-states ~15-30 s after our write replaces
+them — observed live, context-free). A suspect zero carries NO information:
+the §9.1 latch stands (the engine emits nothing while latched), but it is
+not adopted — the engine's lit belief and the room's OFF edge survive — and
+the NEXT foreign report resolves the suspense. A LIT report proves the zero
+stale ONLY when it corroborates the preserved pre-adopt belief (within the
+echo tolerance — i.e. the poll re-reading the level the engine commanded):
+then the latch the zero caused is undone (same down-step gate as the rising
+edge) and tier control resumes. A materially different lit level is a USER
+action (hold-to-dim up from the suppressed off): the suspicion is consumed
+but the §9.1 latch keeps their level. Another ZERO — the poll confirming a
+lost write, or a real press that had been held in suspense — fires the
+falling declaration normally: session ends, backdrop returns. The suspicion
+cannot outlive its context: it is cleared on any occupational edge (session
+boundary), under a sleep/away hard-off, and expires unresolved after two
+poll intervals; a suspect zero also never re-stamps `override_since` (it is
+not new user intent). The window is validated below 175 s (dataclass
+invariant) so the poll's correction can never itself be swallowed.
+Pressing OFF while
 sitting returns the backdrop within a second by design, and because wall
 buttons are hardware toggles, arriving at a lit backdrop takes two presses to
 reach the sitting tier.
@@ -696,6 +714,7 @@ override latches (not restored — cleared on restart).
 | outdoor_on_threshold | 0.7 | 6.5 |
 | outdoor_on_lux / outdoor_full_lux | 15 lx / 2 lx | 6.5a |
 | outdoor_presence_factor | 0.5 | 1.10, 6.5a |
+| outdoor_stale_zero_window | 45 s | 6.5b |
 | gain_range_stops / gain_reset | 1.0 / on | 7.1, 7.3 |
 | slew_step / slew_interval / slew_step_empty | 0.1 / 1.0 s / 0.25 | 8.2 |
 | min_delta / min_write_interval / max_inflight | 0.03 / 1.0 s / 3 | 8.3 |

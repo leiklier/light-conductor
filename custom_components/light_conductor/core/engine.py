@@ -70,6 +70,15 @@ from .photometry import RoomPhotometry
 from .plan import CalibrationResult, Command, Plan
 from .tunables import Tunables
 
+#: §6.5b suspicion bookkeeping. A pending suspect zero is resolved by the next
+#: foreign report; the ~3-min true-state poll guarantees one, so a stamp older
+#: than two poll intervals is a leak from a dead context, not live suspicion.
+SUSPECT_ZERO_TTL = 360.0
+#: Corroboration tolerance for the lit resolution — matches the adapter's
+#: ECHO_LEVEL_TOL vocabulary: within this of the preserved belief the report
+#: is the poll re-reading our own level; beyond it, it is a user action.
+SUSPECT_LEVEL_TOL = 0.03
+
 
 class Engine:
     """Deterministic core of Light Conductor."""
@@ -187,6 +196,11 @@ class Engine:
                     room = self.config.room(event.room_id)
                     if room is not None and room.shape is RoomShape.OUTDOOR:
                         self._occupational_edge(room, rs, event.on, now)
+                        if event.on != rs.occupational:
+                            # A session boundary resolves any pending
+                            # suspicion — a stamp must never leak into a later
+                            # session and discard its first dial (round 3 F3).
+                            rs.suspect_zero_at = None
                     rs.occupational = event.on
             case MasterGainChanged():
                 s.master_pct = max(0.0, min(100.0, event.pct))
@@ -236,10 +250,82 @@ class Engine:
         # belief (§6.5b needs "was the room lit" as the engine knew it).
         was_lit = any(cs.on for cs in rs.channels.values())
         others_on = any(cs.on for cid, cs in rs.channels.items() if cid != event.channel_id)
+        prior = rs.channels[event.channel_id].commanded_b  # pre-adopt belief (§6.5b)
+        # Stale-zero guard (§6.5b): a suspect zero carries NO information — it
+        # is NOT adopted, so the engine's lit belief survives and the room's
+        # OFF edge is preserved for the report that resolves the suspicion
+        # (review round 2 F1: adopting it consumed the only OFF edge, so the
+        # documented poll-zero recovery could never fire). It latches (once)
+        # but never RE-stamps override_since — a suspect zero is by definition
+        # not new user intent, so it must not restart the 4 h clock (round 3
+        # F4).
+        if room.shape is RoomShape.OUTDOOR and self._suspect_zero(
+            rs, event, now, was_lit, others_on
+        ):
+            if not rs.overridden:
+                override.latch(rs, now)
+            rs.suspect_zero_at = now
+            return
+        # A None level while a suspicion is pending is "unknown", not "off" —
+        # adopting it would zero the preserved belief and resurrect the
+        # one-shot OFF edge the guard exists to prevent (round 4 F1: the
+        # poll's genuine zero would then see was_lit False and strand the
+        # session). An EXPIRED stamp is a dead suspicion: clear it and fall
+        # through to normal handling, so a None-only sequence cannot keep the
+        # stamp alive forever.
+        if (
+            room.shape is RoomShape.OUTDOOR
+            and event.level is None
+            and rs.suspect_zero_at is not None
+        ):
+            if (now - rs.suspect_zero_at).total_seconds() > SUSPECT_ZERO_TTL:
+                rs.suspect_zero_at = None
+            else:
+                return
         override.latch(rs, now)  # rules 9.1, 9.4 (wall events always latch)
         override.adopt(rs.channels[event.channel_id], event.level, event.ct)
         if room.shape is RoomShape.OUTDOOR:
-            self._foreign_outdoor_edge(room, rs, event, now, was_lit, others_on)
+            self._foreign_outdoor_edge(room, rs, event, now, was_lit, others_on, prior)
+
+    def _suspect_zero(
+        self,
+        rs: RoomState,
+        event: ForeignChange,
+        now: datetime,
+        was_lit: bool,
+        others_on: bool,
+    ) -> bool:
+        """Whether a foreign zero is a suspect stale gateway report (§6.5b).
+
+        The Plejd gateway re-delivers a superseded off-state ~15-30 s after our
+        own write replaces it — context-free, indistinguishable from a real
+        off-press (the live 21:02:48 incident). A zero on a would-be falling
+        declaration (room lit, session active) inside
+        ``outdoor_stale_zero_window`` of the room's own last write is held in
+        suspense: the §9.1 latch stands (the engine emits nothing while
+        latched) but neither the belief nor the session changes. The next
+        foreign report resolves it in :meth:`_foreign_outdoor_edge`:
+
+        * a LIT report (the ~3-min poll re-reading the true level) proves the
+          zero stale — the latch it caused is undone and tier control resumes;
+        * another ZERO (the poll confirming a lost write or a real press) is
+          outside the window — the engine emitted nothing in between — and
+          fires the falling declaration normally: session ends, backdrop
+          returns.
+        """
+        if not (self.state.sleep or modes.is_away(self.state)) and (
+            event.level is not None
+            and event.level <= 0.0
+            and was_lit
+            and not others_on
+            and rs.occupational
+        ):
+            return (
+                rs.last_own_write_at is not None
+                and (now - rs.last_own_write_at).total_seconds()
+                < self.tun.outdoor_stale_zero_window
+            )
+        return False
 
     def _foreign_outdoor_edge(
         self,
@@ -249,6 +335,7 @@ class Engine:
         now: datetime,
         was_lit: bool,
         others_on: bool,
+        prior: float = 0.0,
     ) -> None:
         """Manual on/off on an outdoor room declares presence (rule 6.5b).
 
@@ -281,21 +368,58 @@ class Engine:
         (channel momentarily unavailable — a wall event during a Plejd blip)
         is no declaration either.
 
-        Known residual (D20): a lost mesh write corrected to zero by the 3-min
-        true-state poll is indistinguishable from a genuine off-press here and
-        will cancel a sitting session (backdrop returns; press again). The
-        recovery and echo paths are guarded upstream; only the lost-write
-        correction leaks through.
+        A zero inside ``outdoor_stale_zero_window`` of the room's own last
+        write never reaches this method — :meth:`_suspect_zero` holds it in
+        suspense unadopted, and the NEXT report resolves it here (lit ⇒ the
+        latch is undone, zero ⇒ the falling declaration below fires).
         """
         if self.state.sleep or modes.is_away(self.state):
+            rs.suspect_zero_at = None  # suspicion cannot outlive its context (F3)
             return
         if event.level is None:
             return
+        # A pending suspicion expires after ~2 poll intervals unresolved (the
+        # poll is what resolves it; anything older is a leaked stamp from a
+        # dead context and must not gate a fresh report — round 3 F3).
+        if (
+            rs.suspect_zero_at is not None
+            and (now - rs.suspect_zero_at).total_seconds() > SUSPECT_ZERO_TTL
+        ):
+            rs.suspect_zero_at = None
         level_on = event.level > 0.0
+        if level_on and rs.suspect_zero_at is not None and rs.occupational:
+            # Suspicion resolved LIT (§6.5b). Release ONLY on corroboration —
+            # the report must match the preserved belief (the level the engine
+            # commanded), the same vocabulary as the adapter's poll-reconfirm
+            # guard. A matching report is the poll re-reading the true level:
+            # the suspect zero was a stale gateway re-delivery, so the latch
+            # it caused is undone and tier control resumes (round 2 F2), gated
+            # like the rising edge so shallow dusk never steps the user down.
+            # A materially DIFFERENT level is a user action (hold-to-dim up
+            # from the suppressed off): the adopt above stands and the §9.1
+            # latch keeps THEIR level — releasing here rewrote a 95 % dial to
+            # the 49 % tier in the same cycle (round 3 F2, the beta.8
+            # pattern).
+            rs.suspect_zero_at = None
+            # Compare against the PRE-adopt belief — adopt has already
+            # overwritten commanded_b with this very report, so comparing
+            # post-adopt would corroborate everything (round 3 fix round).
+            corroborated = abs(event.level - prior) <= SUSPECT_LEVEL_TOL
+            if corroborated:
+                e = circadian.factor(self.state.sun_elevation, now, self.tun)
+                if self._outdoor_dusk(room, now, e) >= self.tun.outdoor_presence_factor:
+                    override.release(rs)
+                return
+            # fall through: a genuine user action also runs the edge logic
         if not was_lit and level_on:
             self._occupational_edge(room, rs, True, now)
             rs.occupational = True
         elif was_lit and not level_on and not others_on and rs.occupational:
+            # A second zero: EITHER the poll confirming a lost write / a real
+            # press held in suspense (the engine emits nothing while latched,
+            # so the window has not re-opened), OR a plain off-press with no
+            # suspicion pending. Both end the session (§6.5b).
+            rs.suspect_zero_at = None
             self._occupational_edge(room, rs, False, now)
             rs.occupational = False
 
@@ -654,6 +778,7 @@ class Engine:
             emitted = len(plan.commands) > before
             if emitted:  # write-blank window opens (§3.2a)
                 estimator.note_own_command(rs.est, now)
+                rs.last_own_write_at = now  # §6.5b stale-zero guard
             if arm and emitted:
                 base_delta = estimator.a_hat(rs, photo, 1.0) - a_before_unit
                 estimator.record_step(rs.est, rs.est.l_filt, base_delta, now, tun, shadow=shadow)

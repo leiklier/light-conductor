@@ -81,6 +81,7 @@ DOC_ROWS: dict[str, tuple[tuple[str, ...], tuple[object, ...]]] = {
     "outdoor_on_threshold": (("outdoor_on_threshold",), (0.7,)),
     "outdoor_on_lux / outdoor_full_lux": (("outdoor_on_lux", "outdoor_full_lux"), (15.0, 2.0)),
     "outdoor_presence_factor": (("outdoor_presence_factor",), (0.5,)),
+    "outdoor_stale_zero_window": (("outdoor_stale_zero_window",), (45.0,)),
     "gain_range_stops / gain_reset": (("gain_range_stops", "gain_reset"), (1.0, True)),
     "slew_step / slew_interval / slew_step_empty": (
         ("slew_step", "slew_interval", "slew_step_empty"),

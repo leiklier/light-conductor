@@ -502,3 +502,162 @@ def test_none_level_is_no_declaration() -> None:
     t += timedelta(seconds=10)
     eng.handle(ForeignChange("balkong_taklys", None), t)
     assert eng.state.rooms["balkong"].occupational is True
+
+
+# --- §6.5b stale-zero guard (beta.15, the 21:02:48 live incident) ----------
+
+
+def _session_with_suspect_zero() -> tuple[Engine, datetime]:
+    """Arrival sequence, then the incident's stale zero 14 s after the tier
+    write. Returns the engine in the held-in-suspense state."""
+    eng, t = _dusk_engine()
+    t += timedelta(seconds=10)
+    eng.handle(ForeignChange("balkong_taklys", 0.0), t)  # press 1 (suppress)
+    t += timedelta(seconds=10)
+    eng.handle(ForeignChange("balkong_taklys", 0.9), t)  # press 2: tier write
+    assert eng.state.rooms["balkong"].occupational is True
+    t += timedelta(seconds=14)  # the live incident's exact delay
+    eng.handle(ForeignChange("balkong_taklys", 0.0), t)
+    return eng, t
+
+
+def test_suspect_zero_is_held_unadopted() -> None:
+    """F1 (round 2): the suspect zero carries no information — latch stands,
+    but the lit belief survives so the room's OFF edge is preserved for the
+    report that resolves the suspicion."""
+    eng, _t = _session_with_suspect_zero()
+    rs = eng.state.rooms["balkong"]
+    assert rs.occupational is True  # session not cancelled
+    assert rs.overridden is True  # latch stands (engine emits nothing)
+    assert rs.suspect_zero_at is not None
+    assert rs.channels["balkong_taklys"].on is True  # belief NOT adopted
+    assert abs(rs.channels["balkong_taklys"].commanded_b - 0.5) < 0.05
+
+
+def test_stale_zero_resolved_lit_restores_tier_control() -> None:
+    """F2 (round 2): the poll re-reads the true lit level — proof the zero was
+    stale. The latch it caused is undone, so the sitting tier keeps tracking
+    the dusk ramp instead of freezing until override_timeout."""
+    eng, t = _session_with_suspect_zero()
+    t += timedelta(seconds=160)  # ~3-min poll re-report of the true level
+    eng.handle(ForeignChange("balkong_taklys", 0.49), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.occupational is True  # session continues...
+    assert rs.overridden is False  # ...with tier control ALIVE (F2)
+    assert rs.suspect_zero_at is None
+    assert abs(_commanded(eng) - 0.5) < 0.05  # tier re-commanded
+
+
+def test_suspect_zero_confirmed_by_poll_zero_ends_the_session() -> None:
+    """F1 (round 2): a second zero — the poll confirming a lost write OR a
+    real press held in suspense — fires the falling declaration: session
+    ends, backdrop returns. This is the documented recovery that round 1's
+    adopt-then-suppress made unreachable."""
+    eng, t = _session_with_suspect_zero()
+    t += timedelta(seconds=180)  # the poll's genuine zero, outside the window
+    eng.handle(ForeignChange("balkong_taklys", 0.0), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.occupational is False  # session ended
+    assert rs.overridden is False
+    assert rs.suspect_zero_at is None
+    assert abs(_commanded(eng) - 0.2) < 0.05  # backdrop restored
+
+
+def test_real_off_press_outside_the_window_still_ends_the_session() -> None:
+    """Past outdoor_stale_zero_window a zero is a genuine off-press: the
+    session ends and the backdrop returns (beta.14 semantics unchanged)."""
+    eng, t = _dusk_engine()
+    t += timedelta(seconds=10)
+    eng.handle(ForeignChange("balkong_taklys", 0.0), t)
+    t += timedelta(seconds=10)
+    eng.handle(ForeignChange("balkong_taklys", 0.9), t)
+    assert eng.state.rooms["balkong"].occupational is True
+    t += timedelta(seconds=TUN.outdoor_stale_zero_window + 30)
+    eng.handle(ForeignChange("balkong_taklys", 0.0), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.occupational is False
+    assert rs.suspect_zero_at is None
+    assert abs(_commanded(eng) - 0.2) < 0.05  # backdrop restored
+
+
+# --- review round 3 (corroboration + stamp lifecycle) ----------------------
+
+
+def test_dial_during_suspense_is_never_countered() -> None:
+    """Round 3 F2: a lit report materially different from the preserved belief
+    is a USER action (hold-to-dim up from the suppressed off), not the poll —
+    the latch keeps their level instead of releasing to the tier."""
+    eng, t = _session_with_suspect_zero()
+    t += timedelta(seconds=30)
+    eng.handle(ForeignChange("balkong_taklys", 0.95), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.occupational is True  # session continues
+    assert rs.overridden is True  # ...but the dial is protected
+    assert rs.channels["balkong_taklys"].commanded_b == 0.95
+    assert rs.suspect_zero_at is None  # suspicion consumed either way
+
+
+def test_suspect_stamp_does_not_leak_across_session_end() -> None:
+    """Round 3 F3: ending the session via the switch resolves the suspicion —
+    a leaked stamp must not discard the first dial of a LATER session."""
+    eng, t = _session_with_suspect_zero()
+    t += timedelta(seconds=20)
+    eng.handle(OccupationalChanged("balkong", False), t)  # switch off
+    assert eng.state.rooms["balkong"].suspect_zero_at is None
+    t += timedelta(seconds=1800)
+    eng.handle(OccupationalChanged("balkong", True), t)  # new session
+    t += timedelta(seconds=120)  # outside the write window of the session start
+    eng.handle(ForeignChange("balkong_taklys", 0.95), t)  # dial
+    rs = eng.state.rooms["balkong"]
+    assert rs.overridden is True
+    assert rs.channels["balkong_taklys"].commanded_b == 0.95  # NOT countered
+
+
+def test_expired_stamp_gates_nothing() -> None:
+    """Round 3 F3: a stamp older than two poll intervals is a leak, not live
+    suspicion — even a belief-matching report must not release the latch."""
+    eng, t = _session_with_suspect_zero()
+    believed = eng.state.rooms["balkong"].channels["balkong_taklys"].commanded_b
+    t += timedelta(seconds=400)  # > SUSPECT_ZERO_TTL, unresolved
+    eng.handle(ForeignChange("balkong_taklys", believed), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.suspect_zero_at is None
+    assert rs.overridden is True  # no release from a dead suspicion
+
+
+def test_suspect_zeros_do_not_restart_the_override_clock() -> None:
+    """Round 3 F4: a suspect zero is not new user intent — chattering gateway
+    zeros must not advance override_since."""
+    eng, t = _session_with_suspect_zero()
+    since = eng.state.rooms["balkong"].override_since
+    assert since is not None
+    for _ in range(3):
+        t += timedelta(seconds=10)
+        eng.handle(ForeignChange("balkong_taklys", 0.0), t)
+    assert eng.state.rooms["balkong"].override_since == since
+
+
+def test_none_level_during_suspense_preserves_the_belief() -> None:
+    """Round 4 F1: a None report (wall press during a Plejd blip) is unknown,
+    not off — adopting it would destroy the preserved OFF edge and strand the
+    session past the poll's genuine zero."""
+    eng, t = _session_with_suspect_zero()
+    t += timedelta(seconds=20)
+    eng.handle(ForeignChange("balkong_taklys", None), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.channels["balkong_taklys"].on is True  # belief intact
+    assert rs.suspect_zero_at is not None  # suspicion survives the blip
+    t += timedelta(seconds=150)  # the poll's genuine zero still resolves it
+    eng.handle(ForeignChange("balkong_taklys", 0.0), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.occupational is False  # session ended
+    assert abs(_commanded(eng) - 0.2) < 0.05  # backdrop restored
+
+
+def test_none_only_sequence_cannot_keep_the_stamp_alive() -> None:
+    """Round 4 F1 (second half): an expired suspicion is dead even on the
+    None path — the stamp clears and normal handling resumes."""
+    eng, t = _session_with_suspect_zero()
+    t += timedelta(seconds=400)  # > SUSPECT_ZERO_TTL
+    eng.handle(ForeignChange("balkong_taklys", None), t)
+    assert eng.state.rooms["balkong"].suspect_zero_at is None
