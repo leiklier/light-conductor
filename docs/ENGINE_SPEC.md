@@ -500,13 +500,17 @@ restore re-submit must never clear a latch at boot).
 A foreign ZERO within `outdoor_stale_zero_window` of the engine's own last
 write to the room is a SUSPECT stale report, not a declaration (the Plejd
 gateway re-delivers superseded off-states ~15-30 s after our write replaces
-them — observed live, context-free). The §9.1 latch stands but the session is
-not cancelled: a stale zero is corrected by the ~3-min poll (the true lit
-level adopts into the latch, session continues); a real press inside the
-window leaves the balcony dark exactly as pressed, with the session ending
-via the switch, sleep/away, or the timeout. The window must stay well below
-the poll interval so a genuinely lost write is still corrected as a real
-zero. Pressing OFF while
+them — observed live, context-free). A suspect zero carries NO information:
+the §9.1 latch stands (the engine emits nothing while latched), but it is
+not adopted — the engine's lit belief and the room's OFF edge survive — and
+the NEXT foreign report resolves the suspense. A LIT report (the ~3-min poll
+re-reading the true level) proves the zero stale: the latch it caused is
+undone (same down-step gate as the rising edge) and tier control resumes.
+Another ZERO — the poll confirming a lost write, or a real press that had
+been held in suspense — fires the falling declaration normally: session
+ends, backdrop returns. The window is validated below 175 s (dataclass
+invariant) so the poll's correction can never itself be swallowed.
+Pressing OFF while
 sitting returns the backdrop within a second by design, and because wall
 buttons are hardware toggles, arriving at a lit backdrop takes two presses to
 reach the sitting tier.

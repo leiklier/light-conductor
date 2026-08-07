@@ -237,9 +237,59 @@ class Engine:
         was_lit = any(cs.on for cs in rs.channels.values())
         others_on = any(cs.on for cid, cs in rs.channels.items() if cid != event.channel_id)
         override.latch(rs, now)  # rules 9.1, 9.4 (wall events always latch)
+        # Stale-zero guard (§6.5b): a suspect zero carries NO information — it
+        # is NOT adopted, so the engine's lit belief survives and the room's
+        # OFF edge is preserved for the report that resolves the suspicion
+        # (review round 2 F1: adopting it consumed the only OFF edge, so the
+        # documented poll-zero recovery could never fire).
+        if room.shape is RoomShape.OUTDOOR and self._suspect_zero(
+            rs, event, now, was_lit, others_on
+        ):
+            rs.suspect_zero_at = now
+            return
         override.adopt(rs.channels[event.channel_id], event.level, event.ct)
         if room.shape is RoomShape.OUTDOOR:
             self._foreign_outdoor_edge(room, rs, event, now, was_lit, others_on)
+
+    def _suspect_zero(
+        self,
+        rs: RoomState,
+        event: ForeignChange,
+        now: datetime,
+        was_lit: bool,
+        others_on: bool,
+    ) -> bool:
+        """Whether a foreign zero is a suspect stale gateway report (§6.5b).
+
+        The Plejd gateway re-delivers a superseded off-state ~15-30 s after our
+        own write replaces it — context-free, indistinguishable from a real
+        off-press (the live 21:02:48 incident). A zero on a would-be falling
+        declaration (room lit, session active) inside
+        ``outdoor_stale_zero_window`` of the room's own last write is held in
+        suspense: the §9.1 latch stands (the engine emits nothing while
+        latched) but neither the belief nor the session changes. The next
+        foreign report resolves it in :meth:`_foreign_outdoor_edge`:
+
+        * a LIT report (the ~3-min poll re-reading the true level) proves the
+          zero stale — the latch it caused is undone and tier control resumes;
+        * another ZERO (the poll confirming a lost write or a real press) is
+          outside the window — the engine emitted nothing in between — and
+          fires the falling declaration normally: session ends, backdrop
+          returns.
+        """
+        if not (self.state.sleep or modes.is_away(self.state)) and (
+            event.level is not None
+            and event.level <= 0.0
+            and was_lit
+            and not others_on
+            and rs.occupational
+        ):
+            return (
+                rs.last_own_write_at is not None
+                and (now - rs.last_own_write_at).total_seconds()
+                < self.tun.outdoor_stale_zero_window
+            )
+        return False
 
     def _foreign_outdoor_edge(
         self,
@@ -281,40 +331,37 @@ class Engine:
         (channel momentarily unavailable — a wall event during a Plejd blip)
         is no declaration either.
 
-        Known residual (D20): a lost mesh write corrected to zero by the 3-min
-        true-state poll is indistinguishable from a genuine off-press here and
-        will cancel a sitting session (backdrop returns; press again). The
-        recovery and echo paths are guarded upstream; only the lost-write
-        correction leaks through.
+        A zero inside ``outdoor_stale_zero_window`` of the room's own last
+        write never reaches this method — :meth:`_suspect_zero` holds it in
+        suspense unadopted, and the NEXT report resolves it here (lit ⇒ the
+        latch is undone, zero ⇒ the falling declaration below fires).
         """
         if self.state.sleep or modes.is_away(self.state):
             return
         if event.level is None:
             return
         level_on = event.level > 0.0
+        if level_on and rs.suspect_zero_at is not None and rs.occupational:
+            # Suspicion resolved LIT (§6.5b): the poll re-read the true level,
+            # so the suspect zero was a stale gateway re-delivery. Undo the
+            # latch it caused so tier control resumes (review round 2 F2:
+            # without this the session survived in name only — the level froze
+            # until override_timeout). Same down-step gate as the rising edge:
+            # in shallow dusk the latch keeps the adopted level instead.
+            rs.suspect_zero_at = None
+            e = circadian.factor(self.state.sun_elevation, now, self.tun)
+            if self._outdoor_dusk(room, now, e) >= self.tun.outdoor_presence_factor:
+                override.release(rs)
+            return
         if not was_lit and level_on:
             self._occupational_edge(room, rs, True, now)
             rs.occupational = True
         elif was_lit and not level_on and not others_on and rs.occupational:
-            # Stale-zero guard (§6.5b, the live 21:02:48 incident): the Plejd
-            # gateway can re-deliver a superseded off-state ~15-30 s after our
-            # own write replaces it — context-free, indistinguishable from a
-            # real off-press. A zero this close to our own last write to the
-            # room is therefore SUSPECT: the §9.1 latch stands (the light
-            # stays as observed either way) but the session is not cancelled.
-            # If it was stale, the ~3-min poll re-reports the true lit level,
-            # which adopts into the latch and the session continues; if it was
-            # a real press, the balcony is dark exactly as pressed and the
-            # session ends via the switch, sleep/away, or the timeout. Real
-            # presses OUTSIDE the window (sessions last minutes; writes only
-            # happen while the dusk ramp is still moving) end the session
-            # immediately as designed.
-            if (
-                rs.last_own_write_at is not None
-                and (now - rs.last_own_write_at).total_seconds()
-                < self.tun.outdoor_stale_zero_window
-            ):
-                return
+            # A second zero: EITHER the poll confirming a lost write / a real
+            # press held in suspense (the engine emits nothing while latched,
+            # so the window has not re-opened), OR a plain off-press with no
+            # suspicion pending. Both end the session (§6.5b).
+            rs.suspect_zero_at = None
             self._occupational_edge(room, rs, False, now)
             rs.occupational = False
 

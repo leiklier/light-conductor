@@ -458,12 +458,19 @@ the superseded off-state arrived 14 s after the conductor's sitting-tier
 write and cancelled the session the two-press arrival had just started. The
 two-press sequence is precisely what leaves a stale zero in flight, so the
 flagship interaction was unreliable, not an edge case. beta.15 adds the
-stale-zero guard: a foreign zero within outdoor_stale_zero_window (45 s) of
-the room's own last write latches without cancelling; the ~3-min poll then
-reconciles (stale ⇒ true lit level adopts, session continues; genuinely lost
-write ⇒ the poll's real zero is outside the window and ends the session with
-the backdrop restore). Deliberately asymmetric — ON edges are not windowed,
-so the arrival sequence is never suppressed. Re-submitting an unchanged
+stale-zero guard. Round 2 of review rejected the first cut (suppress but
+adopt): adopting the suspect zero consumed the room's only OFF edge, so the
+documented poll-zero recovery was unreachable — the session could never be
+cancelled, tier control froze under the latch, and a real press inside the
+window stranded 4 h of phantom adjacency ending in a nocturnal relight. The
+shipped design treats a suspect zero as carrying NO information: latched but
+NOT adopted (belief and OFF edge survive, suspect_zero_at stamped), resolved
+by the next report — lit ⇒ latch undone, tier control resumes; zero ⇒ falling
+declaration fires (session ends, backdrop returns; covers both the genuinely
+lost write and a real press held in suspense, at ≤ poll-interval latency).
+outdoor_stale_zero_window is dataclass-validated < 175 s so the poll's
+correction can never be swallowed. Deliberately asymmetric — ON edges are not
+windowed, so the arrival sequence is never suppressed. Re-submitting an unchanged
 state never releases.
 
 Building the daylight case surfaced a pre-existing behaviour: the outdoor

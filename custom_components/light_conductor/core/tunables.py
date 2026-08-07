@@ -174,8 +174,11 @@ class Tunables:
             raise ValueError("outdoor_full_lux must be >= 0 and below outdoor_on_lux")
         if not 0.0 < self.outdoor_presence_factor <= 1.0:
             raise ValueError("outdoor_presence_factor must be in (0, 1]")
-        if self.outdoor_stale_zero_window < 0.0:
-            raise ValueError("outdoor_stale_zero_window must be >= 0")
+        if not 0.0 <= self.outdoor_stale_zero_window < 175.0:
+            # The ~180 s true-state poll is the legitimate corrector for a
+            # genuinely lost write; a window reaching it would swallow that
+            # correction and strand sessions (§6.5b).
+            raise ValueError("outdoor_stale_zero_window must be in [0, 175)")
 
 
 def gain_multiplier(pct: float, stops: float) -> float:

@@ -507,28 +507,60 @@ def test_none_level_is_no_declaration() -> None:
 # --- §6.5b stale-zero guard (beta.15, the 21:02:48 live incident) ----------
 
 
-def test_stale_zero_after_own_write_does_not_cancel_the_session() -> None:
-    """A context-free zero 14 s after the conductor's own sitting-tier write is
-    a suspect stale report: latch stands, session survives, and the poll's
-    true-state re-report adopts into the latch."""
+def _session_with_suspect_zero() -> tuple[Engine, datetime]:
+    """Arrival sequence, then the incident's stale zero 14 s after the tier
+    write. Returns the engine in the held-in-suspense state."""
     eng, t = _dusk_engine()
     t += timedelta(seconds=10)
-    eng.handle(ForeignChange("balkong_taklys", 0.0), t)  # suppress backdrop
+    eng.handle(ForeignChange("balkong_taklys", 0.0), t)  # press 1 (suppress)
     t += timedelta(seconds=10)
-    eng.handle(ForeignChange("balkong_taklys", 0.9), t)  # declare: tier write
-    rs = eng.state.rooms["balkong"]
-    assert rs.occupational is True and rs.last_own_write_at is not None
+    eng.handle(ForeignChange("balkong_taklys", 0.9), t)  # press 2: tier write
+    assert eng.state.rooms["balkong"].occupational is True
     t += timedelta(seconds=14)  # the live incident's exact delay
     eng.handle(ForeignChange("balkong_taklys", 0.0), t)
+    return eng, t
+
+
+def test_suspect_zero_is_held_unadopted() -> None:
+    """F1 (round 2): the suspect zero carries no information — latch stands,
+    but the lit belief survives so the room's OFF edge is preserved for the
+    report that resolves the suspicion."""
+    eng, _t = _session_with_suspect_zero()
     rs = eng.state.rooms["balkong"]
-    assert rs.occupational is True  # session NOT cancelled
-    assert rs.overridden is True  # ...but the zero latched (light stays as observed)
-    # ~3-min poll re-reports the true lit level: adopts into the latch.
-    t += timedelta(seconds=170)
-    eng.handle(ForeignChange("balkong_taklys", 0.3), t)
+    assert rs.occupational is True  # session not cancelled
+    assert rs.overridden is True  # latch stands (engine emits nothing)
+    assert rs.suspect_zero_at is not None
+    assert rs.channels["balkong_taklys"].on is True  # belief NOT adopted
+    assert abs(rs.channels["balkong_taklys"].commanded_b - 0.5) < 0.05
+
+
+def test_stale_zero_resolved_lit_restores_tier_control() -> None:
+    """F2 (round 2): the poll re-reads the true lit level — proof the zero was
+    stale. The latch it caused is undone, so the sitting tier keeps tracking
+    the dusk ramp instead of freezing until override_timeout."""
+    eng, t = _session_with_suspect_zero()
+    t += timedelta(seconds=160)  # ~3-min poll re-report of the true level
+    eng.handle(ForeignChange("balkong_taklys", 0.49), t)
     rs = eng.state.rooms["balkong"]
-    assert rs.occupational is True
-    assert rs.channels["balkong_taklys"].commanded_b == 0.3
+    assert rs.occupational is True  # session continues...
+    assert rs.overridden is False  # ...with tier control ALIVE (F2)
+    assert rs.suspect_zero_at is None
+    assert abs(_commanded(eng) - 0.5) < 0.05  # tier re-commanded
+
+
+def test_suspect_zero_confirmed_by_poll_zero_ends_the_session() -> None:
+    """F1 (round 2): a second zero — the poll confirming a lost write OR a
+    real press held in suspense — fires the falling declaration: session
+    ends, backdrop returns. This is the documented recovery that round 1's
+    adopt-then-suppress made unreachable."""
+    eng, t = _session_with_suspect_zero()
+    t += timedelta(seconds=180)  # the poll's genuine zero, outside the window
+    eng.handle(ForeignChange("balkong_taklys", 0.0), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.occupational is False  # session ended
+    assert rs.overridden is False
+    assert rs.suspect_zero_at is None
+    assert abs(_commanded(eng) - 0.2) < 0.05  # backdrop restored
 
 
 def test_real_off_press_outside_the_window_still_ends_the_session() -> None:
@@ -544,18 +576,5 @@ def test_real_off_press_outside_the_window_still_ends_the_session() -> None:
     eng.handle(ForeignChange("balkong_taklys", 0.0), t)
     rs = eng.state.rooms["balkong"]
     assert rs.occupational is False
+    assert rs.suspect_zero_at is None
     assert abs(_commanded(eng) - 0.2) < 0.05  # backdrop restored
-
-
-def test_on_edges_are_never_windowed() -> None:
-    """The guard is asymmetric: the arrival sequence (off, then on seconds
-    later) must always mint the session — ON edges bypass the window."""
-    eng, t = _dusk_engine()
-    t += timedelta(seconds=10)
-    eng.handle(ForeignChange("balkong_taklys", 0.0), t)  # press 1 (suppress)
-    t += timedelta(seconds=2)  # press 2 arrives 2 s later
-    eng.handle(ForeignChange("balkong_taklys", 0.9), t)
-    rs = eng.state.rooms["balkong"]
-    assert rs.occupational is True
-    assert rs.overridden is False
-    assert abs(_commanded(eng) - 0.5) < 0.05  # sitting tier
