@@ -578,3 +578,60 @@ def test_real_off_press_outside_the_window_still_ends_the_session() -> None:
     assert rs.occupational is False
     assert rs.suspect_zero_at is None
     assert abs(_commanded(eng) - 0.2) < 0.05  # backdrop restored
+
+
+# --- review round 3 (corroboration + stamp lifecycle) ----------------------
+
+
+def test_dial_during_suspense_is_never_countered() -> None:
+    """Round 3 F2: a lit report materially different from the preserved belief
+    is a USER action (hold-to-dim up from the suppressed off), not the poll —
+    the latch keeps their level instead of releasing to the tier."""
+    eng, t = _session_with_suspect_zero()
+    t += timedelta(seconds=30)
+    eng.handle(ForeignChange("balkong_taklys", 0.95), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.occupational is True  # session continues
+    assert rs.overridden is True  # ...but the dial is protected
+    assert rs.channels["balkong_taklys"].commanded_b == 0.95
+    assert rs.suspect_zero_at is None  # suspicion consumed either way
+
+
+def test_suspect_stamp_does_not_leak_across_session_end() -> None:
+    """Round 3 F3: ending the session via the switch resolves the suspicion —
+    a leaked stamp must not discard the first dial of a LATER session."""
+    eng, t = _session_with_suspect_zero()
+    t += timedelta(seconds=20)
+    eng.handle(OccupationalChanged("balkong", False), t)  # switch off
+    assert eng.state.rooms["balkong"].suspect_zero_at is None
+    t += timedelta(seconds=1800)
+    eng.handle(OccupationalChanged("balkong", True), t)  # new session
+    t += timedelta(seconds=120)  # outside the write window of the session start
+    eng.handle(ForeignChange("balkong_taklys", 0.95), t)  # dial
+    rs = eng.state.rooms["balkong"]
+    assert rs.overridden is True
+    assert rs.channels["balkong_taklys"].commanded_b == 0.95  # NOT countered
+
+
+def test_expired_stamp_gates_nothing() -> None:
+    """Round 3 F3: a stamp older than two poll intervals is a leak, not live
+    suspicion — even a belief-matching report must not release the latch."""
+    eng, t = _session_with_suspect_zero()
+    believed = eng.state.rooms["balkong"].channels["balkong_taklys"].commanded_b
+    t += timedelta(seconds=400)  # > SUSPECT_ZERO_TTL, unresolved
+    eng.handle(ForeignChange("balkong_taklys", believed), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.suspect_zero_at is None
+    assert rs.overridden is True  # no release from a dead suspicion
+
+
+def test_suspect_zeros_do_not_restart_the_override_clock() -> None:
+    """Round 3 F4: a suspect zero is not new user intent — chattering gateway
+    zeros must not advance override_since."""
+    eng, t = _session_with_suspect_zero()
+    since = eng.state.rooms["balkong"].override_since
+    assert since is not None
+    for _ in range(3):
+        t += timedelta(seconds=10)
+        eng.handle(ForeignChange("balkong_taklys", 0.0), t)
+    assert eng.state.rooms["balkong"].override_since == since

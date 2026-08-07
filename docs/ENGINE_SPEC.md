@@ -503,12 +503,19 @@ gateway re-delivers superseded off-states ~15-30 s after our write replaces
 them — observed live, context-free). A suspect zero carries NO information:
 the §9.1 latch stands (the engine emits nothing while latched), but it is
 not adopted — the engine's lit belief and the room's OFF edge survive — and
-the NEXT foreign report resolves the suspense. A LIT report (the ~3-min poll
-re-reading the true level) proves the zero stale: the latch it caused is
-undone (same down-step gate as the rising edge) and tier control resumes.
-Another ZERO — the poll confirming a lost write, or a real press that had
-been held in suspense — fires the falling declaration normally: session
-ends, backdrop returns. The window is validated below 175 s (dataclass
+the NEXT foreign report resolves the suspense. A LIT report proves the zero
+stale ONLY when it corroborates the preserved pre-adopt belief (within the
+echo tolerance — i.e. the poll re-reading the level the engine commanded):
+then the latch the zero caused is undone (same down-step gate as the rising
+edge) and tier control resumes. A materially different lit level is a USER
+action (hold-to-dim up from the suppressed off): the suspicion is consumed
+but the §9.1 latch keeps their level. Another ZERO — the poll confirming a
+lost write, or a real press that had been held in suspense — fires the
+falling declaration normally: session ends, backdrop returns. The suspicion
+cannot outlive its context: it is cleared on any occupational edge (session
+boundary), under a sleep/away hard-off, and expires unresolved after two
+poll intervals; a suspect zero also never re-stamps `override_since` (it is
+not new user intent). The window is validated below 175 s (dataclass
 invariant) so the poll's correction can never itself be swallowed.
 Pressing OFF while
 sitting returns the backdrop within a second by design, and because wall

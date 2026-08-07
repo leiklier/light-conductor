@@ -465,9 +465,18 @@ cancelled, tier control froze under the latch, and a real press inside the
 window stranded 4 h of phantom adjacency ending in a nocturnal relight. The
 shipped design treats a suspect zero as carrying NO information: latched but
 NOT adopted (belief and OFF edge survive, suspect_zero_at stamped), resolved
-by the next report — lit ⇒ latch undone, tier control resumes; zero ⇒ falling
-declaration fires (session ends, backdrop returns; covers both the genuinely
-lost write and a real press held in suspense, at ≤ poll-interval latency).
+by the next report — corroborating lit (matches the pre-adopt belief within
+echo tolerance) ⇒ latch undone, tier control resumes; non-matching lit = a
+user dial ⇒ suspicion consumed, latch keeps their level (round 3 found the
+uncorroborated release rewrote a 95 % dial to the 49 % tier — beta.8 again;
+the first corroboration attempt then compared post-adopt and matched
+everything); zero ⇒ falling declaration fires (session ends, backdrop
+returns; covers both the genuinely lost write and a real press held in
+suspense, at ≤ poll-interval latency). Round 3 also pinned the stamp
+lifecycle: cleared at session boundaries (OccupationalChanged), under
+hard-offs, and by a 2-poll-interval TTL, so a leaked suspicion can never
+discard a later session's first dial; and suspect zeros never re-stamp
+override_since.
 outdoor_stale_zero_window is dataclass-validated < 175 s so the poll's
 correction can never be swallowed. Deliberately asymmetric — ON edges are not
 windowed, so the arrival sequence is never suppressed. Re-submitting an unchanged
