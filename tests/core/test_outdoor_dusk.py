@@ -635,3 +635,29 @@ def test_suspect_zeros_do_not_restart_the_override_clock() -> None:
         t += timedelta(seconds=10)
         eng.handle(ForeignChange("balkong_taklys", 0.0), t)
     assert eng.state.rooms["balkong"].override_since == since
+
+
+def test_none_level_during_suspense_preserves_the_belief() -> None:
+    """Round 4 F1: a None report (wall press during a Plejd blip) is unknown,
+    not off — adopting it would destroy the preserved OFF edge and strand the
+    session past the poll's genuine zero."""
+    eng, t = _session_with_suspect_zero()
+    t += timedelta(seconds=20)
+    eng.handle(ForeignChange("balkong_taklys", None), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.channels["balkong_taklys"].on is True  # belief intact
+    assert rs.suspect_zero_at is not None  # suspicion survives the blip
+    t += timedelta(seconds=150)  # the poll's genuine zero still resolves it
+    eng.handle(ForeignChange("balkong_taklys", 0.0), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.occupational is False  # session ended
+    assert abs(_commanded(eng) - 0.2) < 0.05  # backdrop restored
+
+
+def test_none_only_sequence_cannot_keep_the_stamp_alive() -> None:
+    """Round 4 F1 (second half): an expired suspicion is dead even on the
+    None path — the stamp clears and normal handling resumes."""
+    eng, t = _session_with_suspect_zero()
+    t += timedelta(seconds=400)  # > SUSPECT_ZERO_TTL
+    eng.handle(ForeignChange("balkong_taklys", None), t)
+    assert eng.state.rooms["balkong"].suspect_zero_at is None

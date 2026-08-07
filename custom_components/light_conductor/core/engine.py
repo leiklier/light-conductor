@@ -266,6 +266,22 @@ class Engine:
                 override.latch(rs, now)
             rs.suspect_zero_at = now
             return
+        # A None level while a suspicion is pending is "unknown", not "off" —
+        # adopting it would zero the preserved belief and resurrect the
+        # one-shot OFF edge the guard exists to prevent (round 4 F1: the
+        # poll's genuine zero would then see was_lit False and strand the
+        # session). An EXPIRED stamp is a dead suspicion: clear it and fall
+        # through to normal handling, so a None-only sequence cannot keep the
+        # stamp alive forever.
+        if (
+            room.shape is RoomShape.OUTDOOR
+            and event.level is None
+            and rs.suspect_zero_at is not None
+        ):
+            if (now - rs.suspect_zero_at).total_seconds() > SUSPECT_ZERO_TTL:
+                rs.suspect_zero_at = None
+            else:
+                return
         override.latch(rs, now)  # rules 9.1, 9.4 (wall events always latch)
         override.adopt(rs.channels[event.channel_id], event.level, event.ct)
         if room.shape is RoomShape.OUTDOOR:
