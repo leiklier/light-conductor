@@ -92,9 +92,10 @@ freezes its current role for `presence_blind_hold`, then demotes one step per
 Sleep mode overrides per §6.1.
 
 1.10 **Occupational presence** (outdoor rooms). An outdoor room's occupational
-switch is a *declaration* of presence: while on AND ``E >= outdoor_on_threshold``
-(the same window in which §6.5 lights the room itself — ungated, a switch left
-on would light the interior in full daylight), the room is self-active — its
+switch is a *declaration* of presence: while on AND the room's own dusk ramp is
+at least `outdoor_presence_factor` deep (§6.5a — ungated, a switch left on would
+light the interior in full daylight; with no lux sensor the ramp is binary and
+this is exactly `E >= outdoor_on_threshold`), the room is self-active — its
 neighbours qualify for ADJACENT and, when flagged `living_group`, it keeps
 `living_recently_active` alive (§1.6) so the interior does not go dark around
 an occupant the sensors cannot see (the balcony-sitting incident). The falling
@@ -430,6 +431,32 @@ someone is home). Its
 `occupational` switch (exposed entity, §10) raises it to `out_active_evening`
 at a slightly cooler CT while on — "sitting outside" vs "ambient backdrop".
 
+6.5a **Measured dusk** (outdoor rooms with a lux sensor). An outdoor room may
+be given a lux sensor — including one an indoor room already uses, e.g. a window
+sensor that sees the same sky as the balcony. It then computes a *dusk factor*
+
+    D_out = 1                                                          if E = 1
+          = clamp((outdoor_on_lux − N̂) / (outdoor_on_lux − outdoor_full_lux), 0, 1)
+
+and 6.5's tier (`out_background` or, with the occupational switch on,
+`out_active_evening`) is scaled by `D_out`; `D_out = 0` is OFF. The balcony
+therefore eases in as the light actually goes — an overcast evening lights it
+early — instead of snapping on at a sun-elevation threshold, and releases in
+the morning when the light returns rather than when the sun ramp says so.
+
+Two fallbacks bound the trust placed in the sensor. A missing or stale (§3.5)
+sensor leaves 6.5's `E >= outdoor_on_threshold` gate exactly as it was. And at
+the circadian plateau (`E = 1`: the sun below `sun_low_deg`, or past the
+evening clock ramp) the room is lit as 6.5 always lit it, so a sensor reading
+falsely bright — an indoor lamp, a wedge stuck at a daylight value — can never
+leave the balcony dark through the night.
+
+An outdoor room never enters the closed loop (§4.5)
+or the bootstrap (§4.4) — its sensor is a dusk measurement, not a control
+feedback path — so it exposes no target-lux and no calibration button, and its
+own contribution to that sensor (a balcony lamp seen through a window) stays in
+N̂'s own-light term rather than driving a loop.
+
 6.6 **Vacation.** If `vacation_entity` is configured and on, away rules apply
 regardless of presence, except an optional simple presence-simulation is out
 of scope for v1 (roadmap).
@@ -620,6 +647,8 @@ override latches (not restored — cleared on restart).
 | ct_min_delta | 100 K | 5.4 |
 | sleep_fade / night_hold / night_fade | 4 s / 600 s / 10 s | 6.1, 6.2 |
 | outdoor_on_threshold | 0.7 | 6.5 |
+| outdoor_on_lux / outdoor_full_lux | 15 lx / 2 lx | 6.5a |
+| outdoor_presence_factor | 0.5 | 1.10, 6.5a |
 | gain_range_stops / gain_reset | 1.0 / on | 7.1, 7.3 |
 | slew_step / slew_interval / slew_step_empty | 0.1 / 1.0 s / 0.25 | 8.2 |
 | min_delta / min_write_interval / max_inflight | 0.03 / 1.0 s / 3 | 8.3 |

@@ -15,8 +15,17 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_LUX_SENSOR, CONF_NAME, CONF_ROOM_ID, CONF_ROOMS, DOMAIN, signal_calibration
+from .const import (
+    CONF_LUX_SENSOR,
+    CONF_NAME,
+    CONF_ROOM_ID,
+    CONF_ROOMS,
+    CONF_SHAPE,
+    DOMAIN,
+    signal_calibration,
+)
 from .controller import Controller
+from .core.model import RoomShape
 from .entity import LightConductorEntity, room_device_info
 
 EVENT_COMMITTED = "committed"
@@ -30,7 +39,8 @@ async def async_setup_entry(
     entities = [
         CalibrationEvent(controller, room[CONF_ROOM_ID], room.get(CONF_NAME, room[CONF_ROOM_ID]))
         for room in entry.options.get(CONF_ROOMS, ())
-        if room.get(CONF_LUX_SENSOR)
+        # Paired with the calibration button: outdoor rooms never sweep (§6.5a).
+        if room.get(CONF_LUX_SENSOR) and room.get(CONF_SHAPE) != RoomShape.OUTDOOR.value
     ]
     async_add_entities(entities)
 

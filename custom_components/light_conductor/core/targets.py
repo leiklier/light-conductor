@@ -73,6 +73,34 @@ def daylight_factor(n_hat: float, tun: Tunables) -> float:
     return max(tun.daylight_min_factor, min(1.0, d))
 
 
+def outdoor_dusk_factor(n_hat: float | None, e: float, tun: Tunables) -> float:
+    """Dusk factor for an outdoor room (rule 6.5a).
+
+    ``n_hat`` is the room's natural-light estimate when it has a FRESH lux
+    sensor, else ``None``.
+
+    With no sensor (or a stale one, §3.5) this is the pre-6.5a all-or-nothing
+    ``E >= outdoor_on_threshold`` gate, unchanged.
+
+    With a sensor the measured ramp governs in BOTH directions — 0 -> 1 as
+    ``N̂`` falls from ``outdoor_on_lux`` to ``outdoor_full_lux``, so an overcast
+    evening lights the balcony when it actually gets dark and a summer morning
+    releases it when the light returns rather than hours later when the sun
+    ramp finally crosses its threshold. The one override is the dead of night
+    (``E`` at its plateau: the sun below ``sun_low_deg``, or past the evening
+    clock ramp): there the balcony is lit as it always was, so a sensor reading
+    falsely bright — an indoor lamp, a torch, a wedge stuck at a daylight
+    value — can never leave the balcony dark all night.
+    """
+    if n_hat is None:
+        return 1.0 if e >= tun.outdoor_on_threshold else 0.0
+    if e >= 1.0:
+        return 1.0
+    span = tun.outdoor_on_lux - tun.outdoor_full_lux
+    measured = (tun.outdoor_on_lux - n_hat) / span if span > 0.0 else 0.0
+    return max(0.0, min(1.0, measured))
+
+
 def apply_daylight(outputs: dict[Band, float], n_hat: float, tun: Tunables) -> dict[Band, float]:
     """Scale the ACTIVE/ADJACENT/BACKGROUND open-loop outputs by ``D`` (rule 4.7)."""
     d = daylight_factor(n_hat, tun)

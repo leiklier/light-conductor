@@ -22,9 +22,9 @@ from homeassistant.const import LIGHT_LUX, MATCH_ALL, PERCENTAGE, EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_LUX_SENSOR, CONF_NAME, CONF_ROOM_ID, CONF_ROOMS, DOMAIN
+from .const import CONF_LUX_SENSOR, CONF_NAME, CONF_ROOM_ID, CONF_ROOMS, CONF_SHAPE, DOMAIN
 from .controller import Controller, _monotonic
-from .core.model import Role
+from .core.model import Role, RoomShape
 from .entity import LightConductorEntity, room_device_info
 
 #: Lux gate: 5-lx buckets, ≥10 s min interval (spec §10). The core already
@@ -81,8 +81,12 @@ async def async_setup_entry(
         # Natural- and target-lux are closed-loop quantities: only meaningful
         # for a room with a lux sensor (§10), like the calibration button.
         if room.get(CONF_LUX_SENSOR):
+            # Natural lux is meaningful for any lux room — an outdoor room reads
+            # it as its dusk measurement (§6.5a) — but a target only exists where
+            # the closed loop can run, which excludes outdoor rooms.
             entities.append(NaturalLuxSensor(controller, rid, name))
-            entities.append(TargetLuxSensor(controller, rid, name))
+            if room.get(CONF_SHAPE) != RoomShape.OUTDOOR.value:
+                entities.append(TargetLuxSensor(controller, rid, name))
     async_add_entities(entities)
 
 

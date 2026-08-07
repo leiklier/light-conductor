@@ -378,6 +378,46 @@ living-group memory, and override retention (a living room is BACKGROUND, not
 OFF-worthy, while the balcony is in use). Away/sleep mode hard-offs still
 resolve before the role path and win unchanged.
 
+## D19. Outdoor rooms measure dusk (beta.13)
+
+Reported 2026-08-07: the user was sitting on the balcony with "sitting outside"
+on and the balcony light was off. Not a bug — outdoor rooms consulted *no light
+measurement at all*; they were gated purely on `E >= outdoor_on_threshold`, and
+E was 0.691 at 21:40 local, crossing 0.7 (and lighting the balcony) three
+minutes before sunset. The user's proposal: the spisebord lux sensor sits at the
+window next to the balcony, so let the balcony read it and dim off it.
+
+History confirmed the sensor is a good outdoor proxy despite being behind a
+curtain (≈510 lx midday, 36 lx at 19:00, 15 lx at 20:40, 3 lx at sunset) and
+that its cross-talk from the balcony lamp is negligible: when the balcony lit at
+21:44 the previous evening the sensor went 2.0 → 2.2 → 2.1 → 2.0 lx.
+
+Decision (§6.5a): an outdoor room may take a lux sensor — *including one an
+indoor room already uses* — and scales its 6.5 tier by a dusk factor that ramps
+0 → 1 as N̂ falls from `outdoor_on_lux` (15 lx, ≈20:40 local in August) to
+`outdoor_full_lux` (2 lx). Three properties make this safe:
+
+- **Two bounded fallbacks, not blind trust.** A missing or stale sensor leaves
+  the old E gate untouched (a sensorless outdoor room is bit-for-bit pre-6.5a),
+  and at the circadian plateau (E = 1 — sun below `sun_low_deg` or past the
+  evening clock ramp) the balcony is lit exactly as before, so a falsely-bright
+  sensor cannot leave it dark all night. Between those bounds the measurement
+  governs in BOTH directions: the alternative — a pure union with the E gate —
+  would have kept this morning's balcony lit until 08:28 local at 155 lx,
+  because the sun ramp releases hours after the light actually returns.
+- **The closed loop stays out.** `modes.resolve` returns a resolution for every
+  outdoor room, so the engine's closed-loop and bootstrap paths are unreachable
+  there by construction. The sensor is a measurement, not a feedback path — so
+  outdoor rooms expose no target-lux sensor and no calibration button.
+- **Presence mirroring is gated deeper than lighting** (`outdoor_presence_factor`
+  0.5): D18 mirrors the occupational switch into `self_active`, and the interior
+  must not follow the balcony into ADJACENT while it is still bright indoors.
+  With no sensor the factor is binary, so this reduces exactly to D18's gate.
+
+Consequence for the adapter: the lux index becomes entity → *rooms*. It was
+entity → room, so sharing a sensor would have silently starved whichever room
+lost the collision of its lux feed.
+
 ## Open questions — RESOLVED (user, 2026-07-25)
 
 - **Q1 (D8):** master dimmer neutral at 50 % — confirmed (boost possible).

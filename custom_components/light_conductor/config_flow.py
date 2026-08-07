@@ -91,6 +91,7 @@ from .const import (
     RUNTIME_OPTION_KEYS,
     SHAPES,
     VACANCIES,
+    build_tunables,
 )
 from .core.model import RoomShape
 from .core.tunables import Tunables
@@ -119,6 +120,9 @@ _TUNABLE_UI: dict[str, tuple[float, float, float]] = {
     "night_fade": (0, 60, 1),
     "sleep_fade": (0, 60, 1),
     "outdoor_on_threshold": (0, 1, 0.05),
+    "outdoor_on_lux": (1, 200, 1),
+    "outdoor_full_lux": (0, 100, 0.5),
+    "outdoor_presence_factor": (0.05, 1, 0.05),
     "gain_range_stops": (0.5, 3, 0.5),
     "slew_step": (0.02, 0.5, 0.01),
     "slew_interval": (0.5, 5, 0.5),
@@ -700,18 +704,28 @@ class LightConductorOptionsFlow(OptionsFlow):
     async def async_step_tunables(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        current = dict(self._options.get(CONF_TUNABLES, {}))
         if user_input is not None:
             defaults = Tunables()
             overrides = {
                 k: v for k, v in user_input.items() if v is not None and v != getattr(defaults, k)
             }
-            if overrides:
-                self._options[CONF_TUNABLES] = overrides
+            try:
+                # Cross-field constraints (dusk window ordering, sun ramp
+                # ordering, ...) live in Tunables.__post_init__ — reject here
+                # rather than persisting options the runtime cannot build.
+                build_tunables({CONF_TUNABLES: overrides})
+            except ValueError:
+                errors["base"] = "invalid_tunables"
+                current = overrides
             else:
-                self._options.pop(CONF_TUNABLES, None)
-            return await self.async_step_init()
+                if overrides:
+                    self._options[CONF_TUNABLES] = overrides
+                else:
+                    self._options.pop(CONF_TUNABLES, None)
+                return await self.async_step_init()
 
-        current = dict(self._options.get(CONF_TUNABLES, {}))
         defaults = Tunables()
         fields: dict[Any, Any] = {}
         for name in EDITABLE_TUNABLES:
@@ -723,7 +737,9 @@ class LightConductorOptionsFlow(OptionsFlow):
             fields[vol.Optional(name, default=default)] = NumberSelector(
                 NumberSelectorConfig(min=lo, max=hi, step=step, mode=NumberSelectorMode.BOX)
             )
-        return self.async_show_form(step_id="tunables", data_schema=vol.Schema(fields))
+        return self.async_show_form(
+            step_id="tunables", data_schema=vol.Schema(fields), errors=errors
+        )
 
     # -- finish -------------------------------------------------------------
 

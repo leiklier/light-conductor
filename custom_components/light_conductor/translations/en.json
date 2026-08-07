@@ -128,6 +128,9 @@
         "title": "Tunables",
         "description": "Engine constants (spec §12). Leave at defaults unless you know why."
       }
+    },
+    "error": {
+      "invalid_tunables": "Invalid combination: check that the dusk window is ordered (outdoor_full_lux below outdoor_on_lux) and the sun ramp is (sun_low_deg below sun_high_deg)."
     }
   },
   "entity": {

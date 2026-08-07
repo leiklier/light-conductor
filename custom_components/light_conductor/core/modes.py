@@ -10,6 +10,7 @@ Feature-module discipline: imports only :mod:`model` and :mod:`tunables`.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .model import Band, EngineState, Role, RoomConfig, RoomShape, RoomState
@@ -51,12 +52,16 @@ def resolve(
     e: float,
     tun: Tunables,
     night_expiring: bool = False,
+    dusk: float | None = None,
 ) -> RoomResolution | None:
     """Mode verdict for ``room``, or ``None`` for the normal role path.
 
     ``night_expiring`` is set for the one recompute in which the night-path
     episode ends, so its rooms fade out over ``night_fade`` (rule 6.2) rather
     than the ``sleep_fade`` used when sleep first engages (rule 6.1).
+
+    ``dusk`` is the outdoor dusk factor (§6.5a), computed by the engine because
+    it depends on sensor freshness; ``None`` keeps the pre-6.5a E gate.
     """
     if is_away(state):
         # Everyone gone: every indoor room OFF (rule 6.4). Outdoor rooms keep
@@ -64,7 +69,7 @@ def resolve(
         # on, with the occupational switch ignored until someone is home (6.5).
         if room.shape is RoomShape.OUTDOOR:
             if state.away_lighting:
-                return _outdoor(room, rs, e, tun, ignore_occupational=True)
+                return _outdoor(room, rs, e, tun, ignore_occupational=True, dusk=dusk)
             return RoomResolution(Role.OFF, off=True, gain_exempt=True)
         return RoomResolution(Role.OFF, off=True)
 
@@ -85,7 +90,7 @@ def resolve(
         return RoomResolution(Role.OFF, off=True, fade=fade)
 
     if room.shape is RoomShape.OUTDOOR:
-        return _outdoor(room, rs, e, tun)
+        return _outdoor(room, rs, e, tun, dusk=dusk)
 
     if state.tv_playing and room.tv_mode:
         table = room.profile.tv_output if rs.self_active else room.profile.tv_output_empty
@@ -100,26 +105,42 @@ def _outdoor(
     e: float,
     tun: Tunables,
     ignore_occupational: bool = False,
+    dusk: float | None = None,
 ) -> RoomResolution:
-    """Outdoor room dusk logic (rule 6.5).
+    """Outdoor room dusk logic (rules 6.5, 6.5a).
 
     ``ignore_occupational`` (set while away, rule 6.4) pins the room to its
     ambient background regardless of the occupational switch.
+
+    ``dusk`` in [0, 1] is the engine's dusk factor (§6.5a): 0 = still daylight
+    (room OFF), 1 = full dark (the room's tier as prescribed), between = the
+    tier scaled down so the balcony eases in as the light goes rather than
+    snapping on at a sun-ramp threshold. ``None`` (no sensor context — the
+    pre-6.5a caller) falls back to the all-or-nothing E gate.
     """
-    if e < tun.outdoor_on_threshold:
+    if dusk is None:
+        dusk = 1.0 if e >= tun.outdoor_on_threshold else 0.0
+    if dusk <= 0.0:
         return RoomResolution(Role.OFF, off=True, gain_exempt=True)
     if rs.occupational and not ignore_occupational:
         # "Sitting outside": brighter evening level at a slightly cooler CT.
         return RoomResolution(
             Role.ACTIVE,
-            band_outputs=dict(room.profile.out_active_evening),
+            band_outputs=_scale(room.profile.out_active_evening, dusk),
             ct_override=tun.ct_evening,
             gain_exempt=True,
         )
     # Ambient backdrop: background level, warm.
     return RoomResolution(
         Role.BACKGROUND,
-        band_outputs=dict(room.profile.out_background),
+        band_outputs=_scale(room.profile.out_background, dusk),
         ct_override=tun.ct_min_evening,
         gain_exempt=True,
     )
+
+
+def _scale(table: Mapping[Band, float], factor: float) -> dict[Band, float]:
+    """Scale a band table by the dusk factor (rule 6.5a)."""
+    if factor >= 1.0:
+        return dict(table)
+    return {b: v * factor for b, v in table.items()}

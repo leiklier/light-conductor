@@ -95,6 +95,7 @@ def step(
     shape: RoomShape,
     hold_seconds: float | None,
     e: float = 0.0,
+    dusk: float | None = None,
 ) -> None:
     """Advance ``self_active`` and its holds up to ``now`` (rules 1.3-1.9)."""
     if shape is RoomShape.OUTDOOR:
@@ -110,7 +111,15 @@ def step(
         # daylight damping for sensorless rooms). The falling edge — switch off
         # OR morning E-descent — stamps last_active_end so living_memory decays
         # normally.
-        active = rs.occupational and e >= tun.outdoor_on_threshold
+        #
+        # §6.5a: with a lux sensor the balcony's own dusk ramp starts earlier
+        # than the E gate, but the interior must not follow it into ADJACENT
+        # while it is still bright inside, so presence arms only once the ramp
+        # is at least ``outdoor_presence_factor`` deep. With no dusk factor
+        # (sensorless room) the fallback is binary and this reduces exactly to
+        # the pre-6.5a ``e >= outdoor_on_threshold`` gate.
+        lit = dusk if dusk is not None else (1.0 if e >= tun.outdoor_on_threshold else 0.0)
+        active = rs.occupational and lit >= tun.outdoor_presence_factor
         if rs.self_active and not active:
             rs.last_active_end = now
         rs.self_active = active

@@ -128,6 +128,9 @@
         "title": "Innstillinger",
         "description": "Motorkonstanter (spesifikasjon §12). La stå på standard med mindre du vet hvorfor."
       }
+    },
+    "error": {
+      "invalid_tunables": "Ugyldig kombinasjon: sjekk at skumringsvinduet er riktig ordnet (outdoor_full_lux lavere enn outdoor_on_lux) og at solrampen er det (sun_low_deg lavere enn sun_high_deg)."
     }
   },
   "entity": {

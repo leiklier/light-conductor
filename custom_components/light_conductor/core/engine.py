@@ -338,9 +338,25 @@ class Engine:
             gain.relax_to_neutral(s, tun)
         s.last_e = e
 
+        # Outdoor dusk factors (§6.5a) — needed before pass 1 because an outdoor
+        # room's occupational presence (§1.10) rides on its own dusk ramp.
+        dusk = {
+            room.room_id: self._outdoor_dusk(room, now, e)
+            for room in self.config.rooms
+            if room.shape is RoomShape.OUTDOOR
+        }
+
         # Pass 1: advance every room's FSM so adjacency reads settled state.
         for room in self.config.rooms:
-            roles.step(self.state.rooms[room.room_id], now, tun, room.shape, room.hold_seconds, e)
+            roles.step(
+                self.state.rooms[room.room_id],
+                now,
+                tun,
+                room.shape,
+                room.hold_seconds,
+                e,
+                dusk.get(room.room_id),
+            )
         living = self._living_active(now)
 
         # Calibration pass (§4.4): start/reject requests and advance any running
@@ -354,7 +370,17 @@ class Engine:
                 diags.append(self._diag(room, rs, rs.role))
                 continue
             diags.append(
-                self._reconcile_room(room, now, e, evening, g, living, night_expiring, plan)
+                self._reconcile_room(
+                    room,
+                    now,
+                    e,
+                    evening,
+                    g,
+                    living,
+                    night_expiring,
+                    plan,
+                    dusk.get(room.room_id),
+                )
             )
 
         # Circadian self-scheduling (rule 2.3): follow the ramp with a tick, and
@@ -399,6 +425,7 @@ class Engine:
         living: bool,
         night_expiring: bool,
         plan: Plan,
+        dusk: float | None = None,
     ) -> RoomDiagnostics:
         s, tun = self.state, self.tun
         rs = s.rooms[room.room_id]
@@ -408,7 +435,7 @@ class Engine:
         base = roles.base_role(
             rs, room.shape, room.profile.vacancy, neighbour_active, living, evening
         )
-        res = modes.resolve(room, rs, s, e, tun, night_expiring)
+        res = modes.resolve(room, rs, s, e, tun, night_expiring, dusk)
         off_worthy = base is Role.OFF and not rs.self_active
 
         # Override arbitration (rule 9): mode hard-offs and night path win.
@@ -530,8 +557,25 @@ class Engine:
         # Self-schedule a circadian-cadence re-check while it is lit (shadow audit).
         if room.shape is RoomShape.OUTDOOR and res is not None and not res.off:
             plan.review_at(now + timedelta(seconds=tun.circadian_tick))
-        natural = rs.est.n_hat if (closed or shadow) else None
+        # Natural lux is published for the closed-loop/shadow paths and for an
+        # outdoor room whose fresh sensor drives its dusk ramp (§6.5a).
+        outdoor_lux = fresh and room.shape is RoomShape.OUTDOOR
+        natural = rs.est.n_hat if (closed or shadow or outdoor_lux) else None
         return self._diag(room, rs, role, max(channel_b.values(), default=0.0), natural, target_lux)
+
+    def _outdoor_dusk(self, room: RoomConfig, now: datetime, e: float) -> float:
+        """Dusk factor for one outdoor room (rule 6.5a).
+
+        A configured, fresh lux sensor contributes the measured ramp; a missing
+        or stale one leaves only the circadian gate, so the room degrades to its
+        pre-6.5a behaviour rather than to darkness (§3.5 seamless fallback).
+        The sensor may be one an indoor room already uses — the balcony's own
+        contribution to a window sensor is negligible, and N̂ subtracts whatever
+        the sharing room's own lamps add.
+        """
+        rs = self.state.rooms[room.room_id]
+        fresh = room.has_lux_sensor and not estimator.is_stale(rs.est, now, self.tun)
+        return targets.outdoor_dusk_factor(rs.est.n_hat if fresh else None, e, self.tun)
 
     def _room_capacity(self, rs: RoomState, room: RoomConfig, photo: RoomPhotometry) -> float:
         """Room calibrated capacity ``C = Σ_i g_i·f_i(1)·m`` (§2.1, §4.5).

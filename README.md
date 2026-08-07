@@ -18,7 +18,9 @@ What it does:
   fully off after vacancy.
 - **Master gain dimmer** — one HomeKit dimmer scales the whole automation
   relative to what it would do on its own.
-- **Night path, TV mode, away-off, outdoor room** — built in.
+- **Night path, TV mode, away-off, outdoor room** — built in. A balcony can
+  read a lux sensor (even one an indoor room already uses, e.g. at the window)
+  and ease in as the light actually goes, instead of at a sun-ramp threshold.
 - **Calibrated photometry** — a one-button night sweep measures each lamp's
   lux gain and dimming curve at the room's sensor.
 - **Manual control is respected** — any wall rotary, HomeKit, or voice change
@@ -35,7 +37,8 @@ Entities: `light.light_conductor_master` (master gain dimmer),
 `switch.light_conductor_enabled` / `_away_lighting`, per-outdoor-room
 occupational switch, and per room `sensor.<room>_role`,
 `binary_sensor.<room>_overridden`, and — for rooms with a lux sensor —
-`sensor.<room>_natural_lux` / `sensor.<room>_target_lux`,
+`sensor.<room>_natural_lux` plus, where a closed loop can run (everything but
+outdoor rooms), `sensor.<room>_target_lux`,
 `button.<room>_record_light_response`, `event.<room>_calibration`.
 
 Status: implemented, **not yet released**. Install via HACS as a *custom
