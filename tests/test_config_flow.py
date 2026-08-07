@@ -19,6 +19,7 @@ from custom_components.light_conductor.const import (
     CONF_PROFILE,
     CONF_ROOMS,
     CONF_SLEEP_ENTITY,
+    CONF_TUNABLES,
     DOMAIN,
     _profile_from_options,
 )
@@ -289,3 +290,25 @@ async def test_options_room_detail_accepts_hold_seconds(hass: HomeAssistant) -> 
     result = await configure(result["flow_id"], {"next_step_id": "finish"})
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert entry.options[CONF_ROOMS][0][CONF_HOLD_SECONDS] == 240
+
+
+async def test_tunables_reject_inverted_dusk_window(hass: HomeAssistant) -> None:
+    """§6.5a: the dusk window must be ordered. Cross-field constraints live in
+    Tunables.__post_init__, so the flow validates before persisting options the
+    runtime could not build."""
+    entry = await setup_entry(hass, options([room("k", ["light.k"])]))
+
+    async def configure(flow_id: str, data: dict) -> dict:
+        return await hass.config_entries.options.async_configure(flow_id, data)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await configure(result["flow_id"], {"next_step_id": "tunables"})
+    result = await configure(result["flow_id"], {"outdoor_on_lux": 2.0, "outdoor_full_lux": 15.0})
+    assert result["step_id"] == "tunables"
+    assert result["errors"] == {"base": "invalid_tunables"}
+
+    # A valid window is accepted and stored.
+    result = await configure(result["flow_id"], {"outdoor_on_lux": 25.0})
+    result = await configure(result["flow_id"], {"next_step_id": "finish"})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_TUNABLES]["outdoor_on_lux"] == 25.0

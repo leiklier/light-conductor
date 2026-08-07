@@ -528,7 +528,10 @@ class Controller:
 
     def _build_indexes(self) -> None:
         self._channel_room: dict[str, str] = {}
-        self._lux_room: dict[str, str] = {}
+        # One lux entity may serve SEVERAL rooms — an outdoor room reads a
+        # window sensor an indoor room already owns as its dusk measurement
+        # (§6.5a), so this index is entity -> rooms, not entity -> room.
+        self._lux_rooms: dict[str, list[str]] = {}
         self._presence_primary: dict[str, str] = {}
         self._activity_room: dict[str, str] = {}
         self._occ_fallback: dict[str, str] = {}
@@ -542,7 +545,7 @@ class Controller:
             for cid in chans:
                 self._channel_room[cid] = rid
             if room.get(CONF_LUX_SENSOR):
-                self._lux_room[room[CONF_LUX_SENSOR]] = rid
+                self._lux_rooms.setdefault(room[CONF_LUX_SENSOR], []).append(rid)
             if room.get(CONF_PRESENCE_PRIMARY):
                 self._presence_primary[room[CONF_PRESENCE_PRIMARY]] = rid
             if room.get(CONF_ACTIVITY_SENSOR):
@@ -803,11 +806,18 @@ class Controller:
         wedge and never raises the issue.
         """
         threshold = self.tun.lux_wedge_warn
-        for entity_id, room_id in self._lux_room.items():
+        for entity_id, room_ids in self._lux_rooms.items():
             st = self.hass.states.get(entity_id)
             available = st is not None and st.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
-            rs = self.engine.state.rooms.get(room_id)
-            last = rs.est.last_report_at if rs is not None else None
+            # Shared sensor: every room sees the same reports, so the freshest
+            # stamp among them decides (a room added mid-life starts at None).
+            stamps = [
+                rs.est.last_report_at
+                for rid in room_ids
+                if (rs := self.engine.state.rooms.get(rid)) is not None
+                and rs.est.last_report_at is not None
+            ]
+            last = max(stamps) if stamps else None
             wedged = available and last is not None and (now - last).total_seconds() > threshold
 
             if not wedged:
@@ -832,6 +842,8 @@ class Controller:
                 continue
 
             self._wedged.add(entity_id)
+            # A shared sensor names its first room in the warning/issue text.
+            room_id = room_ids[0]
             _LOGGER.warning(
                 "Lux sensor %s (room %s) appears wedged: available but no report in "
                 "%.0f s — press its ESP reboot button",
@@ -1028,7 +1040,7 @@ class Controller:
 
         # Lux sensors: state_reported catches same-value 1 Hz samples (§3);
         # state_changed catches availability transitions.
-        lux = list(self._lux_room)
+        lux = list(self._lux_rooms)
         if lux:
             lux_set = set(lux)
 
@@ -1136,18 +1148,14 @@ class Controller:
     def _on_lux_reported(self, event: Event) -> None:
         entity_id = event.data.get("entity_id")
         new: State | None = event.data.get("new_state")
-        room_id = self._lux_room.get(entity_id)
-        if room_id is None:
-            return
-        self.submit(LuxReport(room_id=room_id, lux=_float_or_none(new)))
+        for room_id in self._lux_rooms.get(entity_id, ()):
+            self.submit(LuxReport(room_id=room_id, lux=_float_or_none(new)))
 
     @callback
     def _on_lux_changed(self, event: Event) -> None:
         new: State | None = event.data.get("new_state")
-        room_id = self._lux_room.get(event.data["entity_id"])
-        if room_id is None:
-            return
-        self.submit(LuxReport(room_id=room_id, lux=_float_or_none(new)))
+        for room_id in self._lux_rooms.get(event.data["entity_id"], ()):
+            self.submit(LuxReport(room_id=room_id, lux=_float_or_none(new)))
 
     @callback
     def _on_presence_change(self, event: Event) -> None:

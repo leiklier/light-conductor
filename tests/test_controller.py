@@ -643,3 +643,35 @@ async def test_registry_device_class_override_resolves(hass: HomeAssistant) -> N
     )
     ent_reg.async_update_entity("button.plain", device_class=ButtonDeviceClass.RESTART)
     assert controller._resolve_restart_button("sensor.klux") == "button.plain"
+
+
+# --- §6.5a shared lux sensor -----------------------------------------------
+
+
+async def test_one_lux_sensor_feeds_every_room_that_uses_it(hass: HomeAssistant) -> None:
+    """§6.5a: an outdoor room may read a window sensor an indoor room owns. The
+    index is entity -> ROOMS; when it was entity -> room the collision silently
+    starved whichever room lost it of lux updates."""
+    set_light(hass, "light.s", transition=True)
+    set_light(hass, "light.b", transition=True)
+    hass.states.async_set("binary_sensor.ps", "on")
+    hass.states.async_set("sensor.window", "40")
+    entry = await setup_entry(
+        hass,
+        options(
+            [
+                room("spisebord", ["light.s"], presence="binary_sensor.ps", lux="sensor.window"),
+                room("balkong", ["light.b"], shape="outdoor", lux="sensor.window"),
+            ]
+        ),
+    )
+    async_mock_service(hass, "light", "turn_on")
+    controller = hass.data[DOMAIN][entry.entry_id]
+    assert controller._lux_rooms["sensor.window"] == ["spisebord", "balkong"]
+
+    hass.states.async_set("sensor.window", "12")
+    await hass.async_block_till_done()
+
+    stamps = [controller.engine.room_state(r).est.last_report_at for r in ("spisebord", "balkong")]
+    assert all(s is not None for s in stamps)  # both rooms saw the same report
+    assert abs((stamps[0] - stamps[1]).total_seconds()) < 1.0

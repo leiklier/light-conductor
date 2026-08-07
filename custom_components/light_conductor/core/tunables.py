@@ -127,6 +127,15 @@ class Tunables:
     night_hold: float = 600.0  # 6.2
     night_fade: float = 10.0  # 6.2
     outdoor_on_threshold: float = 0.7  # 6.5
+    #: Measured-dusk window for an outdoor room that has a lux sensor (§6.5a).
+    #: Its dusk factor ramps 0 -> 1 as N̂ falls from ``outdoor_on_lux`` to
+    #: ``outdoor_full_lux``; the E gate above stays as a union backstop.
+    outdoor_on_lux: float = 15.0  # 6.5a
+    outdoor_full_lux: float = 2.0  # 6.5a
+    #: How deep the dusk ramp must be before an outdoor room's occupational
+    #: switch counts as presence for its neighbours (§1.10) — the interior must
+    #: not follow the balcony into ADJACENT while it is still bright indoors.
+    outdoor_presence_factor: float = 0.5  # 1.10
 
     # --- §7 master gain ----------------------------------------------------
     gain_range_stops: float = 1.0  # 7.1
@@ -155,6 +164,10 @@ class Tunables:
             raise ValueError("circadian clock boundaries out of order")
         if self.bootstrap_dispersion_max < 1.0:
             raise ValueError("bootstrap_dispersion_max must be >= 1.0")
+        if not 0.0 <= self.outdoor_full_lux < self.outdoor_on_lux:
+            raise ValueError("outdoor_full_lux must be >= 0 and below outdoor_on_lux")
+        if not 0.0 < self.outdoor_presence_factor <= 1.0:
+            raise ValueError("outdoor_presence_factor must be in (0, 1]")
 
 
 def gain_multiplier(pct: float, stops: float) -> float:

@@ -73,6 +73,19 @@ async def test_entity_object_ids_are_language_pinned(hass: HomeAssistant) -> Non
     assert eid("balkong_occupational") == "switch.light_conductor_balkong_occupational"
 
 
+async def test_outdoor_lux_room_gets_no_closed_loop_entities(hass: HomeAssistant) -> None:
+    """§6.5a: an outdoor room's lux sensor measures dusk, it does not close a
+    loop — so it publishes natural lux but no target and no calibration UI."""
+    entry = await setup_entry(
+        hass,
+        options([room("balkong", ["light.b"], shape="outdoor", lux="sensor.blux")]),
+    )
+    assert entity_id_for(hass, entry, "balkong_natural_lux") is not None
+    assert entity_id_for(hass, entry, "balkong_target_lux") is None
+    assert entity_id_for(hass, entry, "balkong_record_light_response") is None
+    assert entity_id_for(hass, entry, "balkong_calibration") is None
+
+
 def test_channels_sensor_marks_all_attributes_unrecorded() -> None:
     """§10: every attribute is MATCH_ALL-unrecorded so churn never records."""
     from homeassistant.const import MATCH_ALL
