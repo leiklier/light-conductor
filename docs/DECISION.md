@@ -451,10 +451,19 @@ respect_override the moment anyone gives the balcony an occupancy fallback —
 a respected latch now releases only on timeout; (F5) that the restore-resubmit
 safety was queue ordering, not the documented guard — the arbitration is now
 inert inside the startup grace; (F8) that a None level (wall event during a
-Plejd blip) read as an off-press. Accepted residual (F3): a mesh write lost
-and corrected to zero by the 3-min poll is indistinguishable from a genuine
-off-press and cancels the session — backdrop returns, press again; the
-recovery and echo paths are guarded upstream. Re-submitting an unchanged
+Plejd blip) read as an off-press. F3 (stale/lost zero cancelling a
+session) was first accepted as a residual — then materialized on the FIRST
+live field test (2026-08-07 21:02:48 UTC): a context-free device report of
+the superseded off-state arrived 14 s after the conductor's sitting-tier
+write and cancelled the session the two-press arrival had just started. The
+two-press sequence is precisely what leaves a stale zero in flight, so the
+flagship interaction was unreliable, not an edge case. beta.15 adds the
+stale-zero guard: a foreign zero within outdoor_stale_zero_window (45 s) of
+the room's own last write latches without cancelling; the ~3-min poll then
+reconciles (stale ⇒ true lit level adopts, session continues; genuinely lost
+write ⇒ the poll's real zero is outside the window and ends the session with
+the backdrop restore). Deliberately asymmetric — ON edges are not windowed,
+so the arrival sequence is never suppressed. Re-submitting an unchanged
 state never releases.
 
 Building the daylight case surfaced a pre-existing behaviour: the outdoor

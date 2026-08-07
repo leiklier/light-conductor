@@ -261,6 +261,9 @@ class RoomState:
     role: Role = Role.OFF
     # Outdoor occupational switch (rule 6.5).
     occupational: bool = False
+    #: When the engine last EMITTED a write for this room (§6.5b stale-zero
+    #: guard). Unlike est.last_own_command_at this is unconditional.
+    last_own_write_at: datetime | None = None
     # Override latch (rule 9).
     overridden: bool = False
     override_since: datetime | None = None

@@ -296,6 +296,25 @@ class Engine:
             self._occupational_edge(room, rs, True, now)
             rs.occupational = True
         elif was_lit and not level_on and not others_on and rs.occupational:
+            # Stale-zero guard (§6.5b, the live 21:02:48 incident): the Plejd
+            # gateway can re-deliver a superseded off-state ~15-30 s after our
+            # own write replaces it — context-free, indistinguishable from a
+            # real off-press. A zero this close to our own last write to the
+            # room is therefore SUSPECT: the §9.1 latch stands (the light
+            # stays as observed either way) but the session is not cancelled.
+            # If it was stale, the ~3-min poll re-reports the true lit level,
+            # which adopts into the latch and the session continues; if it was
+            # a real press, the balcony is dark exactly as pressed and the
+            # session ends via the switch, sleep/away, or the timeout. Real
+            # presses OUTSIDE the window (sessions last minutes; writes only
+            # happen while the dusk ramp is still moving) end the session
+            # immediately as designed.
+            if (
+                rs.last_own_write_at is not None
+                and (now - rs.last_own_write_at).total_seconds()
+                < self.tun.outdoor_stale_zero_window
+            ):
+                return
             self._occupational_edge(room, rs, False, now)
             rs.occupational = False
 
@@ -654,6 +673,7 @@ class Engine:
             emitted = len(plan.commands) > before
             if emitted:  # write-blank window opens (§3.2a)
                 estimator.note_own_command(rs.est, now)
+                rs.last_own_write_at = now  # §6.5b stale-zero guard
             if arm and emitted:
                 base_delta = estimator.a_hat(rs, photo, 1.0) - a_before_unit
                 estimator.record_step(rs.est, rs.est.l_filt, base_delta, now, tun, shadow=shadow)

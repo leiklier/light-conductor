@@ -502,3 +502,60 @@ def test_none_level_is_no_declaration() -> None:
     t += timedelta(seconds=10)
     eng.handle(ForeignChange("balkong_taklys", None), t)
     assert eng.state.rooms["balkong"].occupational is True
+
+
+# --- §6.5b stale-zero guard (beta.15, the 21:02:48 live incident) ----------
+
+
+def test_stale_zero_after_own_write_does_not_cancel_the_session() -> None:
+    """A context-free zero 14 s after the conductor's own sitting-tier write is
+    a suspect stale report: latch stands, session survives, and the poll's
+    true-state re-report adopts into the latch."""
+    eng, t = _dusk_engine()
+    t += timedelta(seconds=10)
+    eng.handle(ForeignChange("balkong_taklys", 0.0), t)  # suppress backdrop
+    t += timedelta(seconds=10)
+    eng.handle(ForeignChange("balkong_taklys", 0.9), t)  # declare: tier write
+    rs = eng.state.rooms["balkong"]
+    assert rs.occupational is True and rs.last_own_write_at is not None
+    t += timedelta(seconds=14)  # the live incident's exact delay
+    eng.handle(ForeignChange("balkong_taklys", 0.0), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.occupational is True  # session NOT cancelled
+    assert rs.overridden is True  # ...but the zero latched (light stays as observed)
+    # ~3-min poll re-reports the true lit level: adopts into the latch.
+    t += timedelta(seconds=170)
+    eng.handle(ForeignChange("balkong_taklys", 0.3), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.occupational is True
+    assert rs.channels["balkong_taklys"].commanded_b == 0.3
+
+
+def test_real_off_press_outside_the_window_still_ends_the_session() -> None:
+    """Past outdoor_stale_zero_window a zero is a genuine off-press: the
+    session ends and the backdrop returns (beta.14 semantics unchanged)."""
+    eng, t = _dusk_engine()
+    t += timedelta(seconds=10)
+    eng.handle(ForeignChange("balkong_taklys", 0.0), t)
+    t += timedelta(seconds=10)
+    eng.handle(ForeignChange("balkong_taklys", 0.9), t)
+    assert eng.state.rooms["balkong"].occupational is True
+    t += timedelta(seconds=TUN.outdoor_stale_zero_window + 30)
+    eng.handle(ForeignChange("balkong_taklys", 0.0), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.occupational is False
+    assert abs(_commanded(eng) - 0.2) < 0.05  # backdrop restored
+
+
+def test_on_edges_are_never_windowed() -> None:
+    """The guard is asymmetric: the arrival sequence (off, then on seconds
+    later) must always mint the session — ON edges bypass the window."""
+    eng, t = _dusk_engine()
+    t += timedelta(seconds=10)
+    eng.handle(ForeignChange("balkong_taklys", 0.0), t)  # press 1 (suppress)
+    t += timedelta(seconds=2)  # press 2 arrives 2 s later
+    eng.handle(ForeignChange("balkong_taklys", 0.9), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.occupational is True
+    assert rs.overridden is False
+    assert abs(_commanded(eng) - 0.5) < 0.05  # sitting tier

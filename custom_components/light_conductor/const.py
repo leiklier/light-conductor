@@ -295,6 +295,7 @@ EDITABLE_TUNABLES: tuple[str, ...] = (
     "outdoor_on_lux",
     "outdoor_full_lux",
     "outdoor_presence_factor",
+    "outdoor_stale_zero_window",
     "gain_range_stops",
     "gain_reset",
     "slew_step",

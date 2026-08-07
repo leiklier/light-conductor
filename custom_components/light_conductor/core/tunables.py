@@ -136,6 +136,12 @@ class Tunables:
     #: switch counts as presence for its neighbours (§1.10) — the interior must
     #: not follow the balcony into ADJACENT while it is still bright indoors.
     outdoor_presence_factor: float = 0.5  # 1.10
+    #: A foreign ZERO on an outdoor room within this many seconds of the
+    #: engine's own last write to the room is treated as a suspect stale
+    #: report (Plejd gateway re-delivery), not an off-press declaration
+    #: (§6.5b). Must stay well below the ~180 s true-state poll, which is the
+    #: legitimate corrector for genuinely lost writes.
+    outdoor_stale_zero_window: float = 45.0  # 6.5b
 
     # --- §7 master gain ----------------------------------------------------
     gain_range_stops: float = 1.0  # 7.1
@@ -168,6 +174,8 @@ class Tunables:
             raise ValueError("outdoor_full_lux must be >= 0 and below outdoor_on_lux")
         if not 0.0 < self.outdoor_presence_factor <= 1.0:
             raise ValueError("outdoor_presence_factor must be in (0, 1]")
+        if self.outdoor_stale_zero_window < 0.0:
+            raise ValueError("outdoor_stale_zero_window must be >= 0")
 
 
 def gain_multiplier(pct: float, stops: float) -> float:

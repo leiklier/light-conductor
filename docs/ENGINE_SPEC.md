@@ -497,9 +497,16 @@ hard-offs a stray dialed level. Re-submitting an unchanged state is not an
 edge, and the arbitration is inert inside the startup grace (the switch's
 restore re-submit must never clear a latch at boot).
 
-Known residual: a mesh write lost and corrected to zero by the ~3-min
-true-state poll is indistinguishable from a genuine off-press and cancels a
-sitting session (the backdrop returns; press again). Pressing OFF while
+A foreign ZERO within `outdoor_stale_zero_window` of the engine's own last
+write to the room is a SUSPECT stale report, not a declaration (the Plejd
+gateway re-delivers superseded off-states ~15-30 s after our write replaces
+them — observed live, context-free). The §9.1 latch stands but the session is
+not cancelled: a stale zero is corrected by the ~3-min poll (the true lit
+level adopts into the latch, session continues); a real press inside the
+window leaves the balcony dark exactly as pressed, with the session ending
+via the switch, sleep/away, or the timeout. The window must stay well below
+the poll interval so a genuinely lost write is still corrected as a real
+zero. Pressing OFF while
 sitting returns the backdrop within a second by design, and because wall
 buttons are hardware toggles, arriving at a lit backdrop takes two presses to
 reach the sitting tier.
@@ -696,6 +703,7 @@ override latches (not restored — cleared on restart).
 | outdoor_on_threshold | 0.7 | 6.5 |
 | outdoor_on_lux / outdoor_full_lux | 15 lx / 2 lx | 6.5a |
 | outdoor_presence_factor | 0.5 | 1.10, 6.5a |
+| outdoor_stale_zero_window | 45 s | 6.5b |
 | gain_range_stops / gain_reset | 1.0 / on | 7.1, 7.3 |
 | slew_step / slew_interval / slew_step_empty | 0.1 / 1.0 s / 0.25 | 8.2 |
 | min_delta / min_write_interval / max_inflight | 0.03 / 1.0 s / 3 | 8.3 |

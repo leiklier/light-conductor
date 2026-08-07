@@ -123,6 +123,7 @@ _TUNABLE_UI: dict[str, tuple[float, float, float]] = {
     "outdoor_on_lux": (1, 200, 1),
     "outdoor_full_lux": (0, 100, 0.5),
     "outdoor_presence_factor": (0.05, 1, 0.05),
+    "outdoor_stale_zero_window": (0, 170, 5),
     "gain_range_stops": (0.5, 3, 0.5),
     "slew_step": (0.02, 0.5, 0.01),
     "slew_interval": (0.5, 5, 0.5),
