@@ -99,7 +99,9 @@ this is exactly `E >= outdoor_on_threshold`), the room is self-active — its
 neighbours qualify for ADJACENT and, when flagged `living_group`, it keeps
 `living_recently_active` alive (§1.6) so the interior does not go dark around
 an occupant the sensors cannot see (the balcony-sitting incident). The falling
-edge stamps the normal `living_memory` decay. Away/sleep hard-offs (§6.1/§6.4)
+edge stamps the normal `living_memory` decay. The switch need not be flipped
+from HomeKit: a manual light action on the room makes the same declaration
+(§6.5b). Away/sleep hard-offs (§6.1/§6.4)
 still win, and §6.5's away-mode handling of the switch is unchanged.
 
 ## 2. Illuminance targets & circadian shaping
@@ -456,6 +458,33 @@ or the bootstrap (§4.4) — its sensor is a dusk measurement, not a control
 feedback path — so it exposes no target-lux and no calibration button, and its
 own contribution to that sensor (a balcony lamp seen through a window) stays in
 N̂'s own-light term rather than driving a loop.
+
+6.5b **Manual light action declares presence** (outdoor rooms). An outdoor
+room has no presence sensing — its occupational switch IS its presence, a
+declaration (§1.10). A manual on/off on the room's lights (wall-dimmer button,
+app, voice — any §9.1 foreign change) is the same declaration made physically:
+
+- **ON edge** (room dark → lit): occupational turns ON.
+- **OFF edge** (room lit → dark) while occupational is ON: occupational turns
+  OFF; the room returns to mode resolution (dusk backdrop per 6.5/6.5a, or
+  dark by day).
+- **OFF edge** while occupational is already OFF is *not* a declaration — the
+  user is suppressing the ambient backdrop; the plain §9.1 latch stands.
+- A level change with no edge (dialing while lit) adjusts brightness, not
+  presence: latch stands, occupational untouched.
+
+An occupational edge from ANY source (6.5b edge or the switch entity) also
+arbitrates the room's override latch: a falling edge releases it always (a
+declared absence must not leave a latched dial level burning for
+`override_timeout`); a rising edge releases it only when `D_out > 0`, so the
+conductor's sitting tier takes over at dusk while a daylight press keeps the
+user's own level (releasing at `D_out = 0` would resolve OFF and instantly
+counter the press). To make the daylight case hold, the outdoor daylight-OFF
+resolution *respects* a latched override while occupational is on (it is the
+one OFF that does; sleep/away hard-offs still release and win, and with
+occupational off the morning descent still hard-offs a stray dialed level).
+Re-submitting an unchanged state (e.g. the switch's restore re-submit at boot)
+never releases anything.
 
 6.6 **Vacation.** If `vacation_entity` is configured and on, away rules apply
 regardless of presence, except an optional simple presence-simulation is out

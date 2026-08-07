@@ -418,6 +418,46 @@ Consequence for the adapter: the lux index becomes entity → *rooms*. It was
 entity → room, so sharing a sensor would have silently starved whichever room
 lost the collision of its lux feed.
 
+## D20. The balcony wall button toggles "sitting outside" (beta.14)
+
+User request 2026-08-07 (same evening as D19): pressing the physical dimmer
+button for the balcony should count as toggling the occupational switch.
+
+The insight that makes this clean: an outdoor room has NO presence sensing —
+the occupational switch is not a preference, it IS the room's presence, as a
+declaration (§1.10). A manual light action on that room is the same declaration
+made physically, so it belongs in the §9.1 foreign-change funnel (covers wall
+button, Plejd app, HomeKit, voice — not just one event entity), mapped by edge:
+room-dark→lit ⇒ occupational on; lit→dark while occupational on ⇒ occupational
+off; lit→dark while already off ⇒ NOT a declaration (backdrop suppression — the
+plain latch stands, room stays dark); dial-while-lit ⇒ brightness only.
+
+Override arbitration on the edge (any source, button or switch): falling edge
+always releases (declared absence returning to mode resolution — backdrop at
+dusk, off by day; without this, HomeKit-off after a dial would leave the dialed
+level burning for override_timeout). Rising edge releases only at D_out > 0:
+at dusk the conductor's sitting tier takes over within a cycle; in daylight
+the mode resolves OFF and releasing would counter the very press that made the
+declaration (the beta.8/soverom cardinal sin) — there the latch keeps the
+user's level. Re-submitting an unchanged state never releases (the switch's
+RestoreEntity re-submit at boot must not clear latches).
+
+Building the daylight case surfaced a pre-existing behaviour: the outdoor
+daylight-OFF resolution was shaped exactly like a sleep/away hard-off, so ANY
+daylight press on the balcony was released-and-countered within a cycle (nobody
+had noticed — who lights a balcony at noon?). Now that a press is a
+declaration, `RoomResolution.respect_override` marks the dusk-OFF as
+override-respecting while occupational is on; sleep/away are untouched and an
+undeclared room keeps the morning hard-off cleanup.
+
+Known consequences, accepted: pressing OFF while sitting returns the backdrop
+(~15 %) within a second — that is what "sitting outside off at dusk" means
+(§6.5); and because Plejd buttons are hardware toggles, arriving at a lit
+backdrop takes two presses to reach the sitting tier (off, then on). The
+adapter needs no changes: OccupationalSwitch.is_on already reads engine state
+and every entity refreshes on each engine cycle, so a button-driven flip
+appears in HomeKit automatically.
+
 ## Open questions — RESOLVED (user, 2026-07-25)
 
 - **Q1 (D8):** master dimmer neutral at 50 % — confirmed (boost possible).

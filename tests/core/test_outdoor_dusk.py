@@ -13,9 +13,11 @@ from datetime import datetime, timedelta
 from custom_components.light_conductor.core import modes, targets
 from custom_components.light_conductor.core.engine import Engine
 from custom_components.light_conductor.core.events import (
+    ForeignChange,
     LuxReport,
     OccupationalChanged,
     ReviewTick,
+    SleepChanged,
     SunElevationChanged,
 )
 from custom_components.light_conductor.core.model import (
@@ -258,4 +260,133 @@ def test_morning_release_follows_the_light_not_the_sun_ramp() -> None:
     t = _feed(eng, 1.0, t, n=40)
     assert _commanded(eng) > 0.0  # lit through the night
     t = _feed(eng, 155.0, t, n=60)  # morning light at the window
+    assert _commanded(eng) == 0.0
+
+
+# --- §6.5b: manual light action declares presence -------------------------
+
+
+def _dusk_engine(*, occupational: bool = False) -> tuple[Engine, datetime]:
+    """Balcony + neighbour, fully dark by measurement (dusk factor 1)."""
+    eng, t = _booted(occupational=occupational)
+    t = _feed(eng, TUN.outdoor_full_lux, t, n=40)
+    return eng, t
+
+
+def test_button_on_at_dusk_declares_sitting_outside() -> None:
+    """ON edge: the room goes occupational and the conductor's sitting tier
+    takes over (the latch releases at D_out > 0)."""
+    eng, t = _dusk_engine()
+    assert abs(_commanded(eng) - 0.2) < 0.05  # backdrop, not sitting
+    # Backdrop must first be suppressed (hardware toggle: press 1 = off) —
+    # occupational is off, so this is NOT a declaration and the latch holds.
+    t += timedelta(seconds=10)
+    eng.handle(ForeignChange("balkong_taklys", 0.0), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.occupational is False and rs.overridden is True
+    assert _commanded(eng) == 0.0  # stays dark: backdrop suppressed, not relit
+    # Press 2 = on: the declaration.
+    t += timedelta(seconds=10)
+    eng.handle(ForeignChange("balkong_taklys", 0.9), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.occupational is True
+    assert rs.overridden is False  # released: the tier governs, not the 0.9
+    assert abs(_commanded(eng) - 0.5) < 0.05  # out_active_evening
+    assert rs.self_active is True  # §1.10 presence mirrors at full dusk
+
+
+def test_button_off_while_sitting_returns_the_backdrop() -> None:
+    """OFF edge while occupational: declared absence — mode resolution returns
+    the dusk backdrop instead of leaving the room latched dark."""
+    eng, t = _dusk_engine(occupational=True)
+    assert abs(_commanded(eng) - 0.5) < 0.05
+    t += timedelta(seconds=10)
+    eng.handle(ForeignChange("balkong_taklys", 0.0), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.occupational is False
+    assert rs.overridden is False
+    assert abs(_commanded(eng) - 0.2) < 0.05  # backdrop, within the same cycle
+
+
+def test_daylight_button_press_is_never_countered() -> None:
+    """ON edge at D_out = 0: occupational flips on, but the latch KEEPS the
+    user's level — releasing would resolve OFF and counter the press."""
+    eng, t = _booted()  # sun high, no lux fed => stale => E gate => dusk 0
+    t += timedelta(seconds=TUN.lux_stale + 60)
+    eng.handle(ReviewTick(), t)
+    t += timedelta(seconds=10)
+    eng.handle(ForeignChange("balkong_taklys", 0.7), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.occupational is True  # the declaration is still made
+    assert rs.overridden is True  # ...but the latch protects the press
+    assert rs.channels["balkong_taklys"].commanded_b == 0.7  # adopted, not off
+
+
+def test_dial_while_sitting_keeps_occupational_and_latches() -> None:
+    """No edge (lit -> lit): brightness adjustment, not a presence change."""
+    eng, t = _dusk_engine(occupational=True)
+    t += timedelta(seconds=10)
+    eng.handle(ForeignChange("balkong_taklys", 0.9), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.occupational is True
+    assert rs.overridden is True
+    assert rs.channels["balkong_taklys"].commanded_b == 0.9
+
+
+def test_switch_off_releases_a_dialed_override() -> None:
+    """The same arbitration from the switch entity: HomeKit-off after a dial
+    returns the backdrop instead of burning the dialed level for 4 h."""
+    eng, t = _dusk_engine(occupational=True)
+    t += timedelta(seconds=10)
+    eng.handle(ForeignChange("balkong_taklys", 0.9), t)  # dial: latch at 0.9
+    assert eng.state.rooms["balkong"].overridden is True
+    t += timedelta(seconds=10)
+    eng.handle(OccupationalChanged("balkong", False), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.overridden is False
+    assert abs(_commanded(eng) - 0.2) < 0.05  # backdrop
+
+
+def test_unchanged_resubmit_never_releases() -> None:
+    """The switch's restore re-submit at boot must not clear latches."""
+    eng, t = _dusk_engine(occupational=True)
+    t += timedelta(seconds=10)
+    eng.handle(ForeignChange("balkong_taklys", 0.9), t)  # dial: latch
+    t += timedelta(seconds=10)
+    eng.handle(OccupationalChanged("balkong", True), t)  # same state re-submitted
+    assert eng.state.rooms["balkong"].overridden is True
+    assert eng.state.rooms["balkong"].channels["balkong_taklys"].commanded_b == 0.9
+
+
+def test_daylight_latch_survives_reviews_but_sleep_still_wins() -> None:
+    """The respected daylight latch is not countered by later recomputes; a
+    sleep hard-off still releases and darkens (§6.1 wins over 6.5b)."""
+    eng, t = _booted()
+    t += timedelta(seconds=TUN.lux_stale + 60)
+    eng.handle(ReviewTick(), t)
+    t += timedelta(seconds=10)
+    eng.handle(ForeignChange("balkong_taklys", 0.7), t)
+    t += timedelta(seconds=300)
+    eng.handle(ReviewTick(), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.overridden is True
+    assert rs.channels["balkong_taklys"].commanded_b == 0.7
+    t += timedelta(seconds=10)
+    eng.handle(SleepChanged(True), t)
+    rs = eng.state.rooms["balkong"]
+    assert rs.overridden is False
+    assert _commanded(eng) == 0.0
+
+
+def test_morning_descent_still_cleans_up_an_undeclared_override() -> None:
+    """With occupational OFF the dusk-OFF stays a hard-off: a stray dial from
+    the evening is released and darkened when daylight returns (pre-6.5b)."""
+    eng, t = _dusk_engine()  # backdrop lit, occupational off
+    t += timedelta(seconds=10)
+    eng.handle(ForeignChange("balkong_taklys", 0.9), t)  # dial the backdrop up
+    assert eng.state.rooms["balkong"].overridden is True
+    assert eng.state.rooms["balkong"].occupational is False  # no edge: was lit
+    t = _feed(eng, 155.0, t, n=60)  # morning light returns
+    rs = eng.state.rooms["balkong"]
+    assert rs.overridden is False
     assert _commanded(eng) == 0.0

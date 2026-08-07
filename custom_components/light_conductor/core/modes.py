@@ -35,6 +35,10 @@ class RoomResolution:
     off: bool = False
     fade: float | None = None
     suppress_override: bool = False
+    #: An OFF that must NOT release a latched override (rule 6.5b): the outdoor
+    #: daylight-OFF while occupational is on — a declared occupant's manual
+    #: daylight level must stand. Sleep/away hard-offs never set this.
+    respect_override: bool = False
 
 
 def is_away(state: EngineState) -> bool:
@@ -121,7 +125,17 @@ def _outdoor(
     if dusk is None:
         dusk = 1.0 if e >= tun.outdoor_on_threshold else 0.0
     if dusk <= 0.0:
-        return RoomResolution(Role.OFF, off=True, gain_exempt=True)
+        # Daylight OFF. While an occupant is DECLARED (occupational on, not
+        # away), a latched manual level stands — hard-offing would counter the
+        # very press that §6.5b just turned into the declaration. With no
+        # declared occupant this stays the pre-6.5b hard-off, so a stray
+        # dialed level is still cleaned up on the morning descent.
+        return RoomResolution(
+            Role.OFF,
+            off=True,
+            gain_exempt=True,
+            respect_override=rs.occupational and not ignore_occupational,
+        )
     if rs.occupational and not ignore_occupational:
         # "Sitting outside": brighter evening level at a slightly cooler CT.
         return RoomResolution(
