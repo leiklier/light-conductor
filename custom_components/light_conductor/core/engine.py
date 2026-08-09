@@ -55,6 +55,7 @@ from .events import (
 )
 from .model import (
     BAND_ORDER,
+    Band,
     ChannelState,
     EngineConfig,
     EngineState,
@@ -65,6 +66,7 @@ from .model import (
     RoomDiagnostics,
     RoomShape,
     RoomState,
+    TvState,
 )
 from .photometry import RoomPhotometry
 from .plan import CalibrationResult, Command, Plan
@@ -119,7 +121,7 @@ class Engine:
         s.anyone_home = snap.anyone_home
         s.vacation = snap.vacation
         s.away_lighting = snap.away_lighting
-        s.tv_playing = snap.tv_playing
+        s.tv = snap.tv
         s.master_on = snap.master_on
         s.master_pct = snap.master_pct
         for room in self.config.rooms:
@@ -186,7 +188,7 @@ class Engine:
             case VacationChanged():
                 s.vacation = event.active
             case TvChanged():
-                s.tv_playing = event.playing
+                self._on_tv(event.tv, now)
             case NightTriggerFired():
                 if s.sleep:
                     s.night_active = True
@@ -220,6 +222,39 @@ class Engine:
                     self._cal_requests.append(event.room_id)
             case _:
                 pass
+
+    def _on_tv(self, tv: TvState, now: datetime) -> None:
+        """Fold a tri-state TV transition, arming the pause grace (rules 6.3/6.3a).
+
+        Only the PLAYING → ON edge starts the hold: a pause (or the Apple TV's
+        brief idle blips mid-playback) keeps the playing level for
+        ``tv_pause_grace`` so a rewind never walks the lights up and back down.
+        Every other transition clears it — resuming dims down at once, and
+        switching the TV off restores normal lighting immediately rather than
+        waiting out a grace the user just ended themselves.
+        """
+        s = self.state
+        if tv is s.tv:
+            return
+        if s.tv is TvState.PLAYING and tv is TvState.ON and self.tun.tv_pause_grace > 0.0:
+            s.tv_hold_until = now + timedelta(seconds=self.tun.tv_pause_grace)
+        else:
+            s.tv_hold_until = None
+        s.tv = tv
+
+    def _effective_tv(self, now: datetime, plan: Plan) -> TvState:
+        """The TV state the modes act on (rule 6.3a): raw, held at PLAYING.
+
+        Schedules the review that ends the hold, so the step up to the ON cap
+        happens on time in a house where nothing else is moving.
+        """
+        s = self.state
+        if s.tv_hold_until is not None:
+            if now < s.tv_hold_until:
+                plan.review_at(s.tv_hold_until)
+                return TvState.PLAYING
+            s.tv_hold_until = None
+        return s.tv
 
     def _on_lux(self, event: LuxReport, now: datetime) -> None:
         room = self.config.room(event.room_id)
@@ -557,6 +592,10 @@ class Engine:
             else:
                 plan.review_at(s.night_hold_until)
 
+        # Effective TV state (rules 6.3/6.3a): the raw tri-state, held at
+        # PLAYING while the pause grace runs (self-scheduling its own expiry).
+        tv = self._effective_tv(now, plan)
+
         # Morning neutral drift (rule 7.3): edge-triggered on the E>0 -> E==0
         # morning transition, so booting at midday never resets a restored gain.
         if s.last_e is not None and s.last_e > 0.0 and e == 0.0:
@@ -605,6 +644,7 @@ class Engine:
                     night_expiring,
                     plan,
                     dusk.get(room.room_id),
+                    tv,
                 )
             )
 
@@ -651,6 +691,7 @@ class Engine:
         night_expiring: bool,
         plan: Plan,
         dusk: float | None = None,
+        tv: TvState = TvState.OFF,
     ) -> RoomDiagnostics:
         s, tun = self.state, self.tun
         rs = s.rooms[room.room_id]
@@ -660,7 +701,7 @@ class Engine:
         base = roles.base_role(
             rs, room.shape, room.profile.vacancy, neighbour_active, living, evening
         )
-        res = modes.resolve(room, rs, s, e, tun, night_expiring, dusk)
+        res = modes.resolve(room, rs, s, e, tun, night_expiring, dusk, tv)
         off_worthy = base is Role.OFF and not rs.self_active
 
         # Override arbitration (rule 9): mode hard-offs and night path win.
@@ -698,6 +739,9 @@ class Engine:
         ct_override: int | None = None
         fade: float | None = None
         photo = self._photo[room.room_id]
+        # TV ON cap (rule 6.3): only on the normal path — a mode resolution
+        # (sleep/away/night/outdoor/TV playing) already owns the room.
+        tv_ceiling = modes.tv_cap(room, rs, tv) if res is None else None
         # Closed-loop only when the sensor is fresh AND the room's gains are
         # trustworthy — calibrated, or bootstrap-confident (F1a). An untrusted
         # lux room runs the open-loop tables (safe by construction) while it
@@ -732,7 +776,7 @@ class Engine:
         elif closed:
             role = base
             channel_b, correcting, target_lux = self._closed_loop(
-                room, rs, base, prev_role, e, g, now, photo, capacity, plan
+                room, rs, base, prev_role, e, g, now, photo, capacity, plan, tv_ceiling
             )
         else:
             role = base
@@ -753,6 +797,16 @@ class Engine:
             outputs = gain.scale(outputs, g)
             outputs = targets.apply_evening_cap(outputs, e, room.profile, tun)
             channel_b = photometry.allocate(room.channels, outputs, e, tun)
+
+        # The TV ON ceiling is the LAST word on output (rule 6.3): applied to the
+        # final per-channel values, after weight share, response mapping and the
+        # closed loop alike, so it holds however the room got there. It can only
+        # take light away — a room the tier path already leaves darker stays put.
+        if tv_ceiling is not None:
+            channel_b = {
+                ch.channel_id: min(channel_b[ch.channel_id], tv_ceiling.get(ch.band, 1.0))
+                for ch in room.channels
+            }
 
         rs.role = role
 
@@ -836,6 +890,7 @@ class Engine:
         photo: RoomPhotometry,
         capacity: float,
         plan: Plan,
+        tv_ceiling: Mapping[Band, float] | None = None,
     ) -> tuple[dict[str, float], bool, float]:
         """Feed-forward closed-loop control for one room (§3.6/§4.5).
 
@@ -850,6 +905,17 @@ class Engine:
         t_prime = estimator.target_lux(rs, role, room.profile, e, g, tun, capacity)
         a_now = estimator.a_hat(rs, photo)
         n = rs.est.n_hat
+        if tv_ceiling is not None:
+            # A TV ON ceiling (rule 6.3) makes part of the lux target physically
+            # unreachable. Clamp the target to what the ceilinged outputs can
+            # actually deliver, so the loop parks satisfied at the ceiling
+            # instead of re-arming its sustain against an error it can never
+            # close (and the published target_lux stays honest).
+            reachable = rs.est.gain_mult * sum(
+                photo.gain(ch.channel_id) * photo.flux(ch.channel_id, tv_ceiling.get(ch.band, 1.0))
+                for ch in room.channels
+            )
+            t_prime = min(t_prime, n + reachable)
         # Capacity-scaled control deadband (§3.6) — see estimator.control_deadband:
         # the absolute component is capped at a fraction of the room capacity so a
         # low-capacity room can reach targets below the fixed 5-lx floor.

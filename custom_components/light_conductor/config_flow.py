@@ -77,6 +77,8 @@ from .const import (
     CONF_TV_MODE,
     CONF_TV_OUTPUT,
     CONF_TV_OUTPUT_EMPTY,
+    CONF_TV_OUTPUT_PAUSED,
+    CONF_TV_OUTPUT_PAUSED_EMPTY,
     CONF_VACANCY,
     CONF_VACATION_ENTITY,
     CONF_WALL_EVENTS,
@@ -86,6 +88,8 @@ from .const import (
     DEFAULT_NIGHT_OUTPUT,
     DEFAULT_TV_OUTPUT,
     DEFAULT_TV_OUTPUT_EMPTY,
+    DEFAULT_TV_OUTPUT_PAUSED,
+    DEFAULT_TV_OUTPUT_PAUSED_EMPTY,
     DOMAIN,
     EDITABLE_TUNABLES,
     RUNTIME_OPTION_KEYS,
@@ -117,6 +121,7 @@ _TUNABLE_UI: dict[str, tuple[float, float, float]] = {
     "min_closed_loop_capacity": (0, 50, 0.5),
     "daylight_full": (20, 1000, 10),
     "night_hold": (60, 1800, 30),
+    "tv_pause_grace": (0, 900, 10),
     "night_fade": (0, 60, 1),
     "sleep_fade": (0, 60, 1),
     "outdoor_on_threshold": (0, 1, 0.05),
@@ -230,6 +235,8 @@ def _default_profile() -> dict[str, Any]:
         CONF_NIGHT_OUTPUT: DEFAULT_NIGHT_OUTPUT,
         CONF_TV_OUTPUT: DEFAULT_TV_OUTPUT,
         CONF_TV_OUTPUT_EMPTY: DEFAULT_TV_OUTPUT_EMPTY,
+        CONF_TV_OUTPUT_PAUSED: DEFAULT_TV_OUTPUT_PAUSED,
+        CONF_TV_OUTPUT_PAUSED_EMPTY: DEFAULT_TV_OUTPUT_PAUSED_EMPTY,
     }
 
 
@@ -497,6 +504,8 @@ class LightConductorOptionsFlow(OptionsFlow):
                 CONF_NIGHT_OUTPUT,
                 CONF_TV_OUTPUT,
                 CONF_TV_OUTPUT_EMPTY,
+                CONF_TV_OUTPUT_PAUSED,
+                CONF_TV_OUTPUT_PAUSED_EMPTY,
             ):
                 if key in user_input:
                     profile[key] = user_input[key]
@@ -568,6 +577,16 @@ class LightConductorOptionsFlow(OptionsFlow):
                     CONF_TV_OUTPUT_EMPTY,
                     default=profile.get(CONF_TV_OUTPUT_EMPTY, DEFAULT_TV_OUTPUT_EMPTY),
                 ): _pct(DEFAULT_TV_OUTPUT_EMPTY),
+                vol.Optional(
+                    CONF_TV_OUTPUT_PAUSED,
+                    default=profile.get(CONF_TV_OUTPUT_PAUSED, DEFAULT_TV_OUTPUT_PAUSED),
+                ): _pct(DEFAULT_TV_OUTPUT_PAUSED),
+                vol.Optional(
+                    CONF_TV_OUTPUT_PAUSED_EMPTY,
+                    default=profile.get(
+                        CONF_TV_OUTPUT_PAUSED_EMPTY, DEFAULT_TV_OUTPUT_PAUSED_EMPTY
+                    ),
+                ): _pct(DEFAULT_TV_OUTPUT_PAUSED_EMPTY),
                 # Closed-loop lux tiers (§2.1): optional; prefilled via
                 # suggested_value so a blank submission CLEARS the field ⇒ auto
                 # (a capacity fraction). Only meaningful for a room with a lux

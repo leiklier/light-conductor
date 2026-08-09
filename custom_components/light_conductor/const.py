@@ -105,6 +105,8 @@ CONF_EVENING_CAP = "evening_output_cap"
 CONF_NIGHT_OUTPUT = "night_output"
 CONF_TV_OUTPUT = "tv_output"
 CONF_TV_OUTPUT_EMPTY = "tv_output_empty"
+CONF_TV_OUTPUT_PAUSED = "tv_output_paused"
+CONF_TV_OUTPUT_PAUSED_EMPTY = "tv_output_paused_empty"
 #: Closed-loop lux tiers (lx) for a room with a lux sensor (§2.1). Absent or 0
 #: means UNSET ⇒ the engine auto-targets a fraction of the room's calibrated
 #: capacity; an explicit value overrides that default.
@@ -144,6 +146,11 @@ DEFAULT_BACKGROUND = 0.08
 DEFAULT_NIGHT_OUTPUT = 0.05
 DEFAULT_TV_OUTPUT = 0.15
 DEFAULT_TV_OUTPUT_EMPTY = 0.0
+# TV ON (paused / powered on, not playing) CEILINGS on the normal tier path
+# (rule 6.3) — deliberately well above the playing tiers: the room keeps its own
+# lighting, just held below "let us watch something" brightness.
+DEFAULT_TV_OUTPUT_PAUSED = 0.3
+DEFAULT_TV_OUTPUT_PAUSED_EMPTY = 0.15
 
 
 def _band_map(value: float) -> dict[Band, float]:
@@ -164,6 +171,8 @@ def _profile_from_options(opts: Mapping[str, Any]) -> Profile:
     night = float(opts.get(CONF_NIGHT_OUTPUT, DEFAULT_NIGHT_OUTPUT))
     tv = float(opts.get(CONF_TV_OUTPUT, DEFAULT_TV_OUTPUT))
     tv_empty = float(opts.get(CONF_TV_OUTPUT_EMPTY, DEFAULT_TV_OUTPUT_EMPTY))
+    tv_paused = float(opts.get(CONF_TV_OUTPUT_PAUSED, DEFAULT_TV_OUTPUT_PAUSED))
+    tv_paused_empty = float(opts.get(CONF_TV_OUTPUT_PAUSED_EMPTY, DEFAULT_TV_OUTPUT_PAUSED_EMPTY))
     # Closed-loop lux tiers (§2.1): absent/blank ⇒ 0.0 = auto (capacity fraction).
     lux_day = float(opts.get(CONF_LUX_ACTIVE_DAY) or 0.0)
     lux_evening = float(opts.get(CONF_LUX_ACTIVE_EVENING) or 0.0)
@@ -177,6 +186,8 @@ def _profile_from_options(opts: Mapping[str, Any]) -> Profile:
         night_output=_band_map(night),
         tv_output=_band_map(tv),
         tv_output_empty=_band_map(tv_empty),
+        tv_output_paused=_band_map(tv_paused),
+        tv_output_paused_empty=_band_map(tv_paused_empty),
         lux_active_day=lux_day,
         lux_active_evening=lux_evening,
         lux_background=lux_background,
@@ -291,6 +302,7 @@ EDITABLE_TUNABLES: tuple[str, ...] = (
     "night_hold",
     "night_fade",
     "sleep_fade",
+    "tv_pause_grace",
     "outdoor_on_threshold",
     "outdoor_on_lux",
     "outdoor_full_lux",

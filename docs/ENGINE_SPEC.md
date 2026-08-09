@@ -52,7 +52,7 @@ door sensor), and the adjacency list (other room ids configured as neighbours).
 | `BACKGROUND` | not occupied, no active neighbour, but the house is awake and the living area is in use |
 | `OFF` | no light warranted |
 | `NIGHT_PATH` | night-movement episode (§6.2) |
-| `TV` | room participates in TV mode (§6.3) |
+| `TV` | a TV is playing and the room joins TV mode (§6.3) |
 
 Role priority when multiple qualify: NIGHT_PATH > TV > ACTIVE > ADJACENT >
 BACKGROUND > OFF.
@@ -373,8 +373,10 @@ lamps barely move the sensor — that is precisely what "untrusted" means here,
 §3.1). This replicates the legacy `100 − 0.5·lux` daytime damping for rooms
 whose sensors are good daylight meters but nearly blind to their own lamps:
 bright daylight pulls the tables down, darkness leaves them at full.
-NIGHT_PATH, TV, and outdoor outputs are **not** daylight-scaled — they are mode
-tables (§6), not tier outputs. Lux staleness falls back to unscaled open-loop
+NIGHT_PATH, TV (playing) and outdoor outputs are **not** daylight-scaled — they
+are mode tables (§6), not tier outputs. The TV **ON** cap (§6.3) is the one
+mode input that composes with `D`: it clamps the already-damped tier output,
+so daylight and the cap can only agree to make the room dimmer. Lux staleness falls back to unscaled open-loop
 exactly as today (`D → 1` when `N̂` is unavailable). `daylight_full`
 (default 200 lx) and `daylight_min_factor` (default 0.0) are §12 tunables.
 
@@ -411,12 +413,50 @@ to `ct_min_evening`), everything else stays OFF. The episode holds for
 `night_hold` (default 600 s) after the last trigger, restartable, then fades
 out over `night_fade` (10 s). Master gain does not scale night path (§7.4).
 
-6.3 **TV mode.** `tv_entities` playing (any) ⇒ rooms with a `tv_output`
-profile entry switch to role TV at that output (spisebord 15 %→occupied /
-5 %→empty semantics become: `tv_output` when ACTIVE, `tv_output_empty`
-otherwise; sofakrok keeps a low glow when occupied, 0 when not; gang dims).
-TV ending re-evaluates roles — rooms *restore* (the legacy gang light that
-stayed dimmed forever now recovers).
+6.3 **TV mode (tri-state).** The configured `tv_entities` resolve to exactly
+one TV state, highest first:
+
+| state | when |
+|---|---|
+| `PLAYING` | any entity is `playing` or `buffering` |
+| `ON` | any entity is `on`, `paused` or `idle` — powered on, not playing |
+| `OFF` | everything else (`off`, `standby`, `unavailable`, `unknown`, none configured) |
+
+The three states drive three different levels of light in rooms flagged
+`tv_mode`:
+
+- **PLAYING** ⇒ the room switches to role TV and takes its profile's
+  `tv_output` table when ACTIVE, `tv_output_empty` otherwise (sofakrok keeps a
+  low glow when occupied, 0 when not; spisebord 15 %→occupied / 5 %→empty;
+  gang dims). These are *commanded* values — the room is pinned to them, and
+  the §4.7 daylight factor does not apply (they are mode tables, not tiers).
+- **ON** ⇒ the room keeps its normal role and its normal tier path (open- or
+  closed-loop), but every channel is **capped** at its band's
+  `tv_output_paused` (room ACTIVE) or `tv_output_paused_empty` (otherwise):
+  `b_i ← min(b_i, cap_band(i))`. A cap only ever takes light away, never adds
+  it, so a room the tier path already leaves dark stays dark and a TV merely
+  switched on at 09:00 in daylight changes nothing (the §4.7 damping has
+  already put the room below the cap). The cap is the LAST step before the §8
+  governor and applies identically to the open-loop (§4.6/4.7) and closed-loop
+  (§3.6/4.5) per-channel outputs.
+- **OFF** ⇒ TV mode contributes nothing; roles are re-evaluated and rooms
+  *restore* (the legacy gang light that stayed dimmed forever now recovers).
+
+The published role stays the room's underlying role while the ON cap governs —
+the cap modifies outputs, not the FSM. Role `TV` means PLAYING. Precedence is
+unchanged: sleep (6.1), night path (6.2) and away (6.4) all resolve before TV,
+an outdoor room (6.5) ignores TV entirely, and a latched manual override (§9)
+outranks both TV levels.
+
+6.3a **Pause grace.** Leaving PLAYING for ON holds the PLAYING resolution for
+`tv_pause_grace` (default 120 s) before the ON cap takes over, so a rewind or a
+short pause does not walk the room lights up and straight back down. Resuming
+inside the grace is a complete no-op — the room never left its playing level.
+Any transition to PLAYING or to OFF clears the hold at once: resuming dims down
+immediately, and switching the TV off restores normal lighting without waiting
+out the grace. The engine self-schedules a review at the hold expiry (rule 0),
+so the step up happens on time in an otherwise quiet house. `tv_pause_grace`
+= 0 disables the hold.
 
 6.4 **Away.** `anyone_home is False` ⇒ every indoor room OFF. Outdoor rooms
 keep their dusk background (6.5) as presence simulation while the
@@ -711,6 +751,7 @@ override latches (not restored — cleared on restart).
 | warm_dim_output | 0.3 | 5.3 |
 | ct_min_delta | 100 K | 5.4 |
 | sleep_fade / night_hold / night_fade | 4 s / 600 s / 10 s | 6.1, 6.2 |
+| tv_pause_grace | 120 s | 6.3a |
 | outdoor_on_threshold | 0.7 | 6.5 |
 | outdoor_on_lux / outdoor_full_lux | 15 lx / 2 lx | 6.5a |
 | outdoor_presence_factor | 0.5 | 1.10, 6.5a |

@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 from custom_components.light_conductor.core import modes
-from custom_components.light_conductor.core.model import Band, EngineState, Role, RoomState
+from custom_components.light_conductor.core.model import (
+    Band,
+    EngineState,
+    Role,
+    RoomState,
+    TvState,
+)
 from custom_components.light_conductor.core.tunables import Tunables
 
 from .helpers import apartment
@@ -54,11 +60,11 @@ def test_sleep_off_except_night_path() -> None:
 
 def test_tv_ladder_occupied_vs_empty() -> None:
     """§6.3: TV output when the room is occupied, tv_output_empty otherwise."""
-    playing = EngineState(tv_playing=True)
+    playing = EngineState(tv=TvState.PLAYING)
     occupied = RoomState(self_active=True)
     empty = RoomState(self_active=False)
-    res_occ = modes.resolve(_room("spisebord"), occupied, playing, 0.5, TUN)
-    res_empty = modes.resolve(_room("spisebord"), empty, playing, 0.5, TUN)
+    res_occ = modes.resolve(_room("spisebord"), occupied, playing, 0.5, TUN, tv=TvState.PLAYING)
+    res_empty = modes.resolve(_room("spisebord"), empty, playing, 0.5, TUN, tv=TvState.PLAYING)
     assert res_occ.band_outputs == {Band.PRIMARY: 0.15}
     assert res_empty.band_outputs == {Band.PRIMARY: 0.05}
     assert res_occ.role is Role.TV
@@ -67,6 +73,24 @@ def test_tv_ladder_occupied_vs_empty() -> None:
 def test_tv_absent_hands_back_to_role_path() -> None:
     """No TV playing => modes yield to the normal role path."""
     assert modes.resolve(_room("spisebord"), RoomState(), EngineState(), 0.0, TUN) is None
+
+
+def test_tv_on_hands_back_and_caps_instead() -> None:
+    """§6.3: TV ON (paused / powered on) never RESOLVES the room — it caps it."""
+    on = EngineState(tv=TvState.ON)
+    occupied = RoomState(self_active=True)
+    assert modes.resolve(_room("spisebord"), occupied, on, 0.5, TUN, tv=TvState.ON) is None
+    assert modes.tv_cap(_room("spisebord"), occupied, TvState.ON) == {Band.PRIMARY: 0.3}
+    assert modes.tv_cap(_room("spisebord"), RoomState(), TvState.ON) == {Band.PRIMARY: 0.15}
+
+
+def test_tv_cap_only_for_tv_rooms_while_on() -> None:
+    """§6.3: no ceiling when the TV is off or playing, or the room opts out."""
+    occupied = RoomState(self_active=True)
+    assert modes.tv_cap(_room("spisebord"), occupied, TvState.OFF) is None
+    # PLAYING is a mode resolution (the TV table), not a ceiling.
+    assert modes.tv_cap(_room("spisebord"), occupied, TvState.PLAYING) is None
+    assert modes.tv_cap(_room("kontor"), occupied, TvState.ON) is None  # tv_mode off
 
 
 def test_outdoor_dusk_on_and_occupational() -> None:

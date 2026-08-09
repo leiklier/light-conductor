@@ -38,11 +38,12 @@ from custom_components.light_conductor.core.model import (
     Profile,
     Role,
     RoomConfig,
+    TvState,
     Vacancy,
 )
 from custom_components.light_conductor.core.plan import SetChannel, TurnOffChannel
 
-from .helpers import apartment, at, diag, offs, review, sets
+from .helpers import apartment, at, diag, offs, review, sets, timedelta
 
 DAY_SUN = 20.0
 NIGHT_SUN = -8.0
@@ -82,7 +83,7 @@ def test_spisebord_tv_ladder_occupied_then_empty() -> None:
     """§6.3: TV output is 15 % occupied / 5 % empty (spisebord ladder)."""
     eng = _engine()
     eng.handle(PresenceChanged("spisebord", True), at(1, 20, 0))
-    occ = eng.handle(TvChanged(True), at(1, 20, 1))
+    occ = eng.handle(TvChanged(TvState.PLAYING), at(1, 20, 1))
     assert eng.state.rooms["spisebord"].role is Role.TV
     assert "spisebord_taklys" in sets(occ)  # TV glow commanded
     occ_target = diag(occ, "spisebord").target_output  # ~0.15
@@ -102,17 +103,109 @@ def test_gang_tv_dim_then_restores_after_tv_off() -> None:
     gang light that stayed dimmed forever now recovers."""
     eng = _engine()
     eng.handle(PresenceChanged("sofakrok", True), at(1, 21, 0))  # living area active
-    dim = sets(eng.handle(TvChanged(True), at(1, 21, 1)))
+    dim = sets(eng.handle(TvChanged(TvState.PLAYING), at(1, 21, 1)))
     assert eng.state.rooms["gang"].role is Role.TV
     assert "gang_taklys" in dim
     dimmed_level = eng.state.rooms["gang"].channels["gang_taklys"].commanded_b
 
     # TV ends: gang re-evaluates to its corridor role (sofakrok still active =>
     # ADJACENT) and brightens away from the 5 % TV dim.
-    restore = sets(eng.handle(TvChanged(False), at(1, 21, 30)))
+    restore = sets(eng.handle(TvChanged(TvState.OFF), at(1, 21, 30)))
     assert eng.state.rooms["gang"].role is Role.ADJACENT
     assert eng.state.rooms["gang"].channels["gang_taklys"].commanded_b > dimmed_level
     assert "gang_taklys" in restore
+
+
+# --- §6.3/6.3a: TV ON cap + pause grace ---------------------------------
+
+
+def test_tv_on_caps_the_tier_path_without_taking_the_room() -> None:
+    """§6.3: TV on-but-not-playing keeps the room's own role and merely ceilings
+    its output at the paused table (spisebord ACTIVE ~0.7 -> cap 0.3)."""
+    eng = _engine()
+    active = eng.handle(PresenceChanged("spisebord", True), at(1, 20, 0))
+    assert diag(active, "spisebord").target_output > 0.6
+
+    capped = eng.handle(TvChanged(TvState.ON), at(1, 20, 1))
+    assert eng.state.rooms["spisebord"].role is Role.ACTIVE  # role untouched
+    assert isclose(diag(capped, "spisebord").target_output, 0.3)
+
+
+def test_tv_on_cap_never_adds_light() -> None:
+    """§6.3: the cap is a ceiling — a room already dimmer is left alone."""
+    eng = _engine()
+    eng.handle(PresenceChanged("sofakrok", True), at(1, 20, 0))  # living area active
+    settled = eng.handle(ReviewTick(), at(1, 20, 0, 1))
+    before = diag(settled, "spisebord").target_output
+    assert 0.0 < before < 0.15  # BACKGROUND, below its 0.15 empty-room ceiling
+
+    cmds = eng.handle(TvChanged(TvState.ON), at(1, 20, 0, 2))
+    assert "spisebord_taklys" not in sets(cmds)  # nothing to do
+    assert isclose(diag(cmds, "spisebord").target_output, before)
+
+
+def test_pause_grace_holds_the_playing_level_then_steps_up() -> None:
+    """§6.3a: pausing holds the playing level for tv_pause_grace, then the ON cap
+    takes over — and the engine schedules the review that does it."""
+    eng = _engine()
+    eng.handle(PresenceChanged("spisebord", True), at(1, 20, 0))
+    playing = eng.handle(TvChanged(TvState.PLAYING), at(1, 20, 0, 1))
+    assert isclose(diag(playing, "spisebord").target_output, 0.15)
+
+    paused = eng.handle(TvChanged(TvState.ON), at(1, 20, 0, 30))
+    assert eng.state.rooms["spisebord"].role is Role.TV  # still the playing tier
+    assert isclose(diag(paused, "spisebord").target_output, 0.15)
+
+    # The engine wakes itself at the expiry: once the sooner circadian tick has
+    # fired, the pause-grace review is the next thing on the calendar.
+    ticked = eng.handle(ReviewTick(), at(1, 20, 1, 0))
+    assert review(ticked) == at(1, 20, 0, 30) + timedelta(seconds=120)
+
+    # A rewind-length pause elapses without moving the room...
+    held = eng.handle(ReviewTick(), at(1, 20, 2, 0))
+    assert isclose(diag(held, "spisebord").target_output, 0.15)
+    # ...and at the grace expiry it returns to its own role, capped.
+    stepped = eng.handle(ReviewTick(), at(1, 20, 2, 31))
+    assert eng.state.rooms["spisebord"].role is Role.ACTIVE
+    assert isclose(diag(stepped, "spisebord").target_output, 0.3)
+
+
+def test_resume_inside_the_grace_is_a_no_op() -> None:
+    """§6.3a: pause + resume (a rewind) never moves the room's lights at all."""
+    eng = _engine()
+    eng.handle(PresenceChanged("spisebord", True), at(1, 20, 0))
+    eng.handle(TvChanged(TvState.PLAYING), at(1, 20, 0, 1))
+    eng.handle(ReviewTick(), at(1, 20, 0, 20))  # settle on the playing level
+    eng.handle(TvChanged(TvState.ON), at(1, 20, 0, 30))
+    resumed = eng.handle(TvChanged(TvState.PLAYING), at(1, 20, 0, 55))
+    assert "spisebord_taklys" not in sets(resumed)
+    assert "spisebord_taklys" not in offs(resumed)
+    assert eng.state.tv_hold_until is None
+    # Past where the grace would have expired, the room is still on the TV tier.
+    later = eng.handle(ReviewTick(), at(1, 20, 5, 0))
+    assert eng.state.rooms["spisebord"].role is Role.TV
+    assert isclose(diag(later, "spisebord").target_output, 0.15)
+
+
+def test_tv_off_during_the_grace_restores_immediately() -> None:
+    """§6.3a: switching the TV off ends the hold at once — no waiting it out."""
+    eng = _engine()
+    eng.handle(PresenceChanged("spisebord", True), at(1, 20, 0))
+    eng.handle(TvChanged(TvState.PLAYING), at(1, 20, 0, 1))
+    eng.handle(TvChanged(TvState.ON), at(1, 20, 0, 30))
+    restored = eng.handle(TvChanged(TvState.OFF), at(1, 20, 0, 40))
+    assert eng.state.tv_hold_until is None
+    assert eng.state.rooms["spisebord"].role is Role.ACTIVE
+    assert diag(restored, "spisebord").target_output > 0.6
+
+
+def test_sleep_outranks_the_tv_on_cap() -> None:
+    """§6.1 > §6.3: a mode resolution owns the room; the cap never applies."""
+    eng = _engine()
+    eng.handle(PresenceChanged("spisebord", True), at(1, 22, 0))
+    eng.handle(TvChanged(TvState.ON), at(1, 22, 1))
+    cmds = eng.handle(SleepChanged(True), at(1, 22, 2))
+    assert "spisebord_taklys" in offs(cmds)
 
 
 # --- §6.2: night path episode -------------------------------------------
@@ -473,7 +566,7 @@ def test_role_arbitration_through_engine() -> None:
     eng = _engine()
     eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 23, 0))
     eng.handle(PresenceChanged("sofakrok", True), at(1, 23, 0, 30))  # ACTIVE
-    eng.handle(TvChanged(True), at(1, 23, 0, 45))  # TV-eligible
+    eng.handle(TvChanged(TvState.PLAYING), at(1, 23, 0, 45))  # TV-eligible
     eng.handle(SleepChanged(True), at(1, 23, 1))
     eng.handle(NightTriggerFired(), at(1, 23, 2))
     assert eng.state.rooms["sofakrok"].role is Role.NIGHT_PATH
@@ -481,7 +574,7 @@ def test_role_arbitration_through_engine() -> None:
     # Awake: TV beats plain ACTIVE presence.
     eng2 = _engine()
     eng2.handle(PresenceChanged("spisebord", True), at(1, 20, 0))
-    eng2.handle(TvChanged(True), at(1, 20, 1))
+    eng2.handle(TvChanged(TvState.PLAYING), at(1, 20, 1))
     assert eng2.state.rooms["spisebord"].role is Role.TV
 
 

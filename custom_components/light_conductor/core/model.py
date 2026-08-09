@@ -38,6 +38,19 @@ class Role(StrEnum):
     TV = "tv"
 
 
+class TvState(StrEnum):
+    """Tri-state TV mode input (ENGINE_SPEC §6.3).
+
+    Resolved by the adapter over every configured TV entity, highest first:
+    ``PLAYING`` (playing/buffering) > ``ON`` (powered on, not playing:
+    on/paused/idle) > ``OFF`` (everything else).
+    """
+
+    OFF = "off"
+    ON = "on"
+    PLAYING = "playing"
+
+
 class Activity(StrEnum):
     """Rich activity classification (presence-conductor room_activity, §1.1)."""
 
@@ -161,8 +174,12 @@ class Profile:
     evening_output_cap: float = 1.0
     # Mode outputs.
     night_output: BandMap = field(default_factory=dict)  # rule 6.2 (fixed dim warm)
-    tv_output: BandMap = field(default_factory=dict)  # rule 6.3 (room occupied)
-    tv_output_empty: BandMap = field(default_factory=dict)  # rule 6.3 (room empty)
+    tv_output: BandMap = field(default_factory=dict)  # rule 6.3 (playing, occupied)
+    tv_output_empty: BandMap = field(default_factory=dict)  # rule 6.3 (playing, empty)
+    #: TV ON (paused / powered on, not playing) CAPS on the normal tier path
+    #: (rule 6.3) — a ceiling per band, never a commanded value.
+    tv_output_paused: BandMap = field(default_factory=dict)  # rule 6.3 (on, occupied)
+    tv_output_paused_empty: BandMap = field(default_factory=dict)  # rule 6.3 (on, empty)
     # Closed-loop lux tiers (structure for §2.1; unused open-loop).
     lux_active_day: float = 0.0
     lux_active_evening: float = 0.0
@@ -290,7 +307,12 @@ class EngineState:
     vacation: bool = False
     #: Outdoor presence-simulation while away (rule 6.4, §10 switch; default on).
     away_lighting: bool = True
-    tv_playing: bool = False
+    #: Raw tri-state TV input (rule 6.3). The *effective* state the modes see
+    #: is this one held at PLAYING while ``tv_hold_until`` is in the future.
+    tv: TvState = TvState.OFF
+    #: Pause-grace expiry (rule 6.3a): set on the PLAYING → ON edge, cleared by
+    #: any transition to PLAYING or OFF and at expiry.
+    tv_hold_until: datetime | None = None
     night_active: bool = False
     night_hold_until: datetime | None = None
     # Master gain (rule 7).
@@ -320,7 +342,7 @@ class InitialSnapshot:
     anyone_home: bool | None = None
     vacation: bool = False
     away_lighting: bool = True
-    tv_playing: bool = False
+    tv: TvState = TvState.OFF
     master_on: bool = True
     master_pct: float = 50.0
     #: room_id -> primary occupancy (rule 11.1).

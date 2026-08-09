@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .model import Activity
+from .model import Activity, TvState
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,9 +117,9 @@ class VacationChanged(Event):
 
 @dataclass(frozen=True, slots=True)
 class TvChanged(Event):
-    """Any configured TV player started/stopped (rule 6.3)."""
+    """The configured TV players resolved to a new tri-state (rule 6.3)."""
 
-    playing: bool
+    tv: TvState
 
 
 @dataclass(frozen=True, slots=True)

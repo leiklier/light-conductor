@@ -21,7 +21,9 @@ from pytest_homeassistant_custom_component.common import (
 
 from custom_components.light_conductor import controller as lc_controller
 from custom_components.light_conductor.const import CONF_TUNABLES, DOMAIN
-from custom_components.light_conductor.core.events import ReviewTick
+from custom_components.light_conductor.core.events import ReviewTick, TvChanged
+from custom_components.light_conductor.core.model import TvState
+from custom_components.light_conductor.diagnostics import async_get_config_entry_diagnostics
 
 from .adapter import entity_id_for, options, room, set_light, setup_entry
 
@@ -675,3 +677,87 @@ async def test_one_lux_sensor_feeds_every_room_that_uses_it(hass: HomeAssistant)
     stamps = [controller.engine.room_state(r).est.last_report_at for r in ("spisebord", "balkong")]
     assert all(s is not None for s in stamps)  # both rooms saw the same report
     assert abs((stamps[0] - stamps[1]).total_seconds()) < 1.0
+
+
+async def test_tv_tristate_resolution(hass: HomeAssistant) -> None:
+    """§6.3: media states collapse to PLAYING > ON > OFF across all TV entities."""
+    hass.states.async_set("binary_sensor.pa", "off")
+    hass.states.async_set("media_player.tv", "off")
+    hass.states.async_set("media_player.box", "off")
+    entry = await setup_entry(
+        hass,
+        options(
+            [room("a", ["light.a"], presence="binary_sensor.pa")],
+            tv_entities=["media_player.tv", "media_player.box"],
+        ),
+    )
+    controller = hass.data[DOMAIN][entry.entry_id]
+
+    assert controller._resolve_tv() is TvState.OFF
+    for off_state in ("standby", STATE_UNAVAILABLE, "unknown"):
+        hass.states.async_set("media_player.box", off_state)
+        assert controller._resolve_tv() is TvState.OFF
+
+    # The webOS TV reports plain "on"; the Apple TV idles on its home screen.
+    hass.states.async_set("media_player.tv", "on")
+    assert controller._resolve_tv() is TvState.ON
+    hass.states.async_set("media_player.box", "idle")
+    assert controller._resolve_tv() is TvState.ON
+    hass.states.async_set("media_player.box", "paused")
+    assert controller._resolve_tv() is TvState.ON
+
+    # Any entity playing (or buffering) wins over the rest.
+    hass.states.async_set("media_player.box", "playing")
+    assert controller._resolve_tv() is TvState.PLAYING
+    hass.states.async_set("media_player.box", "buffering")
+    assert controller._resolve_tv() is TvState.PLAYING
+
+    # Back to a dark house: every TV off ⇒ OFF.
+    hass.states.async_set("media_player.tv", "off")
+    hass.states.async_set("media_player.box", "off")
+    assert controller._resolve_tv() is TvState.OFF
+
+
+async def test_tv_attribute_churn_does_not_wake_the_engine(hass: HomeAssistant) -> None:
+    """§6.3: only a real TV transition is submitted — media players churn their
+    attributes (position, artwork) constantly while playing."""
+    hass.states.async_set("binary_sensor.pa", "off")
+    hass.states.async_set("media_player.box", "playing", {"media_position": 1})
+    entry = await setup_entry(
+        hass,
+        options(
+            [room("a", ["light.a"], presence="binary_sensor.pa")],
+            tv_entities=["media_player.box"],
+        ),
+    )
+    controller = hass.data[DOMAIN][entry.entry_id]
+    assert controller.engine.state.tv is TvState.PLAYING  # seeded
+
+    submitted: list[object] = []
+    real_submit = controller.submit
+    controller.submit = lambda event: (submitted.append(event), real_submit(event))[1]
+
+    hass.states.async_set("media_player.box", "playing", {"media_position": 2})
+    await hass.async_block_till_done()
+    assert not any(isinstance(e, TvChanged) for e in submitted)
+
+    hass.states.async_set("media_player.box", "paused", {"media_position": 2})
+    await hass.async_block_till_done()
+    assert [e for e in submitted if isinstance(e, TvChanged)] == [TvChanged(tv=TvState.ON)]
+    assert controller.engine.state.tv is TvState.ON
+
+
+async def test_diagnostics_dump_reports_tv_state(hass: HomeAssistant) -> None:
+    """§10: the diagnostics dump carries the tri-state TV input + pause hold."""
+    hass.states.async_set("binary_sensor.pa", "off")
+    hass.states.async_set("media_player.box", "paused")
+    entry = await setup_entry(
+        hass,
+        options(
+            [room("a", ["light.a"], presence="binary_sensor.pa")],
+            tv_entities=["media_player.box"],
+        ),
+    )
+    dump = await async_get_config_entry_diagnostics(hass, entry)
+    assert dump["engine"]["tv"] == "on"
+    assert dump["engine"]["tv_hold_until"] is None

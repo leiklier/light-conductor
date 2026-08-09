@@ -8,11 +8,13 @@ sanity — all end to end.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 
-from custom_components.light_conductor.core.events import ReviewTick
-from custom_components.light_conductor.core.model import Band
+from custom_components.light_conductor.core.events import ReviewTick, TvChanged
+from custom_components.light_conductor.core.model import Band, EngineConfig, TvState
 from custom_components.light_conductor.core.plan import SetChannel
+from custom_components.light_conductor.core.tunables import Tunables
 
 from .plant import Channel, Plant, booted_engine, closed_config
 
@@ -355,3 +357,46 @@ def test_response_mapping_ignored_by_closed_loop() -> None:
     assert mapped_b == plain_b  # identical command: mapping not applied
     assert abs(mapped_lux - 120.0) < 16.0  # still converges on the lux target
     assert abs(plain_lux - mapped_lux) < 1e-9
+
+
+# --- (h) TV ON ceiling over the closed loop (§6.3) ----------------------
+
+
+def test_tv_on_ceiling_clamps_the_closed_loop_and_settles() -> None:
+    """§6.3: a TV ON ceiling limits a closed-loop room's output, and the loop
+    parks at the ceiling instead of chasing a target it can never reach."""
+    chans = [Channel("c", gain=180.0)]
+    cfg = closed_config(chans, lux_active_day=100.0)
+    room = cfg.rooms[0]
+    cfg = EngineConfig(
+        rooms=(
+            replace(
+                room,
+                tv_mode=True,
+                profile=replace(
+                    room.profile,
+                    tv_output_paused={Band.PRIMARY: 0.2},
+                    tv_output_paused_empty={Band.PRIMARY: 0.2},
+                ),
+            ),
+        )
+    )
+    eng = booted_engine(cfg, sun=20.0)
+    plant = Plant(eng, "lab", chans, n_of_t=lambda _now: 10.0)
+    _run(plant, START, 40)
+    settled = START + timedelta(seconds=80)
+    assert abs(plant.true_lux(settled) - 100.0) < 16.0  # on target, TV off
+
+    # The TV is switched on and left sitting on its home screen.
+    eng.handle(TvChanged(TvState.ON), settled)
+    capped_start = settled + timedelta(seconds=2)
+    _run(plant, capped_start, 60)
+    b = eng.state.rooms["lab"].channels["c"].commanded_b
+    # Down at the ceiling, to within the §8.3 min-delta flux grid (the governor
+    # stops writing once the remaining move is below one flux quantum).
+    assert b < 0.3
+    assert b * b - 0.2 * 0.2 <= Tunables().min_delta
+
+    # And it stays parked: no further corrections once at the ceiling.
+    tail = _run(plant, capped_start + timedelta(seconds=120), 60)
+    assert tail == []
