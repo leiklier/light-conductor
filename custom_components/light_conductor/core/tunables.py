@@ -126,6 +126,11 @@ class Tunables:
     sleep_fade: float = 4.0  # 6.1
     night_hold: float = 600.0  # 6.2
     night_fade: float = 10.0  # 6.2
+    #: Pause grace (§6.3a): how long the PLAYING resolution is held after the
+    #: TV leaves PLAYING for ON, so a rewind or a short pause does not walk the
+    #: room lights up and back down. Cleared instantly by resume or TV-off.
+    #: 0 disables the hold.
+    tv_pause_grace: float = 120.0  # 6.3a
     outdoor_on_threshold: float = 0.7  # 6.5
     #: Measured-dusk window for an outdoor room that has a lux sensor (§6.5a).
     #: Its dusk factor ramps 0 -> 1 as N̂ falls from ``outdoor_on_lux`` to

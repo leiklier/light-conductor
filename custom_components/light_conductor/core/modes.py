@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from .model import Band, EngineState, Role, RoomConfig, RoomShape, RoomState
+from .model import Band, EngineState, Role, RoomConfig, RoomShape, RoomState, TvState
 from .tunables import Tunables
 
 
@@ -57,6 +57,7 @@ def resolve(
     tun: Tunables,
     night_expiring: bool = False,
     dusk: float | None = None,
+    tv: TvState = TvState.OFF,
 ) -> RoomResolution | None:
     """Mode verdict for ``room``, or ``None`` for the normal role path.
 
@@ -66,6 +67,10 @@ def resolve(
 
     ``dusk`` is the outdoor dusk factor (§6.5a), computed by the engine because
     it depends on sensor freshness; ``None`` keeps the pre-6.5a E gate.
+
+    ``tv`` is the *effective* tri-state TV input (rule 6.3): the raw state held
+    at PLAYING while the §6.3a pause grace runs. The engine owns that clock, so
+    it passes the resolved value in rather than reading ``state.tv``.
     """
     if is_away(state):
         # Everyone gone: every indoor room OFF (rule 6.4). Outdoor rooms keep
@@ -96,11 +101,32 @@ def resolve(
     if room.shape is RoomShape.OUTDOOR:
         return _outdoor(room, rs, e, tun, dusk=dusk)
 
-    if state.tv_playing and room.tv_mode:
+    if tv is TvState.PLAYING and room.tv_mode:
         table = room.profile.tv_output if rs.self_active else room.profile.tv_output_empty
         return RoomResolution(Role.TV, band_outputs=dict(table))
 
+    # TV ON (paused / powered on, not playing) does NOT resolve the room: it
+    # caps the normal tier path (rule 6.3), applied by the engine via
+    # :func:`tv_cap` once the outputs exist.
     return None
+
+
+def tv_cap(room: RoomConfig, rs: RoomState, tv: TvState) -> dict[Band, float] | None:
+    """Per-band output ceiling while the TV is ON but not playing (rule 6.3).
+
+    ``None`` means "no ceiling" — the TV is off or playing (playing is a mode
+    resolution, not a cap), or the room does not participate in TV mode. The
+    caller applies it to the *final* per-channel outputs of the normal tier
+    path: ``b_i <- min(b_i, cap[band_i])``. A cap can only take light away, so
+    a room the tier path already leaves dark stays dark and a TV switched on in
+    daylight (where §4.7 has already damped the room) changes nothing. An unset
+    (empty) paused table is likewise no ceiling — the adapter always supplies
+    one, so this is the core-default "TV ON does nothing" behaviour.
+    """
+    if tv is not TvState.ON or not room.tv_mode:
+        return None
+    table = room.profile.tv_output_paused if rs.self_active else room.profile.tv_output_paused_empty
+    return dict(table)
 
 
 def _outdoor(

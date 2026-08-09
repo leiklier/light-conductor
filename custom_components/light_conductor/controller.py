@@ -93,7 +93,7 @@ from .core.events import (
     VacationChanged,
 )
 from .core.events import Event as CoreEvent
-from .core.model import Activity, InitialSnapshot, RoomDiagnostics
+from .core.model import Activity, InitialSnapshot, RoomDiagnostics, TvState
 from .core.plan import (
     CalibrationResult,
     PublishState,
@@ -110,6 +110,14 @@ SUN_ENTITY = "sun.sun"
 #: Brightness echo tolerance (normalized flux) and CT echo tolerance (kelvin).
 ECHO_LEVEL_TOL = 0.03
 ECHO_CT_TOL = 60
+
+#: Media-player states that resolve the tri-state TV input (rule 6.3).
+#: PLAYING wins over ON; everything unlisted (off / standby / unavailable /
+#: unknown) is OFF. ``idle`` is the Apple TV sitting on its home screen and
+#: ``on`` is what the webOS TV reports while it is powered up — both are
+#: "the TV is on, nothing is playing".
+TV_PLAYING_STATES = frozenset({"playing", "buffering"})
+TV_ON_STATES = frozenset({"on", "paused", "idle"})
 
 #: Software stepping ramp cadence (~1 step/s, rule §8.2 adapter fallback).
 STEP_INTERVAL = 1.0
@@ -498,6 +506,10 @@ class Controller:
         self._echo = EchoLedger(self.tun.echo_window)
         #: Standing setpoint per channel — poll re-confirmations are not foreign.
         self._last_commanded: dict[str, float] = {}
+        #: Last TV tri-state submitted (rule 6.3). Media players churn their
+        #: attributes (position, artwork) while playing; only a real state
+        #: transition is worth an engine recompute.
+        self._tv: TvState | None = None
         self._sem = asyncio.Semaphore(self.tun.max_inflight)
         self._writers: dict[str, ChannelWriter] = {}
         self._write_tasks: set[asyncio.Task] = set()
@@ -610,7 +622,7 @@ class Controller:
             sleep=self._resolve_bool(self.options.get(CONF_SLEEP_ENTITY)),
             anyone_home=self._resolve_home(),
             vacation=self._resolve_bool(self.options.get(CONF_VACATION_ENTITY)),
-            tv_playing=self._resolve_tv(),
+            tv=self._seed_tv(),
             master_on=self.master_on,
             master_pct=self.master_pct,
             occupancy=occupancy,
@@ -1227,7 +1239,11 @@ class Controller:
         elif entity_id == opts.get(CONF_VACATION_ENTITY):
             self.submit(VacationChanged(active=self._resolve_bool(entity_id)))
         elif entity_id in opts.get(CONF_TV_ENTITIES, ()):
-            self.submit(TvChanged(playing=self._resolve_tv()))
+            tv = self._resolve_tv()
+            if tv is not self._tv:
+                _LOGGER.debug("TV state %s -> %s (%s)", self._tv, tv, entity_id)
+                self._tv = tv
+                self.submit(TvChanged(tv=tv))
         else:  # anyone_home primary or a home fallback presence entity
             self.submit(HomeChanged(anyone_home=self._resolve_home()))
 
@@ -1238,10 +1254,29 @@ class Controller:
             return False
         return self.hass.states.is_state(entity_id, STATE_ON)
 
-    def _resolve_tv(self) -> bool:
-        return any(
-            self.hass.states.is_state(e, "playing") for e in self.options.get(CONF_TV_ENTITIES, ())
-        )
+    def _seed_tv(self) -> TvState:
+        """Resolve the TV state for the startup snapshot, arming the dedup."""
+        self._tv = self._resolve_tv()
+        return self._tv
+
+    def _resolve_tv(self) -> TvState:
+        """Resolve every configured TV entity to one tri-state (rule 6.3).
+
+        Highest state wins: PLAYING (playing/buffering) > ON (powered on but
+        not playing: on/paused/idle) > OFF. ``off``/``standby``/``unavailable``/
+        ``unknown`` — and a TV integration that drops its entity entirely while
+        the set is off, as the webOS one does — all read as OFF.
+        """
+        state = TvState.OFF
+        for entity_id in self.options.get(CONF_TV_ENTITIES, ()):
+            reported = self.hass.states.get(entity_id)
+            if reported is None:
+                continue
+            if reported.state in TV_PLAYING_STATES:
+                return TvState.PLAYING
+            if reported.state in TV_ON_STATES:
+                state = TvState.ON
+        return state
 
     def _resolve_home(self) -> bool | None:
         primary = self.options.get(CONF_ANYONE_HOME_ENTITY)

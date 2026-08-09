@@ -122,6 +122,8 @@ def _living_room(room_id: str) -> RoomConfig:
             evening_output_cap=0.3,
             tv_output={Band.PRIMARY: 0.15},
             tv_output_empty={Band.PRIMARY: 0.05 if room_id == "spisebord" else 0.0},
+            tv_output_paused={Band.PRIMARY: 0.3},
+            tv_output_paused_empty={Band.PRIMARY: 0.15},
             night_output={Band.PRIMARY: 0.04 if room_id == "sofakrok" else 0.01},
         ),
         neighbours=("gang", "kjokken"),
@@ -143,6 +145,8 @@ def _gang() -> RoomConfig:
             evening_output_cap=0.3,
             tv_output={Band.PRIMARY: 0.05},  # legacy gang-TV dim
             tv_output_empty={Band.PRIMARY: 0.05},
+            tv_output_paused={Band.PRIMARY: 0.2},
+            tv_output_paused_empty={Band.PRIMARY: 0.2},
             night_output={Band.PRIMARY: 0.05},
         ),
         shape=RoomShape.CORRIDOR,

@@ -18,9 +18,12 @@ What it does:
   fully off after vacancy.
 - **Master gain dimmer** — one HomeKit dimmer scales the whole automation
   relative to what it would do on its own.
-- **Night path, TV mode, away-off, outdoor room** — built in. A balcony can
-  read a lux sensor (even one an indoor room already uses, e.g. at the window)
-  and ease in as the light actually goes, instead of at a sun-ramp threshold.
+- **Night path, TV mode, away-off, outdoor room** — built in. TV mode is
+  tri-state: playing dims the room to its TV level, paused (or the TV merely
+  switched on) only *caps* it, and a pause grace means a rewind never walks the
+  lights up and back down. A balcony can read a lux sensor (even one an indoor
+  room already uses, e.g. at the window) and ease in as the light actually
+  goes, instead of at a sun-ramp threshold.
 - **Calibrated photometry** — a one-button night sweep measures each lamp's
   lux gain and dimming curve at the room's sensor.
 - **Manual control is respected** — any wall rotary, HomeKit, or voice change

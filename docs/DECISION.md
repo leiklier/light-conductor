@@ -498,6 +498,59 @@ adapter needs no changes: OccupationalSwitch.is_on already reads engine state
 and every entity refreshes on each engine cycle, so a button-driven flip
 appears in HomeKit automatically.
 
+## D21. TV mode is tri-state, and the middle tier is a CEILING (beta.16)
+
+User request 2026-08-09: TV mode worked, but it was binary — `playing` dimmed
+the living rooms, anything else restored them fully — so a pause walked the
+lights up and a resume walked them back down. Asked for three levels (TV off /
+TV on-or-paused / TV playing) plus a timeout before stepping up after a pause.
+
+**Tri-state, not two booleans.** `TvState` (OFF < ON < PLAYING) is resolved by
+the adapter over every configured TV entity, highest wins. The live setup makes
+the middle state trivially observable: the LG (`media_player.sofakrok_tv`)
+reports `on` for a whole session and drops to `unavailable` when powered off,
+while the Apple TV carries `playing`/`paused`/`idle`. `buffering` counts as
+playing; `idle` (Apple TV home screen) and plain `on` count as ON;
+`standby`/`unavailable`/`unknown`/missing entity are OFF.
+
+**PLAYING commands, ON caps.** The playing tier stays what it was — a mode
+resolution that pins the room to `tv_output`/`tv_output_empty`. The new middle
+tier deliberately does NOT resolve the room: it keeps its own role and tier
+path and is merely ceilinged at `tv_output_paused` /
+`tv_output_paused_empty` (defaults 30 %/15 %). Rationale: the ON state spans
+whole sessions, including daytime ones (the live history has the TV on
+07:05–08:13), and mode tables are exempt from the §4.7 daylight damping — a
+commanded middle tier would have pinned rooms to 30 % in full morning
+daylight, i.e. TV-on would sometimes ADD light. A ceiling composes with
+everything upstream (daylight factor, master gain, evening cap, closed loop)
+and can only subtract, which is exactly the user's mental model of "dim a bit
+because the TV is on". The room's published role stays its real role; role
+`TV` continues to mean PLAYING.
+
+**Closed-loop rooms clamp the TARGET too.** Sofakrok, the one calibrated room,
+is also the TV room. Applying the ceiling only to its outputs would leave the
+loop with a permanently unclosable error: the sustain would re-arm every cycle
+and re-issue the same (coalesced, unwritten) command forever. So the ceiling is
+also converted into lux — `T' <- min(T', N̂ + Σ g_i·f_i(cap_i)·m)` — and the loop
+parks satisfied at the ceiling, with an honest published `target_lux`. The
+per-channel `min()` stays as the hard guarantee for every path; it lands within
+one §8.3 min-delta flux quantum of the ceiling, like every other target.
+
+**Pause grace (§6.3a, `tv_pause_grace` 120 s).** Only the PLAYING → ON edge
+arms it; the engine self-schedules the expiry review. Resume clears it (no-op,
+the room never moved), and TV-off clears it (the user ended the session
+themselves — waiting out a grace would just be lag). 120 s comes from the live
+Apple TV history: this week's rewind-length pauses were 1–41 s and the
+resumed-after pauses ran to ~167 s, while the pause that preceded a real TV-off
+was 118 s — so 120 s suppresses the flicker cases without stranding a genuine
+break, and it is a §12 tunable.
+
+Alternatives rejected: a global multiplier on the playing tiers (no independent
+control, and 0 % empty rooms stay 0 %); paused ⇒ full normal lighting unless
+configured (that is today's behaviour, i.e. no feature); daylight-scaling the
+middle tier (the cap already subsumes it — `D` has damped the tier before the
+ceiling sees it).
+
 ## Open questions — RESOLVED (user, 2026-07-25)
 
 - **Q1 (D8):** master dimmer neutral at 50 % — confirmed (boost possible).
