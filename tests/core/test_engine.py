@@ -12,6 +12,7 @@ from math import isclose
 from custom_components.light_conductor.core.engine import Engine
 from custom_components.light_conductor.core.events import (
     ActivityChanged,
+    DoorLightingChanged,
     ForeignChange,
     HomeChanged,
     LuxReport,
@@ -367,6 +368,80 @@ def test_corridor_trigger_pulses_and_expires() -> None:
     off = eng.handle(ReviewTick(), at(1, 23, 6))  # > 300 s trigger_hold
     assert eng.state.rooms["gang"].role is Role.OFF
     assert "gang_taklys" in offs(off)
+
+
+# --- §1.9: the door-lighting toggle --------------------------------------
+
+
+def test_door_lighting_off_ignores_the_door() -> None:
+    """§1.9: with the toggle off an opening mints no hold — the room stays dark."""
+    eng = _engine()
+    eng.handle(DoorLightingChanged("soverom", False), at(1, 20, 0))
+    plan = eng.handle(TriggerFired("soverom"), at(1, 20, 1))
+    assert eng.state.rooms["soverom"].trigger_hold_until is None
+    assert eng.state.rooms["soverom"].role is Role.OFF
+    assert "soverom_taklys" not in sets(plan)
+
+
+def test_door_lighting_off_ignores_the_closing_edge() -> None:
+    """§1.9: the shortened closing-edge hold is gated the same way."""
+    eng = _engine()
+    eng.handle(DoorLightingChanged("soverom", False), at(1, 20, 0))
+    plan = eng.handle(TriggerFired("soverom", closing=True), at(1, 20, 1))
+    assert eng.state.rooms["soverom"].trigger_hold_until is None
+    assert "soverom_taklys" not in sets(plan)
+
+
+def test_door_lighting_off_mid_hold_demotes_immediately() -> None:
+    """§1.9: the falling edge clears a live hold and the room leaves in that same
+    recompute — the user must not wait out the remaining trigger_hold."""
+    eng = _engine()
+    lit = eng.handle(TriggerFired("soverom"), at(1, 20, 0))
+    assert eng.state.rooms["soverom"].role is Role.ACTIVE
+    assert "soverom_taklys" in sets(lit)
+
+    dark = eng.handle(DoorLightingChanged("soverom", False), at(1, 20, 1))
+    assert eng.state.rooms["soverom"].trigger_hold_until is None
+    assert eng.state.rooms["soverom"].role is Role.OFF
+    assert "soverom_taklys" in offs(dark)
+
+
+def test_door_lighting_back_on_is_not_retroactive() -> None:
+    """§1.9: re-enabling revives nothing; the NEXT door edge behaves normally."""
+    eng = _engine()
+    eng.handle(DoorLightingChanged("soverom", False), at(1, 20, 0))
+    eng.handle(TriggerFired("soverom"), at(1, 20, 1))
+    back = eng.handle(DoorLightingChanged("soverom", True), at(1, 20, 2))
+    assert eng.state.rooms["soverom"].role is Role.OFF
+    assert "soverom_taklys" not in sets(back)
+
+    lit = eng.handle(TriggerFired("soverom"), at(1, 20, 3))
+    assert eng.state.rooms["soverom"].role is Role.ACTIVE
+    assert "soverom_taklys" in sets(lit)
+
+
+def test_door_lighting_seeds_from_the_snapshot() -> None:
+    """§11: the snapshot carries the toggle per room; absent means on."""
+    eng = _engine(InitialSnapshot(door_lighting={"soverom": False}))
+    assert eng.state.rooms["soverom"].door_lighting is False
+    assert eng.state.rooms["gang"].door_lighting is True  # absent => on
+
+    eng.handle(TriggerFired("soverom"), at(1, 20, 0))
+    assert eng.state.rooms["soverom"].role is Role.OFF
+    lit = eng.handle(TriggerFired("gang"), at(1, 20, 1))
+    assert eng.state.rooms["gang"].role is Role.ACTIVE
+    assert "gang_taklys" in sets(lit)
+
+
+def test_sleep_still_wins_over_door_lighting() -> None:
+    """§6.1 > §1.9: the toggle gates ingestion only — sleep keeps its hard-off."""
+    eng = _engine()
+    eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 23, 0))
+    eng.handle(SleepChanged(True), at(1, 23, 1))
+    plan = eng.handle(TriggerFired("soverom"), at(1, 23, 2))
+    assert eng.state.rooms["soverom"].door_lighting is True  # toggle untouched
+    assert eng.state.rooms["soverom"].role is Role.OFF
+    assert "soverom_taklys" not in sets(plan)
 
 
 # --- §8.2: evening-cap smoothness ---------------------------------------

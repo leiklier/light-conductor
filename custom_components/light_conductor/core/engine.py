@@ -34,6 +34,7 @@ from . import (
 )
 from .events import (
     ActivityChanged,
+    DoorLightingChanged,
     Event,
     ForeignChange,
     HomeChanged,
@@ -133,6 +134,7 @@ class Engine:
                 rs.self_active = bool(occ)  # rule 11.1: roles evaluate from live presence
             rs.activity = snap.activity.get(room.room_id)
             rs.occupational = snap.occupational.get(room.room_id, False)
+            rs.door_lighting = snap.door_lighting.get(room.room_id, True)
             for ch in room.channels:
                 level, ct = snap.channels.get(ch.channel_id, (0.0, None))
                 rs.channels[ch.channel_id] = ChannelState(
@@ -171,6 +173,17 @@ class Engine:
             case TriggerFired():
                 if (rs := s.rooms.get(event.room_id)) is not None:
                     roles.ingest_trigger(rs, event.closing, now, self.tun)
+            case DoorLightingChanged():
+                if (rs := s.rooms.get(event.room_id)) is not None:
+                    if not event.on:
+                        # Falling edge: drop the live hold NOW so this same
+                        # recompute re-resolves the room and it leaves down the
+                        # normal demotion/fade path (rule 1.9) — exactly the way
+                        # hold expiry would have taken it. The override latch is
+                        # untouched: the toggle gates ingestion, it is not a
+                        # release condition (rule 9.2).
+                        rs.trigger_hold_until = None
+                    rs.door_lighting = event.on
             case ForeignChange():
                 self._on_foreign(event, now)
             case SunElevationChanged():

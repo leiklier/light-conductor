@@ -142,7 +142,8 @@
     "switch": {
       "enabled": { "name": "Aktivert" },
       "away_lighting": { "name": "Bortelys" },
-      "occupational": { "name": "Sitte ute" }
+      "occupational": { "name": "Sitte ute" },
+      "door_lighting": { "name": "Dørbelysning" }
     },
     "sensor": {
       "role": {

@@ -27,6 +27,7 @@ from custom_components.light_conductor.const import (
     CONF_ROOM_ID,
     CONF_ROOMS,
     CONF_SHAPE,
+    CONF_TRIGGERS,
     CONF_TUNABLES,
     CONF_WALL_EVENTS,
     DOMAIN,
@@ -71,6 +72,7 @@ def room(
     channels: list[dict] | None = None,
     max_output: float | None = None,
     wall: list[str] | None = None,
+    triggers: list[str] | None = None,
 ) -> dict[str, Any]:
     chans = channels or [
         {"entity": e, "band": "primary", "weight": 1.0, "fixed_ct": 2700, "dim_floor": 0.02}
@@ -108,6 +110,8 @@ def room(
         r[CONF_OCCUPANCY_FALLBACK] = fallback
     if wall:
         r[CONF_WALL_EVENTS] = wall
+    if triggers:
+        r[CONF_TRIGGERS] = triggers
     return r
 
 

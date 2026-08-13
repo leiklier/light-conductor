@@ -140,7 +140,8 @@
     "switch": {
       "enabled": { "name": "Enabled" },
       "away_lighting": { "name": "Away lighting" },
-      "occupational": { "name": "Sitting outside" }
+      "occupational": { "name": "Sitting outside" },
+      "door_lighting": { "name": "Door lighting" }
     },
     "sensor": {
       "role": {

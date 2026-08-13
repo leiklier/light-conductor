@@ -58,7 +58,14 @@ def ingest_activity(rs: RoomState, activity: Activity | None) -> None:
 
 
 def ingest_trigger(rs: RoomState, closing: bool, now: datetime, tun: Tunables) -> None:
-    """Fold a corridor/door trigger (rules 1.7, 1.9)."""
+    """Fold a corridor/door trigger (rules 1.7, 1.9).
+
+    The door-lighting toggle gates INGESTION (rule 1.9): with it off no pulse —
+    opening or closing — mints a hold, so the room simply has no trigger input
+    while the occupant has switched the behaviour away.
+    """
+    if not rs.door_lighting:
+        return
     hold = tun.door_close_hold if closing else tun.trigger_hold
     rs.trigger_hold_until = now + timedelta(seconds=hold)
 

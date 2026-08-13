@@ -89,7 +89,16 @@ freezes its current role for `presence_blind_hold`, then demotes one step per
 
 1.9 **Door-triggered rooms** (soverom): trigger entity opening ⇒ ACTIVE for
 `trigger_hold` (restartable); closing edge ⇒ shortened hold `door_close_hold`.
-Sleep mode overrides per §6.1.
+Sleep mode overrides per §6.1. A per-room **door-lighting** switch (§10,
+restorable, default on) gates trigger *ingestion* in the engine: while it is
+off, no pulse — opening or closing — mints a hold, so the room simply has no
+trigger input. Its falling edge clears any live `trigger_hold` at once and the
+room re-resolves in that same recompute, leaving down the normal demotion/fade
+path (exactly what hold expiry would have done). Its rising edge is not
+retroactive — the next door edge behaves normally. The gate changes nothing
+else: sleep/away/night-path/master still win as before (§6.1/6.2/6.4/§7), and a
+manual override in the room keeps its §9.2 blind-room protection (the toggle is
+not a release condition).
 
 1.10 **Occupational presence** (outdoor rooms). An outdoor room's occupational
 switch is a *declaration* of presence: while on AND the room's own dusk ramp is
@@ -679,6 +688,8 @@ from it; the recovery edge and an identical-timestamp republish are ignored
 - `switch.light_conductor_enabled` — master enable; off = observe only
   (no commands; ledger and estimator keep running).
 - `switch.light_conductor_<room>_occupational` — only for outdoor rooms (6.5).
+- `switch.light_conductor_<room>_door_lighting` — only for rooms with trigger
+  entities configured (1.9), restorable, default on.
 - `switch.light_conductor_away_lighting` — outdoor presence simulation while
   away (6.4), restorable, default on.
 - Per room diagnostics: `sensor.<room>_role` (enum), `sensor.<room>_natural_lux`
@@ -711,7 +722,11 @@ actually moved there — a wall dial restoring the previous level lands exactly
 on the last command — and it latches (§9.1).
 
 11.2 Restorable entities: master gain, enabled, occupational switches,
-override latches (not restored — cleared on restart).
+door-lighting switches, override latches (not restored — cleared on restart).
+The seed snapshot carries the per-room `occupational` and `door_lighting` maps
+(door lighting absent ⇒ on, the same default a fresh install and a missed
+restore get), so an engine rebuilt from a snapshot gates triggers exactly like
+the running one did.
 
 ## 12. Tunables (defaults)
 

@@ -51,6 +51,7 @@ async def async_get_config_entry_diagnostics(
             "self_active": rs.self_active,
             "vacancy_hold_until": _plain(rs.vacancy_hold_until),
             "trigger_hold_until": _plain(rs.trigger_hold_until),
+            "door_lighting": rs.door_lighting,
             "occupational": rs.occupational,
             "channels": {
                 cid: {"commanded_b": cs.commanded_b, "commanded_ct": cs.commanded_ct, "on": cs.on}
