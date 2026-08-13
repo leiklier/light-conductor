@@ -1,6 +1,7 @@
-"""Switch entities (§10): enable, away-lighting, per-outdoor occupational.
+"""Switch entities (§10): enable, away-lighting, per-outdoor occupational,
+per-trigger-room door lighting.
 
-All three are restorable runtime knobs (rule §11.2): the restored state is
+All of them are restorable runtime knobs (rule §11.2): the restored state is
 re-submitted through the controller so the engine and the entity agree.
 """
 
@@ -11,14 +12,20 @@ from typing import Any
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import STATE_OFF, STATE_ON
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import CONF_NAME, CONF_ROOM_ID, CONF_ROOMS, CONF_SHAPE, DOMAIN
+from .const import CONF_NAME, CONF_ROOM_ID, CONF_ROOMS, CONF_SHAPE, CONF_TRIGGERS, DOMAIN
 from .controller import Controller
-from .core.events import OccupationalChanged, SetAwayLighting, SetEnabled
+from .core.events import (
+    DoorLightingChanged,
+    OccupationalChanged,
+    SetAwayLighting,
+    SetEnabled,
+)
 from .core.model import RoomShape
 from .entity import LightConductorEntity, room_device_info
 
@@ -34,12 +41,16 @@ async def async_setup_entry(
         AwayLightingSwitch(controller),
     ]
     for room in entry.options.get(CONF_ROOMS, ()):
+        room_id = room[CONF_ROOM_ID]
+        name = room.get(CONF_NAME, room_id)
         if room.get(CONF_SHAPE) == RoomShape.OUTDOOR.value:
-            entities.append(
-                OccupationalSwitch(
-                    controller, room[CONF_ROOM_ID], room.get(CONF_NAME, room[CONF_ROOM_ID])
-                )
-            )
+            entities.append(OccupationalSwitch(controller, room_id, name))
+        # Keyed off the trigger entities, not the shape: the switch is only
+        # meaningful where a trigger can actually fire (§1.9). Outdoor rooms
+        # are excluded — their lighting is mode-resolved (§6.5), never
+        # trigger-driven, so the switch would be inert.
+        if room.get(CONF_TRIGGERS) and room.get(CONF_SHAPE) != RoomShape.OUTDOOR.value:
+            entities.append(DoorLightingSwitch(controller, room_id, name))
     async_add_entities(entities)
 
 
@@ -49,14 +60,20 @@ class _RestoreSwitch(LightConductorEntity, SwitchEntity, RestoreEntity):
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
-        if last is not None:
-            self._apply(last.state == "on")
+        if last is not None and last.state in (STATE_ON, STATE_OFF):
+            self._apply(last.state == STATE_ON)
         else:
-            # The engine's fail-safe default stands (enabled=False ⇒ observe
-            # only). A missed restore must be visible, not silent: a restore
-            # miss on the enabled switch is how a conductor could otherwise
-            # go live unbidden after a restart.
-            _LOGGER.warning("No restore data for %s; using the fail-safe default", self.entity_id)
+            # No restore data, or a restored `unavailable`/`unknown` — neither
+            # carries user intent, so the entity's own engine default stands:
+            # fail-safe off for enabled (a conductor must not go live unbidden
+            # after a restart), default on for away/door lighting (a restore
+            # miss must not silently disable a convenience knob). A missed
+            # restore must be visible, not silent.
+            _LOGGER.warning(
+                "No restore data for %s; keeping default %s",
+                self.entity_id,
+                "on" if self.is_on else "off",
+            )
 
     def _apply(self, on: bool) -> None:  # pragma: no cover - overridden
         raise NotImplementedError
@@ -130,3 +147,31 @@ class OccupationalSwitch(_RestoreSwitch):
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         self.controller.submit(OccupationalChanged(room_id=self._room_id, on=False))
+
+
+class DoorLightingSwitch(_RestoreSwitch):
+    """A trigger room's door-lighting gate (§1.9), default on.
+
+    A convenience toggle, not a safety boundary — so unlike the enabled switch
+    a restore miss keeps the engine default (on).
+    """
+
+    _attr_translation_key = "door_lighting"
+
+    def __init__(self, controller: Controller, room_id: str, room_name: str) -> None:
+        super().__init__(controller, f"{room_id}_door_lighting")
+        self._room_id = room_id
+        self._attr_device_info = room_device_info(controller.entry, room_id, room_name)
+
+    @property
+    def is_on(self) -> bool:
+        return self.controller.engine.room_state(self._room_id).door_lighting
+
+    def _apply(self, on: bool) -> None:
+        self.controller.submit(DoorLightingChanged(room_id=self._room_id, on=on))
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        self.controller.submit(DoorLightingChanged(room_id=self._room_id, on=True))
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        self.controller.submit(DoorLightingChanged(room_id=self._room_id, on=False))

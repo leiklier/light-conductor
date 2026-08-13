@@ -89,7 +89,24 @@ freezes its current role for `presence_blind_hold`, then demotes one step per
 
 1.9 **Door-triggered rooms** (soverom): trigger entity opening ⇒ ACTIVE for
 `trigger_hold` (restartable); closing edge ⇒ shortened hold `door_close_hold`.
-Sleep mode overrides per §6.1.
+Sleep mode overrides per §6.1. A per-room **door-lighting** switch (§10,
+restorable, default on) gates trigger *ingestion* in the engine: while it is
+off, no pulse — opening or closing — mints a hold, so the room simply has no
+trigger input. Its falling edge ends any trigger-borne activity at once,
+whatever the room's shape: the live `trigger_hold` is cleared, and — iff the
+room's occupancy is not currently True — the vacancy hold and self-activity go
+with it, so a presence-shaped room whose activity was only trigger-borne
+cannot re-mint a fresh vacancy hold and burn for up to `hold_seconds`. The
+room re-resolves in that same recompute and leaves down the normal
+demotion/fade path (exactly what hold expiry would have done); a genuinely
+occupied presence room stays ACTIVE — presence, not the trigger, is holding it
+up. Its rising edge is not retroactive — the next door edge behaves normally.
+The gate changes nothing else: sleep/away/night-path/master still win as
+before (§6.1/6.2/6.4/§7), and a manual override in the room keeps its §9.2
+blind-room protection (the toggle is not a release condition). The night path
+(§6.2) is deliberately NOT gated by this toggle: the same door sensor may also
+be a configured `night_trigger` (live: the soverom door), and it must keep
+lighting the bathroom path during sleep even while door lighting is off.
 
 1.10 **Occupational presence** (outdoor rooms). An outdoor room's occupational
 switch is a *declaration* of presence: while on AND the room's own dusk ramp is
@@ -679,6 +696,10 @@ from it; the recovery edge and an identical-timestamp republish are ignored
 - `switch.light_conductor_enabled` — master enable; off = observe only
   (no commands; ledger and estimator keep running).
 - `switch.light_conductor_<room>_occupational` — only for outdoor rooms (6.5).
+- `switch.light_conductor_<room>_door_lighting` — only for non-outdoor rooms
+  with trigger entities configured (1.9; an outdoor room's lighting is
+  mode-resolved per 6.5, never trigger-driven, so the switch would be inert),
+  restorable, default on.
 - `switch.light_conductor_away_lighting` — outdoor presence simulation while
   away (6.4), restorable, default on.
 - Per room diagnostics: `sensor.<room>_role` (enum), `sensor.<room>_natural_lux`
@@ -710,8 +731,18 @@ if the previous state differed materially from the setpoint, the light
 actually moved there — a wall dial restoring the previous level lands exactly
 on the last command — and it latches (§9.1).
 
-11.2 Restorable entities: master gain, enabled, occupational switches,
-override latches (not restored — cleared on restart).
+11.2 Restorable entities: master gain, enabled, away-lighting, occupational
+and door-lighting switches; override latches are not restored — cleared on
+restart. The runtime knobs (`enabled`, `away_lighting`, `occupational`,
+`door_lighting`) do NOT travel in the production seed snapshot: each is a
+RestoreEntity that re-submits its restored state into the controller queue
+during platform setup, ahead of the first drain, so the engine holds every
+restored knob before the first recompute can act on it. The `InitialSnapshot`
+mappings for these knobs are the engine-level replay/test contract (a
+snapshot-seeded engine must gate triggers exactly like the running one did);
+production snapshots leave them empty, so the engine defaults stand until the
+restore re-submits drain (door lighting absent ⇒ on — the same default a
+fresh install and a missed restore get).
 
 ## 12. Tunables (defaults)
 

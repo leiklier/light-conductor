@@ -62,6 +62,18 @@ class TriggerFired(Event):
 
 
 @dataclass(frozen=True, slots=True)
+class DoorLightingChanged(Event):
+    """A trigger room's ``door_lighting`` switch toggled (rule 1.9).
+
+    Off => trigger pulses for the room mint no hold, and the falling edge
+    drops any live one.
+    """
+
+    room_id: str
+    on: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ForeignChange(Event):
     """A non-echo channel state change: latches an override (rule 9.1).
 

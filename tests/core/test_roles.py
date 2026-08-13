@@ -172,6 +172,15 @@ def test_door_close_edge_shortens_hold() -> None:
     assert not rs.self_active
 
 
+def test_door_lighting_off_ingests_no_trigger() -> None:
+    """§1.9: with door lighting off the pulse mints no hold at all."""
+    rs = RoomState(door_lighting=False)
+    roles.ingest_trigger(rs, False, at(1, 12, 0), TUN)
+    assert rs.trigger_hold_until is None
+    _step(rs, at(1, 12, 0), shape=RoomShape.DOOR)
+    assert not rs.self_active
+
+
 def test_presence_room_trigger_keeps_active() -> None:
     """§1.9: a trigger holds a presence room ACTIVE even without occupancy."""
     rs = RoomState()

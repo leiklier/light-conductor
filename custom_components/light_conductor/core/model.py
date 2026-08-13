@@ -278,6 +278,9 @@ class RoomState:
     role: Role = Role.OFF
     # Outdoor occupational switch (rule 6.5).
     occupational: bool = False
+    #: Door-lighting toggle (rule 1.9, §10 switch; default on). Off => trigger
+    #: pulses for this room mint no hold.
+    door_lighting: bool = True
     #: When the engine last EMITTED a write for this room (§6.5b stale-zero
     #: guard). Unlike est.last_own_command_at this is unconditional.
     last_own_write_at: datetime | None = None
@@ -349,6 +352,8 @@ class InitialSnapshot:
     occupancy: Mapping[str, bool | None] = field(default_factory=dict)
     activity: Mapping[str, Activity | None] = field(default_factory=dict)
     occupational: Mapping[str, bool] = field(default_factory=dict)
+    #: room_id -> door-lighting toggle (rule 1.9); absent => on.
+    door_lighting: Mapping[str, bool] = field(default_factory=dict)
     #: channel_id -> (normalized level, ct) currently reported; adopted as
     #: the ledger baseline (rule 11.1). Level 0 / absent => channel off.
     channels: Mapping[str, tuple[float, int | None]] = field(default_factory=dict)
