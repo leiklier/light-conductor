@@ -406,6 +406,82 @@ def test_door_lighting_off_mid_hold_demotes_immediately() -> None:
     assert "soverom_taklys" in offs(dark)
 
 
+def test_door_lighting_off_ends_trigger_borne_activity_in_presence_room() -> None:
+    """§1.9: shape-independent falling edge — an UNOCCUPIED presence-shaped room
+    whose activity was only trigger-borne demotes in that same recompute. The
+    fold must clear the vacancy hold too, or the trigger's self-activity would
+    mint a fresh one on this very step and burn for up to hold_seconds (reads
+    as a broken switch)."""
+    eng = _engine()
+    eng.handle(PresenceChanged("kontor", False), at(1, 20, 0))
+    lit = eng.handle(TriggerFired("kontor"), at(1, 20, 1))
+    assert eng.state.rooms["kontor"].role is Role.ACTIVE
+    assert "kontor_taklys" in sets(lit)
+
+    dark = eng.handle(DoorLightingChanged("kontor", False), at(1, 20, 2))
+    rs = eng.state.rooms["kontor"]
+    assert rs.trigger_hold_until is None
+    assert rs.vacancy_hold_until is None  # no freshly minted hold
+    assert rs.role is Role.OFF
+    assert "kontor_taklys" in offs(dark)
+
+
+def test_door_lighting_off_keeps_occupied_presence_room_active() -> None:
+    """§1.9: presence-borne activity survives the falling edge — a genuinely
+    OCCUPIED presence room stays ACTIVE; only the trigger hold is dropped."""
+    eng = _engine()
+    eng.handle(PresenceChanged("kontor", True), at(1, 20, 0))
+    eng.handle(TriggerFired("kontor"), at(1, 20, 1))
+
+    plan = eng.handle(DoorLightingChanged("kontor", False), at(1, 20, 2))
+    rs = eng.state.rooms["kontor"]
+    assert rs.trigger_hold_until is None
+    assert rs.self_active is True
+    assert rs.role is Role.ACTIVE
+    assert "kontor_taklys" not in offs(plan)
+
+
+def test_door_lighting_off_is_not_an_override_release() -> None:
+    """§1.9/§9.2 (D22): the toggle is NOT an override release condition — a
+    latched wall dial in the (blind) triggered room survives the falling edge:
+    no channel commands are emitted, the latch is intact, the hold is nulled."""
+    eng = _engine()
+    eng.handle(TriggerFired("soverom"), at(1, 20, 0))
+    eng.handle(ForeignChange("soverom_taklys", 0.6), at(1, 20, 1))
+    assert eng.state.rooms["soverom"].overridden
+
+    plan = eng.handle(DoorLightingChanged("soverom", False), at(1, 20, 2))
+    rs = eng.state.rooms["soverom"]
+    assert rs.overridden  # latch intact (§9.2 blind-room protection)
+    assert rs.trigger_hold_until is None  # hold nulled all the same
+    assert "soverom_taklys" not in sets(plan)
+    assert "soverom_taklys" not in offs(plan)
+    assert rs.channels["soverom_taklys"].commanded_b == 0.6  # the dial stands
+
+
+def test_door_lighting_off_during_sleep_holds_after_wake() -> None:
+    """§6.1/§1.9: flipping the toggle off during sleep sticks. The pulse that
+    landed while sleep owned the room minted a hold (ingestion is not
+    sleep-gated) — the falling edge clears it, so waking does not resurrect
+    the light, and a NEW door edge after sleep stays dark too."""
+    eng = _engine()
+    eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 23, 0))
+    eng.handle(SleepChanged(True), at(1, 23, 1))
+    eng.handle(TriggerFired("soverom"), at(1, 23, 2))  # inert: sleep hard-off
+    assert eng.state.rooms["soverom"].role is Role.OFF
+
+    eng.handle(DoorLightingChanged("soverom", False), at(1, 23, 3))
+    assert eng.state.rooms["soverom"].trigger_hold_until is None
+
+    wake = eng.handle(SleepChanged(False), at(1, 23, 4))
+    assert eng.state.rooms["soverom"].role is Role.OFF  # cleared hold stays dead
+    assert "soverom_taklys" not in sets(wake)
+
+    edge = eng.handle(TriggerFired("soverom"), at(1, 23, 5))  # new edge, gated
+    assert eng.state.rooms["soverom"].role is Role.OFF
+    assert "soverom_taklys" not in sets(edge)
+
+
 def test_door_lighting_back_on_is_not_retroactive() -> None:
     """§1.9: re-enabling revives nothing; the NEXT door edge behaves normally."""
     eng = _engine()
@@ -421,7 +497,9 @@ def test_door_lighting_back_on_is_not_retroactive() -> None:
 
 
 def test_door_lighting_seeds_from_the_snapshot() -> None:
-    """§11: the snapshot carries the toggle per room; absent means on."""
+    """§11.2 engine contract: the InitialSnapshot mapping seeds the toggle for
+    engine-level replay/tests; absent means on. (Production snapshots leave the
+    map empty — there the switch's restore re-submit carries the knob.)"""
     eng = _engine(InitialSnapshot(door_lighting={"soverom": False}))
     assert eng.state.rooms["soverom"].door_lighting is False
     assert eng.state.rooms["gang"].door_lighting is True  # absent => on
@@ -434,7 +512,10 @@ def test_door_lighting_seeds_from_the_snapshot() -> None:
 
 
 def test_sleep_still_wins_over_door_lighting() -> None:
-    """§6.1 > §1.9: the toggle gates ingestion only — sleep keeps its hard-off."""
+    """§6.1 guard: with the toggle at its default ON, sleep's hard-off still owns
+    the room — a door pulse during sleep lights nothing, and the toggle itself
+    is untouched. (The toggle-off-during-sleep interplay is pinned in
+    test_door_lighting_off_during_sleep_holds_after_wake.)"""
     eng = _engine()
     eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 23, 0))
     eng.handle(SleepChanged(True), at(1, 23, 1))

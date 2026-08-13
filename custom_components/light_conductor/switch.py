@@ -12,6 +12,7 @@ from typing import Any
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import STATE_OFF, STATE_ON
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -45,8 +46,10 @@ async def async_setup_entry(
         if room.get(CONF_SHAPE) == RoomShape.OUTDOOR.value:
             entities.append(OccupationalSwitch(controller, room_id, name))
         # Keyed off the trigger entities, not the shape: the switch is only
-        # meaningful where a trigger can actually fire (§1.9).
-        if room.get(CONF_TRIGGERS):
+        # meaningful where a trigger can actually fire (§1.9). Outdoor rooms
+        # are excluded — their lighting is mode-resolved (§6.5), never
+        # trigger-driven, so the switch would be inert.
+        if room.get(CONF_TRIGGERS) and room.get(CONF_SHAPE) != RoomShape.OUTDOOR.value:
             entities.append(DoorLightingSwitch(controller, room_id, name))
     async_add_entities(entities)
 
@@ -57,14 +60,20 @@ class _RestoreSwitch(LightConductorEntity, SwitchEntity, RestoreEntity):
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
-        if last is not None:
-            self._apply(last.state == "on")
+        if last is not None and last.state in (STATE_ON, STATE_OFF):
+            self._apply(last.state == STATE_ON)
         else:
-            # The engine's fail-safe default stands (enabled=False ⇒ observe
-            # only). A missed restore must be visible, not silent: a restore
-            # miss on the enabled switch is how a conductor could otherwise
-            # go live unbidden after a restart.
-            _LOGGER.warning("No restore data for %s; using the fail-safe default", self.entity_id)
+            # No restore data, or a restored `unavailable`/`unknown` — neither
+            # carries user intent, so the entity's own engine default stands:
+            # fail-safe off for enabled (a conductor must not go live unbidden
+            # after a restart), default on for away/door lighting (a restore
+            # miss must not silently disable a convenience knob). A missed
+            # restore must be visible, not silent.
+            _LOGGER.warning(
+                "No restore data for %s; keeping default %s",
+                self.entity_id,
+                "on" if self.is_on else "off",
+            )
 
     def _apply(self, on: bool) -> None:  # pragma: no cover - overridden
         raise NotImplementedError

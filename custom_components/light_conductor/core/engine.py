@@ -176,13 +176,25 @@ class Engine:
             case DoorLightingChanged():
                 if (rs := s.rooms.get(event.room_id)) is not None:
                     if not event.on:
-                        # Falling edge: drop the live hold NOW so this same
-                        # recompute re-resolves the room and it leaves down the
-                        # normal demotion/fade path (rule 1.9) — exactly the way
-                        # hold expiry would have taken it. The override latch is
-                        # untouched: the toggle gates ingestion, it is not a
-                        # release condition (rule 9.2).
+                        # Falling edge: end trigger-borne activity NOW so this
+                        # same recompute re-resolves the room and it leaves
+                        # down the normal demotion/fade path (rule 1.9) —
+                        # exactly the way hold expiry would have taken it. In a
+                        # presence-shaped room, clearing the trigger hold alone
+                        # is not enough: the trigger's self-activity would mint
+                        # a fresh vacancy hold on this very step and the light
+                        # would burn for up to hold_seconds (reads as a broken
+                        # switch). Occupancy currently True means the activity
+                        # is presence-borne, not trigger-borne — that room must
+                        # stay ACTIVE. The override latch is untouched either
+                        # way: the toggle gates ingestion, it is not a release
+                        # condition (rule 9.2).
                         rs.trigger_hold_until = None
+                        if roles.occupancy(rs, now, self.tun) is not True:
+                            rs.vacancy_hold_until = None
+                            if rs.self_active:
+                                rs.self_active = False
+                                rs.last_active_end = now
                     rs.door_lighting = event.on
             case ForeignChange():
                 self._on_foreign(event, now)

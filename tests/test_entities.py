@@ -181,6 +181,20 @@ async def test_door_lighting_switch_only_for_trigger_rooms(hass: HomeAssistant) 
     assert (DOMAIN, f"{entry.entry_id}_room_soverom") in device.identifiers
 
 
+async def test_outdoor_room_with_triggers_gets_no_door_lighting_switch(
+    hass: HomeAssistant,
+) -> None:
+    """§10: an outdoor room's lighting is mode-resolved (§6.5), never
+    trigger-driven — triggers configured on it must not mint an inert
+    door-lighting switch. The occupational switch still appears."""
+    entry = await setup_entry(
+        hass,
+        options([room("balkong", ["light.b"], shape="outdoor", triggers=["binary_sensor.bdor"])]),
+    )
+    assert entity_id_for(hass, entry, "balkong_occupational") is not None
+    assert entity_id_for(hass, entry, "balkong_door_lighting") is None
+
+
 async def test_door_lighting_switch_restores_off(hass: HomeAssistant) -> None:
     """§11.2: a restored 'off' is re-submitted, so the engine boots gated off and
     the door no longer lights the room."""
@@ -196,6 +210,21 @@ async def test_door_lighting_switch_restores_off(hass: HomeAssistant) -> None:
     hass.states.async_set("binary_sensor.sovedor", "on")  # door opens
     await hass.async_block_till_done()
     assert controller.engine.room_state("soverom").trigger_hold_until is None
+
+
+async def test_restored_unavailable_keeps_the_default(hass: HomeAssistant) -> None:
+    """§11.2: a restored `unavailable` carries no user intent — the entity's
+    default (on) survives instead of silently applying OFF."""
+    hass.states.async_set("binary_sensor.sovedor", "off")
+    entry = await setup_entry(
+        hass,
+        options(_door_home()),
+        restore=(State("switch.light_conductor_soverom_door_lighting", "unavailable"),),
+    )
+    controller = hass.data[DOMAIN][entry.entry_id]
+    assert controller.engine.room_state("soverom").door_lighting is True
+    eid = entity_id_for(hass, entry, "soverom_door_lighting")
+    assert hass.states.get(eid).state == "on"
 
 
 async def test_door_lighting_switch_flip_reaches_the_engine(hass: HomeAssistant) -> None:

@@ -561,26 +561,39 @@ that is wanted right now (reading in bed, a guest sleeping, airing the room).
 submitting `TriggerFired` from the controller when the switch is off. Rejected:
 the engine is the authority on room state (§0), and events are the only way
 time and input enter it (rule 0). A gate that lives in the adapter would make a
-seeded or replayed engine behave differently from the live one — the whole
-point of `InitialSnapshot` carrying runtime knobs (§11.2) is that the same
-event stream reproduces the same state. So `door_lighting` is per-room engine
-state, seeded from the snapshot, and `roles.ingest_trigger` returns early while
-it is off. Ingestion is the right seam: `_step_trigger` and `next_review` then
-need no changes at all, because a room with the toggle off simply has no hold.
+seeded or replayed engine behave differently from the live one. So
+`door_lighting` is per-room engine state (default on) and
+`roles.ingest_trigger` returns early while it is off. In production the knob
+reaches the engine the way every runtime knob does (§11.2): the switch is a
+RestoreEntity that re-submits its restored state into the controller queue
+during platform setup, ahead of the first drain — the production snapshot's
+`door_lighting` map stays empty. The `InitialSnapshot` mapping exists for
+engine-level replay/tests, where a seeded engine must gate triggers exactly
+like the running one did. Ingestion is the right seam: `_step_trigger` and
+`next_review` then need no changes at all, because a room with the toggle off
+simply has no hold.
 
 **Default on, and a restore miss stays on.** The enabled switch fails safe to
 *off* because a conductor going live unbidden after a restart is the dangerous
 direction (§10). This toggle is the opposite: it is a convenience knob, and the
 failure a user would actually notice is walking into a dark bedroom because a
 restore miss silently disabled the feature they never turned off. So the engine
-default is `True` and a restore miss keeps it (the `_RestoreSwitch` warning
-still fires — a missed restore stays visible in the log).
+default is `True` and a restore miss keeps it — as does a restored
+`unavailable`/`unknown` state, which carries no user intent and must not be
+read as OFF (the `_RestoreSwitch` warning still fires either way, naming the
+default it kept — a missed restore stays visible in the log).
 
-**The falling edge clears the live hold.** Leaving an in-flight `trigger_hold`
-to expire on its own would mean "off" takes up to `trigger_hold` (300 s) to do
-anything visible — the user flips the switch and the light stays on for five
-minutes, which reads as a broken switch. Clearing `trigger_hold_until` in the
-fold makes the room re-resolve in that same recompute and leave down the normal
+**The falling edge ends trigger-borne activity, shape-independently.** Leaving
+an in-flight `trigger_hold` to expire on its own would mean "off" takes up to
+`trigger_hold` (300 s) to do anything visible — the user flips the switch and
+the light stays on for five minutes, which reads as a broken switch. And in a
+presence-shaped room with triggers, clearing the trigger hold alone is not
+enough: the trigger's self-activity would mint a fresh vacancy hold in that
+very recompute and burn for up to `hold_seconds` — same broken switch. So the
+fold clears `trigger_hold_until` and, iff the room's occupancy is not
+currently True (i.e. the activity was trigger-borne, not presence-borne), the
+vacancy hold and self-activity too; a genuinely occupied presence room stays
+ACTIVE. The room re-resolves in that same recompute and leaves down the normal
 demotion/fade path, i.e. exactly the transition hold expiry would have produced
 — not a hard-off, so a neighbour-driven ADJACENT/BACKGROUND role still stands.
 The rising edge is deliberately NOT retroactive: re-arming a hold from a door
@@ -595,7 +608,8 @@ or not the toggle is flipped afterwards.
 
 The entity is keyed off configured trigger entities rather than
 `shape == DOOR`, so a corridor room given triggers (§1.7) gets the same knob
-for free; today only soverom has any.
+for free; outdoor rooms are excluded — their lighting is mode-resolved (§6.5),
+never trigger-driven, so the switch would be inert. Today only soverom has any.
 
 ## Open questions — RESOLVED (user, 2026-07-25)
 

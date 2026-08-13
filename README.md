@@ -38,7 +38,8 @@ What it does:
 
 Entities: `light.light_conductor_master` (master gain dimmer),
 `switch.light_conductor_enabled` / `_away_lighting`, per-outdoor-room
-occupational switch, and per room `sensor.<room>_role`,
+occupational switch, per-trigger-room door-lighting switch (gates the
+door-triggered lighting; default on), and per room `sensor.<room>_role`,
 `binary_sensor.<room>_overridden`, and — for rooms with a lux sensor —
 `sensor.<room>_natural_lux` plus, where a closed loop can run (everything but
 outdoor rooms), `sensor.<room>_target_lux`,
