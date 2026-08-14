@@ -761,3 +761,97 @@ async def test_diagnostics_dump_reports_tv_state(hass: HomeAssistant) -> None:
     dump = await async_get_config_entry_diagnostics(hass, entry)
     assert dump["engine"]["tv"] == "on"
     assert dump["engine"]["tv_hold_until"] is None
+
+
+# --- §8.4a: a foreign change interrupts the channel's writer -----------------
+
+
+async def test_foreign_change_interrupts_stepping_ramp(hass: HomeAssistant) -> None:
+    """§8.4a: a dial mid-ramp abandons the writer's remaining steps — the
+    §9.1 latch silences the ENGINE, but before this fix the queued steps kept
+    marching the light to the stale pre-dial goal (soverom's ~10 s door-open
+    ramp erased the wall dial, the 2026-08-14 incident)."""
+    set_light(hass, "light.a", transition=False)  # Plejd: software stepping
+    hass.states.async_set("binary_sensor.pa", "off")
+    entry = await setup_entry(
+        hass, options([room("a", ["light.a"], presence="binary_sensor.pa", max_output=1.0)])
+    )
+    controller = hass.data[DOMAIN][entry.entry_id]
+    turn_on = async_mock_service(hass, "light", "turn_on")
+
+    hass.states.async_set("binary_sensor.pa", "on")
+    await hass.async_block_till_done()
+    writer = controller._writer("light.a")
+    assert writer._step_state is not None  # full-range ramp in flight
+    set_light(hass, "light.a", "on", brightness=turn_on[-1].data["brightness"])
+    await hass.async_block_till_done()
+
+    # The occupant dials DOWN to 20 % mid-ramp: foreign -> latch + interrupt.
+    set_light(hass, "light.a", "on", brightness=51)
+    await hass.async_block_till_done()
+    assert controller.engine.room_state("a").overridden
+    assert writer._step_state is None and writer._pending is None
+
+    n = len(turn_on)
+    for _ in range(12):  # the abandoned ramp must never resume
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=1.2))
+        await hass.async_block_till_done()
+    assert len(turn_on) == n, f"writer kept stepping after the dial: {list(turn_on)[n:]}"
+
+
+async def test_wall_event_interrupts_stepping_ramp(hass: HomeAssistant) -> None:
+    """§8.4a/§9.4: a wall press abandons in-flight writer work for the whole
+    room, even when the observed levels sit inside echo tolerance."""
+    set_light(hass, "light.a", transition=False)
+    hass.states.async_set("binary_sensor.pa", "off")
+    hass.states.async_set("event.wall_a", "2026-08-14T06:00:00.000+00:00")
+    entry = await setup_entry(
+        hass,
+        options(
+            [
+                room(
+                    "a",
+                    ["light.a"],
+                    presence="binary_sensor.pa",
+                    wall=["event.wall_a"],
+                    max_output=1.0,
+                )
+            ]
+        ),
+    )
+    controller = hass.data[DOMAIN][entry.entry_id]
+    async_mock_service(hass, "light", "turn_on")
+
+    hass.states.async_set("binary_sensor.pa", "on")
+    await hass.async_block_till_done()
+    writer = controller._writer("light.a")
+    assert writer._step_state is not None
+
+    hass.states.async_set("event.wall_a", "2026-08-14T06:00:05.000+00:00")  # a press
+    await hass.async_block_till_done()
+    assert controller.engine.room_state("a").overridden
+    assert writer._step_state is None and writer._pending is None
+
+
+# --- §2.3: engine time is the LOCAL wall clock -------------------------------
+
+
+async def test_engine_clock_ramps_run_on_local_time(hass: HomeAssistant, freezer) -> None:
+    """§2.3: the clock terms read minutes past LOCAL midnight. 05:00 UTC in
+    Europe/Oslo is 07:00 local — two-thirds through the morning ramp
+    (E ≈ 0.33), so an occupied room lights near day-bright. Stamped with UTC
+    the engine held full-evening E (= 1.0, capped dim warm light) until 08:00
+    local every morning (the 2026-08-14 incident)."""
+    await hass.config.async_set_time_zone("Europe/Oslo")
+    freezer.move_to("2026-08-14T05:00:00+00:00")
+    set_light(hass, "light.a", transition=True)
+    hass.states.async_set("binary_sensor.pa", "off")
+    hass.states.async_set("sun.sun", "above_horizon", {"elevation": 9.0})
+    entry = await setup_entry(hass, options([room("a", ["light.a"], presence="binary_sensor.pa")]))
+    controller = hass.data[DOMAIN][entry.entry_id]
+    async_mock_service(hass, "light", "turn_on")
+
+    hass.states.async_set("binary_sensor.pa", "on")
+    await hass.async_block_till_done()
+    goal = controller.engine.room_state("a").channels["light.a"].commanded_b
+    assert goal > 0.5, f"commanded {goal}: full-evening dim at 07:00 local (UTC-stamped clock)"

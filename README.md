@@ -27,8 +27,11 @@ What it does:
 - **Calibrated photometry** — a one-button night sweep measures each lamp's
   lux gain and dimming curve at the room's sensor.
 - **Manual control is respected** — any wall rotary, HomeKit, or voice change
-  latches a per-room override; the conductor backs off until vacancy, sleep,
-  away, or a timeout.
+  latches a per-room override; the conductor backs off until observed vacancy,
+  a mode onset (sleep or away *engaging*), or a timeout. A change made while
+  sleep or away already stands — the 03:00 reading light — is respected
+  outright until the timeout; modes win once, at their edge, and never fight
+  the hand on the dial.
 - **Whole-home setup** — one config entry for the house, prefilled by
   discovery from your Home Assistant areas (lights, illuminance sensor,
   presence-conductor occupancy), then editable room-by-room under Options.

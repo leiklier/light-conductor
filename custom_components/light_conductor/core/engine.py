@@ -203,14 +203,32 @@ class Engine:
             case ReviewTick():
                 pass  # recompute only
             case SleepChanged():
+                if event.active and not s.sleep:
+                    # Sleep ONSET wins once (rule 9.2): every latch clears so
+                    # the house goes dark. A latch minted DURING sleep (the
+                    # 03:00 reading light) is deliberate manual control and is
+                    # respected by the standing hard-off (rule 6.1).
+                    for rs in s.rooms.values():
+                        override.release(rs)
                 s.sleep = event.active
                 if not event.active:
                     s.night_active = False
                     s.night_hold_until = None
                     gain.relax_to_neutral(s, self.tun)  # rule 7.3 (sleep-off edge)
             case HomeChanged():
+                if event.anyone_home is False and s.anyone_home is not False:
+                    # Away ONSET edge (rule 9.2) — None fails safe as home
+                    # (rule 6.4), so None -> False is a genuine departure. A
+                    # False re-submit (the adapter re-resolves on every
+                    # fallback entity change) is NOT an edge and must not
+                    # release a latch minted during away.
+                    for rs in s.rooms.values():
+                        override.release(rs)
                 s.anyone_home = event.anyone_home
             case VacationChanged():
+                if event.active and not s.vacation:
+                    for rs in s.rooms.values():  # rule 9.2: away-onset release
+                        override.release(rs)
                 s.vacation = event.active
             case TvChanged():
                 self._on_tv(event.tv, now)
@@ -729,22 +747,31 @@ class Engine:
         res = modes.resolve(room, rs, s, e, tun, night_expiring, dusk, tv)
         off_worthy = base is Role.OFF and not rs.self_active
 
-        # Override arbitration (rule 9): mode hard-offs and night path win.
+        # Override arbitration (rule 9): a standing latch outranks every mode
+        # resolution. Mode hard-offs win exactly once, at their ONSET edge —
+        # the fold releases every latch when sleep/away/vacation engages
+        # (rule 9.2) — so a latch present NOW was minted during the mode and
+        # is deliberate manual control (the 03:00 reading light, the wall
+        # dial the radar-blind "away" house cannot see). The night path
+        # likewise governs only unlatched rooms (rule 6.2): its resolution is
+        # not ``off``, so it falls to the hold branch below.
         if rs.overridden:
-            if res is not None and res.suppress_override:
-                pass  # night path suspends the override → fall through
-            elif res is not None and res.off and res.respect_override:
-                # A respected daylight-OFF (§6.5b): only the timeout releases.
-                # should_release's off_worthy path must not reach it — a
-                # presence-capable outdoor room (occupancy fallback configured)
-                # would otherwise release-and-counter the press (review F4).
+            if res is not None and res.off and res.respect_override:
+                # A respected hard-off (sleep/away standing, rules 6.1/6.4,
+                # or the outdoor daylight-OFF while occupational, §6.5b):
+                # only the timeout releases. should_release's off_worthy path
+                # must not reach it — a presence-capable room would otherwise
+                # release-and-counter the press (review F4).
                 if not override.timed_out(rs, now, tun):
                     plan.review_at(override.override_review(rs, now, tun))
                     return self._diag(room, rs, rs.role)
                 override.release(rs)
             elif res is not None and res.off:
-                override.release(rs)  # sleep/away hard-off releases + wins
-            elif override.should_release(rs, s, off_worthy, room.presence_capable, now, tun):
+                # The one non-respecting OFF: outdoor daylight with no
+                # declared occupant — the morning descent cleans up a stray
+                # dialed level (rule 6.5b).
+                override.release(rs)
+            elif override.should_release(rs, off_worthy, room.presence_capable, now, tun):
                 override.release(rs)
             else:
                 # Still adjusting nothing, but keep both clocks alive: the

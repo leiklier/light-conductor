@@ -1,11 +1,14 @@
 """Manual override & reconciliation (ENGINE_SPEC §9).
 
 A non-echo channel change latches the *room* OVERRIDDEN (rule 9.1): the
-engine adopts the observed levels as the room's goal and stops adjusting it,
-except mode hard-offs (sleep/away still win; night path suspends the
-override). The latch releases on an OFF-worthy vacancy, sleep, away, a
-master power cycle, or ``override_timeout`` (rule 9.2). Release is handled by
-the engine re-entering normal control with slew ramps (no jumps).
+engine adopts the observed levels as the room's goal and stops adjusting it.
+Mode hard-offs win exactly once, at their ONSET edge — the engine releases
+every latch when sleep/away/vacation engages (rule 9.2) — while a latch
+minted DURING a standing mode is deliberate manual control and is respected
+(rules 6.1/6.4). The latch otherwise releases on an OFF-worthy vacancy
+(presence-capable rooms only), a master power cycle, or ``override_timeout``
+(rule 9.2). Release is handled by the engine re-entering normal control with
+slew ramps (no jumps).
 
 Feature-module discipline: imports only :mod:`model` and :mod:`tunables`.
 """
@@ -14,7 +17,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from .model import ChannelState, EngineState, RoomState
+from .model import ChannelState, RoomState
 from .tunables import Tunables
 
 
@@ -55,7 +58,6 @@ def timed_out(rs: RoomState, now: datetime, tun: Tunables) -> bool:
 
 def should_release(
     rs: RoomState,
-    state: EngineState,
     off_worthy: bool,
     presence_capable: bool,
     now: datetime,
@@ -63,20 +65,21 @@ def should_release(
 ) -> bool:
     """Whether a latched override should clear now (rule 9.2).
 
-    Master power cycles are handled at the event site (the latch is cleared
-    when the master light toggles). ``off_worthy`` is True when the room's
-    natural role has decayed to OFF (hold expiry at the OFF tier) — it releases
-    the latch only for ``presence_capable`` rooms, where OFF-decay means the
-    room was OBSERVED vacant. In a blind room (door/corridor triggers only)
+    Mode ONSETS (sleep/away/vacation engaging) release at the event fold, and
+    master power cycles at their event site — neither is re-checked here, so
+    a latch minted WHILE a mode stands (the 03:00 reading light) survives the
+    standing mode (rules 6.1/6.4; only its timeout ends it, enforced by the
+    engine's respect branch). ``off_worthy`` is True when the room's natural
+    role has decayed to OFF (hold expiry at the OFF tier) — it releases the
+    latch only for ``presence_capable`` rooms, where OFF-decay means the room
+    was OBSERVED vacant. In a blind room (door/corridor triggers only)
     OFF-decay merely means the trigger hold ran out while the occupant may
     still be there; releasing would instantly counter their manual setting
     with the vacancy tier (the soverom wall-dial incident), so blind rooms
-    hold the latch until timeout/sleep/away/master-cycle.
+    hold the latch until timeout/mode-onset/master-cycle.
     """
     if not rs.overridden:
         return False
-    if state.sleep or state.vacation or state.anyone_home is False:
-        return True
     if timed_out(rs, now, tun):
         return True
     return off_worthy and presence_capable
