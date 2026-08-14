@@ -611,6 +611,69 @@ The entity is keyed off configured trigger entities rather than
 for free; outdoor rooms are excluded — their lighting is mode-resolved (§6.5),
 never trigger-driven, so the switch would be inert. Today only soverom has any.
 
+## D23. Modes win at their onset edge; standing modes respect the dial (beta.18)
+
+Live incident 2026-08-14: "the light level cannot be adjusted in soverom and
+gang" — from the wall dials. Diagnosis: while `household_sleep_mode` stands,
+every §9.1 latch was released and countered within one review — the sleep
+hard-off re-released on *every* recompute (~1 Hz, driven by the lux sensors),
+so a 03:00/06:30 dial-up faded straight back off over `sleep_fade`; and while
+the night path was active (re-armed by the very person moving around), gang
+was pinned to its 5 % night level over any latch (`suppress_override`). The
+two rooms named in the report are exactly the rooms whose dials are used
+during sleep hours; the legacy automations never fought a wall dial.
+
+**Decision: a mode hard-off wins once, at its onset edge.** Engaging
+sleep/away/vacation releases every latch in the event fold (the house goes
+dark whatever was dialed before bed — §6.1/§6.4 keep their teeth), and a
+latch present while the mode *stands* was therefore minted during it:
+deliberate manual control, respected until `override_timeout`. Mechanically,
+the sleep/away hard-off resolutions are now `respect_override` (the shape
+D20 introduced for the outdoor daylight-OFF), the standing-mode checks left
+`should_release`, and `suppress_override` is **removed** — the night path
+governs only unlatched rooms; its resolution is not `off`, so the ordinary
+hold branch keeps a latched room untouched. The onset-edge test is explicit
+about non-edges: `anyone_home = False` re-submitted while already away (the
+adapter re-resolves on every fallback entity change) must not release a
+during-away latch.
+
+Alternatives rejected: gating the release on "who latched, when" timestamps
+(fragile against re-armed episodes; the onset edge encodes the same intent
+with no bookkeeping); releasing night-path-room latches at episode end (the
+timeout already bounds them, and an end-of-episode counter is the same
+fight one step later); keeping suppression for "safety" (the path lights a
+route for someone who is demonstrably at a wall plate — there is no safety
+case for overriding them).
+
+Accepted residual: a during-sleep dial left on burns until the 4 h timeout
+(then the standing hard-off takes it back). That is the price of respecting
+manual control, same as any latch; the wall dial that lit it turns it off.
+
+**Companion adapter fix (§8.4a).** The §9.1 latch silences the engine but
+nothing silenced the *writer*: on the no-transition Plejd lights every move
+is a 1 Hz software stepping ramp, and a dial mid-ramp — soverom's door-open
+blast, 0 → day target ≈ 10 s, commanded at the exact moment a person stands
+at the wall plate — was overrun by the remaining queued steps and erased.
+Foreign changes (and §9.4 wall events, room-wide) now abandon the channel's
+stepping ramp, pending slot and rate timer before the event is submitted.
+
+## D24. Engine time is the local wall clock (beta.18)
+
+Found while diagnosing D23's incident: the adapter stamped `handle()` with
+`dt_util.utcnow()`, while the §2.3 clock ramps (and `_next_clock_boundary`)
+read minutes past **local** midnight — documented as local since day one
+(§12: "20:00", "06:00"; the core test helpers even say so). On the live
+Europe/Oslo install every clock term ran two hours late in summer: E held
+1.0 (full evening) until 08:00 local each morning, so the sensor-less rooms
+— soverom's door lighting and gang, whose level is a pure function of E —
+came on at the capped 30 % evening level through the whole morning window,
+and the evening-cap clamp (applied after master gain) meant no dimmer could
+raise them. The lux rooms masked the same phase error behind daylight
+damping, which is why it read as "just soverom and gang". Invisible in
+high summer (bright mornings need no light); exposed by August. Fix:
+`dt_util.now()`. Aware-vs-aware arithmetic everywhere else makes the zone
+otherwise irrelevant; no engine change.
+
 ## Open questions — RESOLVED (user, 2026-07-25)
 
 - **Q1 (D8):** master dimmer neutral at 50 % — confirmed (boost possible).

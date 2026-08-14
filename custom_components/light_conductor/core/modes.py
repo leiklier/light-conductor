@@ -24,8 +24,7 @@ class RoomResolution:
     ``band_outputs`` None means "use the tier machinery" (only for the
     normal path, never returned by a mode). ``off`` forces every channel
     off. ``gain_exempt`` excludes the room from master-gain scaling (night
-    path and outdoor, rules 7.4/7.2). ``suppress_override`` lets night path
-    win over a latched override (rule 9.1). ``fade`` overrides the ramp.
+    path and outdoor, rules 7.4/7.2). ``fade`` overrides the ramp.
     """
 
     role: Role
@@ -34,10 +33,13 @@ class RoomResolution:
     gain_exempt: bool = False
     off: bool = False
     fade: float | None = None
-    suppress_override: bool = False
-    #: An OFF that must NOT release a latched override (rule 6.5b): the outdoor
-    #: daylight-OFF while occupational is on — a declared occupant's manual
-    #: daylight level must stand. Sleep/away hard-offs never set this.
+    #: An OFF that must NOT release a latched override (rules 6.1/6.4/6.5b):
+    #: sleep/away/vacation hard-offs (they won once, at their ONSET edge —
+    #: a latch standing now was minted DURING the mode and is deliberate
+    #: manual control, e.g. the 03:00 reading light), and the outdoor
+    #: daylight-OFF while occupational is on. The one non-respecting OFF is
+    #: the outdoor daylight-OFF with no declared occupant, so a stray dialed
+    #: level is still cleaned up on the morning descent (rule 6.5b).
     respect_override: bool = False
 
 
@@ -76,27 +78,35 @@ def resolve(
         # Everyone gone: every indoor room OFF (rule 6.4). Outdoor rooms keep
         # their dusk background as presence simulation while away_lighting is
         # on, with the occupational switch ignored until someone is home (6.5).
+        # Away won at its ONSET edge (the fold released every latch, 9.2); a
+        # latch standing NOW was minted during away — the radar can be wrong
+        # about a quiet house, and a hand on a wall dial is definitive
+        # presence evidence — so the standing hard-off respects it (6.4).
         if room.shape is RoomShape.OUTDOOR:
             if state.away_lighting:
                 return _outdoor(room, rs, e, tun, ignore_occupational=True, dusk=dusk)
-            return RoomResolution(Role.OFF, off=True, gain_exempt=True)
-        return RoomResolution(Role.OFF, off=True)
+            return RoomResolution(Role.OFF, off=True, gain_exempt=True, respect_override=True)
+        return RoomResolution(Role.OFF, off=True, respect_override=True)
 
     if state.sleep:
         if state.night_active and room.night_path:
+            # The path guides movement through unlatched rooms; a foreign
+            # change during the episode latches per 9.1 and wins (rule 6.2) —
+            # the engine's arbitration holds the latch because this
+            # resolution is not ``off``.
             return RoomResolution(
                 Role.NIGHT_PATH,
                 band_outputs=dict(room.profile.night_output),
                 ct_override=tun.ct_min_evening,
                 gain_exempt=True,  # rule 7.4
                 fade=tun.night_fade,
-                suppress_override=True,  # rule 9.1
             )
         # Sleep with no night-path role: OFF. A night-path room whose episode
         # just expired fades over night_fade (rule 6.2); otherwise sleep_fade
-        # (rule 6.1).
+        # (rule 6.1). Sleep won at its ONSET edge (9.2); a latch standing now
+        # was minted during sleep (the 03:00 reading light) and is respected.
         fade = tun.night_fade if (room.night_path and night_expiring) else tun.sleep_fade
-        return RoomResolution(Role.OFF, off=True, fade=fade)
+        return RoomResolution(Role.OFF, off=True, fade=fade, respect_override=True)
 
     if room.shape is RoomShape.OUTDOOR:
         return _outdoor(room, rs, e, tun, dusk=dusk)

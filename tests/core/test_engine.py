@@ -343,17 +343,78 @@ def test_blind_room_dial_survives_hold_expiry() -> None:
     assert "soverom_taklys" in offs(late)
 
 
-def test_override_suspended_by_night_path() -> None:
-    """§9.1: night path suspends an override (safety path wins)."""
+def test_sleep_onset_releases_latch_then_night_path_lights() -> None:
+    """§9.2/§6.2: the sleep ONSET releases a pre-sleep latch (the hard-off
+    wins once, at the edge), so the night path then drives the room."""
     eng = _engine()
     eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 23, 0))
     eng.handle(PresenceChanged("sofakrok", True), at(1, 23, 0, 30))  # occupied, not OFF-worthy
     eng.handle(ForeignChange("sofakrok_taklys", 0.9), at(1, 23, 1))
     assert eng.state.rooms["sofakrok"].overridden
-    eng.handle(SleepChanged(True), at(1, 23, 2))
+    dark = eng.handle(SleepChanged(True), at(1, 23, 2))
+    assert not eng.state.rooms["sofakrok"].overridden  # onset edge released (9.2)
+    assert "sofakrok_taklys" in offs(dark)  # and the hard-off won
     lit = eng.handle(NightTriggerFired(), at(1, 23, 3))
     assert eng.state.rooms["sofakrok"].role is Role.NIGHT_PATH
-    assert "sofakrok_taklys" in sets(lit)  # night path drives it, override suspended
+    assert "sofakrok_taklys" in sets(lit)  # unlatched: night path drives it
+
+
+def test_dial_during_sleep_latches_and_holds() -> None:
+    """§6.1/§9.2: the 03:00 reading-light incident (2026-08-14) — a foreign
+    change WHILE sleep stands latches and is respected; the standing hard-off
+    must not release-and-counter it within one review. The legacy system
+    never fought the wall dial; neither may the conductor."""
+    eng = _engine()
+    eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 23, 0))
+    eng.handle(SleepChanged(True), at(1, 23, 1))  # house dark
+
+    # The occupant dials the soverom wall to 60 % during sleep.
+    eng.handle(ForeignChange("soverom_taklys", 0.6), at(2, 3, 0))
+    assert eng.state.rooms["soverom"].overridden
+
+    # Reviews keep coming; the latch holds and the engine emits nothing.
+    for minute in (1, 5, 30):
+        plan = eng.handle(ReviewTick(), at(2, 3, minute))
+        assert eng.state.rooms["soverom"].overridden
+        assert "soverom_taklys" not in sets(plan)
+        assert "soverom_taklys" not in offs(plan)
+    assert eng.state.rooms["soverom"].channels["soverom_taklys"].commanded_b == 0.6
+
+    # A night trigger opening the path must not clobber the latched gang
+    # either (§6.2: the path governs only unlatched rooms).
+    eng.handle(ForeignChange("gang_taklys", 0.4), at(2, 3, 31))
+    lit = eng.handle(NightTriggerFired(), at(2, 3, 32))
+    assert eng.state.rooms["gang"].overridden
+    assert "gang_taklys" not in sets(lit) and "gang_taklys" not in offs(lit)
+    assert eng.state.rooms["gang"].channels["gang_taklys"].commanded_b == 0.4
+
+    # override_timeout still ends it: released, and the standing sleep
+    # hard-off takes the room back to OFF (9.2).
+    late = eng.handle(ReviewTick(), at(2, 7, 1))
+    assert not eng.state.rooms["soverom"].overridden
+    assert "soverom_taklys" in offs(late)
+
+
+def test_away_resubmit_is_not_an_onset_edge() -> None:
+    """§9.2/§6.4: HomeChanged(False) re-submitted while already away (the
+    adapter re-resolves on every fallback entity change) is NOT an onset edge
+    — it must not release a latch minted during away."""
+    eng = _engine()
+    eng.handle(HomeChanged(False), at(1, 20, 0))  # onset: house goes dark
+
+    # Someone the radar cannot see dials the gang wall to 50 %.
+    eng.handle(ForeignChange("gang_taklys", 0.5), at(1, 20, 1))
+    assert eng.state.rooms["gang"].overridden
+
+    # A re-submit of the standing away state: no edge, no release, no counter.
+    resub = eng.handle(HomeChanged(False), at(1, 20, 2))
+    assert eng.state.rooms["gang"].overridden
+    assert "gang_taklys" not in sets(resub) and "gang_taklys" not in offs(resub)
+
+    # Coming home keeps the (blind-room) latch too — manual control stands.
+    home = eng.handle(HomeChanged(True), at(1, 20, 3))
+    assert eng.state.rooms["gang"].overridden
+    assert "gang_taklys" not in sets(home) and "gang_taklys" not in offs(home)
 
 
 # --- §1.7: corridor via triggers ----------------------------------------

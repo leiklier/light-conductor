@@ -150,7 +150,14 @@ targets directly as normalized channel output (open-loop tables, §4.6).
 from `sun_high_deg` (default +10°) to `sun_low_deg` (default −4°), and
 `E_clock` ramps 0→1 between `evening_start` (default 20:00) and
 `evening_full` (default 22:30) local time, and back to 0 at `morning_start`
-(default 06:00) → `morning_full` (07:30). The clock term guarantees a cozy
+(default 06:00) → `morning_full` (07:30). The clock terms read minutes past
+**local** midnight off the event timestamp, so the adapter MUST stamp
+`handle()` with the instance's local wall clock (`dt_util.now()`), never UTC —
+a UTC stamp runs every clock ramp hours late (Oslo summer: the "06:00"
+morning ramp at 08:00 local, full-evening E all morning; the 2026-08-14
+incident, most visible in the sensor-less rooms whose level is a pure
+function of E). All other engine time arithmetic is duration-based and
+timezone-agnostic. The clock term guarantees a cozy
 ramp-down toward bedtime even in Nordic summer when the sun sets late; the
 sun term darkens winter afternoons. No hard steps: E is continuous and
 evaluated on a coarse schedule (≤ 1 change per `circadian_tick`, default
@@ -419,8 +426,16 @@ mesh write). CT is only rewritten when it moves ≥ `ct_min_delta` (100 K).
 ## 6. Modes
 
 6.1 **Sleep.** `sleep_entity` on ⇒ all rooms OFF (fade `sleep_fade`), and the
-FSM ignores presence except night movement (6.2). Sleep turning off restores
-normal evaluation (morning ramp per §2.3).
+FSM ignores presence except night movement (6.2). The hard-off wins **once,
+at the onset edge**: engaging sleep releases every override latch (9.2) so
+the house goes dark whatever was dialed before bed. While sleep *stands*, a
+new foreign change (the 03:00 reading light) latches per 9.1 and is
+respected — the standing hard-off emits nothing to a latched room until the
+latch times out (9.2). Anything else counters the wall dial within one
+review, in exactly the rooms whose dials are used during sleep (the
+2026-08-14 soverom/gang incident). Sleep turning off restores normal
+evaluation (morning ramp per §2.3); a during-sleep latch survives the
+morning like any other latch.
 
 6.2 **Night path.** While sleep is on, a night trigger (any configured
 `night_trigger` entity: bedroom door opening, or presence/pass-by in a living
@@ -429,6 +444,11 @@ set light at their profile's `night_output` (fixed dim warm values, CT forced
 to `ct_min_evening`), everything else stays OFF. The episode holds for
 `night_hold` (default 600 s) after the last trigger, restartable, then fades
 out over `night_fade` (10 s). Master gain does not scale night path (§7.4).
+The path governs only **unlatched** rooms: a foreign change in a path room
+during the episode latches per 9.1 and wins — the path guides movement, it
+must not fight the hand on the dial. (Sleep's onset already released
+pre-sleep latches, so any latch the path meets was minted during sleep and
+is deliberate.)
 
 6.3 **TV mode (tri-state).** The configured `tv_entities` resolve to exactly
 one TV state, highest first:
@@ -479,8 +499,13 @@ so the step up happens on time in an otherwise quiet house. `tv_pause_grace`
 keep their dusk background (6.5) as presence simulation while the
 `away_lighting` switch (§10, restorable, default on) is on; switch off ⇒
 outdoor rooms go dark on away too. `None`/unavailable fails safe as home
-(consistent with sonos-conductor 1.8). Arrival re-evaluates immediately;
-no flash: normal fades apply.
+(consistent with sonos-conductor 1.8). Like sleep (6.1), away wins **once,
+at the onset edge** (`anyone_home` transitioning to False releases every
+latch, 9.2 — a re-submit of a standing False is not an edge); a foreign
+change while away stands latches and is respected until timeout — the radar
+can be wrong about a quiet house, and a hand on a wall dial is definitive
+presence evidence. Arrival re-evaluates immediately; no flash: normal fades
+apply.
 
 6.5 **Balkong (outdoor room).** A room may be flagged `outdoor`. It ignores
 presence and runs: ON at `E ≥ outdoor_on_threshold` (dusk) at
@@ -647,6 +672,18 @@ re-report tolerance-match and be consumed. Accepted trade-off: a genuine manual
 change made in the snapshot→first-report gap is absorbed once (the same
 grossly-different report will re-latch on any subsequent change).
 
+8.4a **Foreign changes interrupt the writer.** A report classified foreign —
+and a §9.4 wall event, for every channel in its room — additionally abandons
+the channel's in-flight writer work: the software stepping ramp, the pending
+(latest-wins) slot, and a waiting rate timer are all dropped *before* the
+`ForeignChange` is submitted. The §9.1 latch silences the ENGINE, but on a
+no-transition light the writer's already-queued steps would otherwise keep
+playing out to the stale pre-dial goal — soverom's door-open ramp (0 → day
+target ≈ 10 s of 1 Hz steps) marched straight over the wall dial and erased
+the adjustment (the 2026-08-14 incident). A service call already dispatched
+cannot be recalled: at most one more write lands, and its report is consumed
+as its own echo.
+
 8.5 **Availability.** A channel (or the whole Plejd gateway) unavailable ⇒
 skip its writes this cycle and re-reconcile on recovery — never queue against
 a dead link; never mark the room failed. State divergence found at recovery
@@ -661,19 +698,25 @@ down to the dim floor when the room was lit.
 9.1 **Foreign changes latch an override.** A non-echo state change on a
 channel (wall rotary, HomeKit direct, voice) sets the *room* to
 `OVERRIDDEN`: the engine adopts the observed levels as the room's goal and
-stops adjusting everything except mode hard-offs (sleep/away still win; night
-path suspends the override).
+stops adjusting it entirely. Mode hard-offs win at their **onset edge only**
+(9.2); a standing mode — sleep, away, vacation, the night path — respects a
+latch minted while it stands (6.1/6.2/6.4). The one exception is the outdoor
+daylight-OFF with no declared occupant, which still releases-and-cleans-up a
+stray dialed level on the morning descent (6.5b).
 
 9.2 **Override release.** The override clears on: room OFF-worthy vacancy
-(hold expiry at OFF tier) — **presence-capable rooms only**, sleep on, away,
-master gain off/on cycle, or `override_timeout` (default 4 h). Release
-re-enters normal control with slew ramps (no jumps). A room is
+(hold expiry at OFF tier) — **presence-capable rooms only**; the
+sleep/away/vacation **onset edge** (the moment the mode engages — never
+re-checked while it stands, so a during-mode latch survives until its
+timeout); master gain off/on cycle; or `override_timeout` (default 4 h).
+Release re-enters normal control with slew ramps (no jumps). A room is
 presence-capable when a presence or occupancy-fallback sensor is configured;
 in a blind room (door/corridor triggers only) OFF-decay merely means the
 trigger hold expired while the occupant may still be present, so the latch
 holds until one of the other release conditions — otherwise a wall-dial
 adjustment is countered by the vacancy tier within one review (the soverom
-incident, 2026-07-29..31).
+incident, 2026-07-29..31; the standing-mode variant of the same counter was
+the 2026-08-14 soverom/gang incident).
 
 9.3 **Manual-on respect.** A room turned on manually while the FSM wanted OFF
 is an override (9.1) — the legacy "only auto-on if the light is currently

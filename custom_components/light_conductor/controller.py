@@ -347,6 +347,25 @@ class ChannelWriter:
             self._rate_cancel = None
 
     @callback
+    def interrupt(self) -> None:
+        """Abandon all in-flight work — a foreign change owns the channel (§9.1).
+
+        Drops a running stepping ramp, the pending slot, and a waiting rate
+        timer. The §9.1 latch silences the ENGINE, but the writer's queued
+        steps would otherwise keep playing out to the stale pre-dial goal —
+        soverom's door-open ramp (0 → day target, ~10 s of 1 Hz steps on a
+        no-transition Plejd light) marched right over the wall dial and
+        erased the adjustment (§8.4a, the 2026-08-14 incident). A service
+        call already dispatched cannot be recalled: at most one more write
+        lands, and its report is consumed as its own echo.
+        """
+        self._cancel_stepping()
+        self._pending = None
+        if self._rate_cancel is not None:
+            self._rate_cancel()
+            self._rate_cancel = None
+
+    @callback
     def set_channel(self, level: float, ct: int | None, ramp: float) -> None:
         self._cancel_stepping()
         if self._c.supports_transition(self.entity_id) or ramp <= STEP_INTERVAL:
@@ -763,7 +782,13 @@ class Controller:
             self._task = None
 
     def _process(self, event: CoreEvent) -> None:
-        commands = self.engine.handle(event, dt_util.utcnow())
+        # LOCAL wall clock, not UTC (§2.3): the circadian clock ramps read
+        # minutes past local midnight from this stamp, so a UTC stamp runs
+        # them hours late (Oslo summer: the "06:00" morning ramp at 08:00
+        # local, full-evening E all morning — the 2026-08-14 incident). All
+        # engine time arithmetic is aware-vs-aware, so the zone is otherwise
+        # irrelevant.
+        commands = self.engine.handle(event, dt_util.now())
         for cmd in commands:
             # Isolate each command (F4): one bad exec must not swallow the
             # trailing ScheduleReview/PublishState and stall the self-schedule.
@@ -1121,6 +1146,11 @@ class Controller:
                 return
         # level is 0.0 (off) or > 0 here — pass it through verbatim; the engine
         # reads 0/None alike as "off" but 0.0 must not become a spurious None.
+        # The user owns this channel now (§9.1/§8.4a): abandon any in-flight
+        # stepping ramp or queued write before the engine latches and goes
+        # silent — the stale goal must not keep marching over the dial.
+        if (w := self._writers.get(entity_id)) is not None:
+            w.interrupt()
         self.submit(ForeignChange(channel_id=entity_id, level=level, ct=ct))
 
     @callback
@@ -1144,8 +1174,12 @@ class Controller:
             return
         room_id = self._wall_room[entity_id]
         # A wall press latches override for the whole room, adopting each
-        # channel's currently observed level/ct (rule §9.4).
+        # channel's currently observed level/ct (rule §9.4). The hand on the
+        # wall plate owns the room now: abandon every channel's in-flight
+        # writer work first (§8.4a), same as the light-report foreign path.
         for cid in self._room_channels.get(room_id, ()):
+            if (w := self._writers.get(cid)) is not None:
+                w.interrupt()
             st = self.hass.states.get(cid)
             self.submit(
                 ForeignChange(

@@ -26,7 +26,12 @@ def test_away_turns_indoor_off_keeps_outdoor_background() -> None:
     """§6.4: away => indoor OFF; outdoor keeps its dusk background as presence
     simulation while away_lighting is on (occupational ignored, rule 6.5)."""
     state = EngineState(anyone_home=False, away_lighting=True)
-    assert modes.resolve(_room("sofakrok"), RoomState(), state, 1.0, TUN).off
+    away = modes.resolve(_room("sofakrok"), RoomState(), state, 1.0, TUN)
+    assert away.off
+    # A standing away hard-off respects a latch minted during away (6.4): the
+    # radar can be wrong about a quiet house, and a hand on a wall dial is
+    # definitive presence evidence. The onset edge released the older ones.
+    assert away.respect_override
     # Outdoor at dusk: ambient background, and the occupational switch is ignored.
     outdoor = modes.resolve(_room("balkong"), RoomState(occupational=True), state, 0.8, TUN)
     assert outdoor.band_outputs == {Band.PRIMARY: 0.2}  # out_background, not out_active_evening
@@ -49,13 +54,19 @@ def test_sleep_off_except_night_path() -> None:
     sleeping = EngineState(sleep=True)
     res = modes.resolve(_room("sofakrok"), RoomState(), sleeping, 1.0, TUN)
     assert res is not None and res.off and res.fade == TUN.sleep_fade
+    # A standing sleep hard-off RESPECTS a latch minted during sleep (6.1) —
+    # the onset edge already released the pre-sleep ones (9.2).
+    assert res.respect_override
 
     night = EngineState(sleep=True, night_active=True)
     res = modes.resolve(_room("sofakrok"), RoomState(), night, 1.0, TUN)
     assert res is not None and res.role is Role.NIGHT_PATH
     assert res.band_outputs == {Band.PRIMARY: 0.04}
     assert res.ct_override == TUN.ct_min_evening  # forced warm (rule 6.2)
-    assert res.gain_exempt and res.suppress_override
+    assert res.gain_exempt
+    # Not ``off`` — so the engine's arbitration holds a latched room instead
+    # of letting the path clobber the hand on the dial (rule 6.2).
+    assert not res.off
 
 
 def test_tv_ladder_occupied_vs_empty() -> None:
