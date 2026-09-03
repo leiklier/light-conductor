@@ -74,6 +74,29 @@ def test_boost_band_evening_lockout() -> None:
     assert off["acc"] == 0.4 and off["prim"] == 0.5
 
 
+def test_boost_unlocked_survives_the_evening_gate() -> None:
+    """§4.5/D26: with boost_unlocked the caller has already put an explicit
+    evening value in the band — the lockout must not re-zero it."""
+    bands = {Band.ACCENT: 0.4, Band.PRIMARY: 0.5, Band.BOOST: 0.35}
+    out = allocate(_channels(), bands, 0.8, TUN, boost_unlocked=True)
+    assert out["boost"] == 0.35
+    assert out["acc"] == 0.4 and out["prim"] == 0.5
+    # The default is unchanged: locked out.
+    assert allocate(_channels(), bands, 0.8, TUN)["boost"] == 0.0
+
+
+def test_boost_unlocked_still_goes_through_the_response_mapping() -> None:
+    """§4.5/D26: the unlocked value is a BAND output — weight share and the
+    affine response mapping still apply (the benke curve 0.8*out - 0.5)."""
+    channels = (
+        ChannelConfig("benke", band=Band.BOOST, response_slope=0.8, response_offset=-0.5),
+        ChannelConfig("benke_half", band=Band.BOOST, weight=0.5),
+    )
+    out = allocate(channels, {Band.BOOST: 1.0}, 0.8, TUN, boost_unlocked=True)
+    assert isclose(out["benke"], 0.3)  # 0.8 * 1.0 - 0.5
+    assert isclose(out["benke_half"], 0.5)  # half weight of the heaviest
+
+
 def test_allocation_clamps_to_unit() -> None:
     out = allocate(_channels(), {Band.ACCENT: 1.5}, 0.0, TUN)
     assert out["acc"] == 1.0

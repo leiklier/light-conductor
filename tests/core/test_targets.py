@@ -58,6 +58,45 @@ def test_peak_output() -> None:
     assert targets.peak_output({}) == 0.0
 
 
+# --- §4.5 evening boost output (D26) --------------------------------------
+
+
+def _boost_profile(value: float | None) -> Profile:
+    return Profile(out_active_day={Band.BOOST: 0.6}, boost_evening_output=value)
+
+
+def test_boost_evening_output_drives_an_active_room_in_the_lockout() -> None:
+    """§4.5/D26: past boost_evening_max an ACTIVE room takes the explicit value
+    instead of the lockout (the bench strip the user turned on at 22:04)."""
+    outputs, unlocked = targets.apply_boost_evening_output(
+        {Band.PRIMARY: 0.3, Band.BOOST: 0.6}, 1.0, Role.ACTIVE, _boost_profile(0.35), TUN
+    )
+    assert unlocked and outputs[Band.BOOST] == 0.35
+    assert outputs[Band.PRIMARY] == 0.3  # other bands untouched
+
+
+def test_boost_evening_output_only_inside_the_lockout_window() -> None:
+    """Below boost_evening_max the band is not locked out at all — nothing to do."""
+    outputs, unlocked = targets.apply_boost_evening_output(
+        {Band.BOOST: 0.6}, 0.4, Role.ACTIVE, _boost_profile(0.35), TUN
+    )
+    assert not unlocked and outputs[Band.BOOST] == 0.6
+
+
+def test_boost_evening_output_is_active_only_and_opt_in() -> None:
+    """§4.5/D26: ADJACENT/BACKGROUND stay locked out, and an unset profile keeps
+    the plain lockout (D6/Q4 — the default does not change)."""
+    for role in (Role.ADJACENT, Role.BACKGROUND):
+        _out, unlocked = targets.apply_boost_evening_output(
+            {Band.BOOST: 0.6}, 1.0, role, _boost_profile(0.35), TUN
+        )
+        assert not unlocked
+    _out, unlocked = targets.apply_boost_evening_output(
+        {Band.BOOST: 0.6}, 1.0, Role.ACTIVE, _boost_profile(None), TUN
+    )
+    assert not unlocked
+
+
 # --- §4.7 daylight-aware open-loop ---------------------------------------
 
 

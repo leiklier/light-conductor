@@ -77,6 +77,30 @@ def test_kitchen_evening_accent_survives_boost_off() -> None:
     assert sets(cmds)["kjokken_downlights"].ct <= 2500
 
 
+def test_boost_evening_output_lights_the_bench_strip_after_sunset() -> None:
+    """§4.5 (D26): with an explicit boost_evening_output the kitchen bench strip
+    survives the evening lockout in an ACTIVE room — at its own value, above the
+    room's 0.3 evening cap (an explicit evening value, not a capped tier)."""
+    from dataclasses import replace
+
+    apt = apartment()
+    kjokken = next(r for r in apt.rooms if r.room_id == "kjokken")
+    unlocked = replace(kjokken, profile=replace(kjokken.profile, boost_evening_output=0.35))
+    cfg = EngineConfig(rooms=tuple(unlocked if r.room_id == "kjokken" else r for r in apt.rooms))
+    eng = Engine(cfg, None)
+    eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))
+    cmds = sets(eng.handle(PresenceChanged("kjokken", True), at(1, 22, 1)))
+    assert "kjokken_benke" in cmds
+    assert 0.3 < cmds["kjokken_benke"].level < 0.4  # ~0.35, past the 0.3 cap
+    assert "kjokken_taklys" not in cmds  # the evening tier is otherwise unchanged
+
+    # ADJACENT keeps the lockout: only an ACTIVE room gets the evening boost.
+    eng.handle(PresenceChanged("kjokken", False), at(1, 22, 2))
+    adj = eng.handle(PresenceChanged("sofakrok", True), at(1, 22, 10))
+    assert "kjokken_benke" not in sets(adj)
+    assert not eng.state.rooms["kjokken"].channels["kjokken_benke"].on
+
+
 # --- §6.3: spisebord TV ladder ------------------------------------------
 
 

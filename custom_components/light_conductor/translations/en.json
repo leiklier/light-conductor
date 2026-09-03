@@ -96,6 +96,7 @@
           "active_evening_output": "Active output (evening)",
           "background_output": "Background output",
           "evening_output_cap": "Evening output cap",
+          "boost_evening_output": "Boost output in the evening (empty = locked out)",
           "night_output": "Night-path output",
           "tv_output": "TV output (occupied)",
           "tv_output_empty": "TV output (empty)",

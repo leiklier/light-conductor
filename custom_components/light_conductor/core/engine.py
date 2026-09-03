@@ -869,7 +869,14 @@ class Engine:
                 outputs = {b: v * d_factor for b, v in outputs.items()}
             outputs = gain.scale(outputs, g)
             outputs = targets.apply_evening_cap(outputs, e, room.profile, tun)
-            channel_b = photometry.allocate(room.channels, outputs, e, tun)
+            # Evening boost output (§4.5, D26): LAST band-level word, after the
+            # cap and master gain and subject to neither — an explicit per-room
+            # evening value for the boost band (the kitchen bench strip the user
+            # turned on at 22:04), unlocked for an ACTIVE room only.
+            outputs, boost_unlocked = targets.apply_boost_evening_output(
+                outputs, e, role, room.profile, tun
+            )
+            channel_b = photometry.allocate(room.channels, outputs, e, tun, boost_unlocked)
 
         # The TV ON ceiling is the LAST word on output (rule 6.3): applied to the
         # final per-channel values, after weight share, response mapping and the

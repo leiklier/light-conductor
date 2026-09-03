@@ -172,6 +172,12 @@ class Profile:
     out_background: BandMap = field(default_factory=dict)
     # Evening cap (rule 2.4): clamp on normalized output once E >= threshold.
     evening_output_cap: float = 1.0
+    #: Explicit BOOST-band output inside the evening lockout window (§4.5, D26).
+    #: ``None`` keeps the plain lockout (the default: the boost band is task
+    #: light, orthogonal to a cozy evening — D6/Q4). A value unlocks the band for
+    #: an ACTIVE room only, at exactly this normalized output: the user turned
+    #: the kitchen bench strip on at 22:04 and the lockout was unconditional.
+    boost_evening_output: float | None = None
     # Mode outputs.
     night_output: BandMap = field(default_factory=dict)  # rule 6.2 (fixed dim warm)
     tv_output: BandMap = field(default_factory=dict)  # rule 6.3 (playing, occupied)

@@ -336,6 +336,19 @@ the light being aesthetically dominant). A `boost` band additionally requires `E
 (benkebelysning stays off in the evening, matching legacy kitchen-off
 behavior where only the accent band survives sunset).
 
+**Evening boost output (D26).** A profile may set `boost_evening_output`: a
+normalized band output the BOOST band takes *inside* the lockout window
+(`E ≥ boost_evening_max`) in an **ACTIVE** room, instead of being gated off.
+Blank (the default) keeps the plain lockout — the boost band is task light,
+orthogonal to a cozy evening (D6/Q4) — but the user does turn the kitchen bench
+strip on at 22:04, and no global knob can say that without unlocking every
+boost band in the house. It is applied **after** the evening cap (§2.4) and
+master gain (§7) and is subject to **neither**: it is an explicit "this is what
+the bench strip does in the evening" value, not a tier the cap should trim. It
+then flows through the normal weight share and affine response mapping below.
+ADJACENT/BACKGROUND, the §6 mode tables and the closed-loop path stay locked
+out exactly as before.
+
 **Per-channel response mapping.** After weight sharing and the boost evening
 lockout, each channel applies an affine RESPONSE MAPPING to its post-weight
 band output `out`: the emitted command is `clamp(response_slope · out +

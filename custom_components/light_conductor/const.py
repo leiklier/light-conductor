@@ -111,6 +111,9 @@ CONF_ACTIVE_DAY = "active_day_output"
 CONF_ACTIVE_EVENING = "active_evening_output"
 CONF_BACKGROUND = "background_output"
 CONF_EVENING_CAP = "evening_output_cap"
+#: Explicit BOOST-band output inside the evening lockout window (§4.5, D26);
+#: blank ⇒ the band stays locked out (the default).
+CONF_BOOST_EVENING_OUTPUT = "boost_evening_output"
 CONF_NIGHT_OUTPUT = "night_output"
 CONF_TV_OUTPUT = "tv_output"
 CONF_TV_OUTPUT_EMPTY = "tv_output_empty"
@@ -186,12 +189,16 @@ def _profile_from_options(opts: Mapping[str, Any]) -> Profile:
     lux_day = float(opts.get(CONF_LUX_ACTIVE_DAY) or 0.0)
     lux_evening = float(opts.get(CONF_LUX_ACTIVE_EVENING) or 0.0)
     lux_background = float(opts.get(CONF_LUX_BACKGROUND) or 0.0)
+    # Evening boost output (§4.5, D26): absent/blank ⇒ None = locked out.
+    boost_evening = opts.get(CONF_BOOST_EVENING_OUTPUT)
+    boost_evening = None if boost_evening in (None, "") else float(boost_evening)
     return Profile(
         vacancy=vacancy,
         out_active_day=_band_map(day),
         out_active_evening=_band_map(evening),
         out_background=_band_map(background),
         evening_output_cap=float(opts.get(CONF_EVENING_CAP, Tunables().evening_output_cap)),
+        boost_evening_output=boost_evening,
         night_output=_band_map(night),
         tv_output=_band_map(tv),
         tv_output_empty=_band_map(tv_empty),

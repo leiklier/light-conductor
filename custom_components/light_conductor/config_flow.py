@@ -43,6 +43,7 @@ from .const import (
     CONF_ACTIVITY_SENSOR,
     CONF_ANYONE_HOME_ENTITY,
     CONF_BACKGROUND,
+    CONF_BOOST_EVENING_OUTPUT,
     CONF_CH_BAND,
     CONF_CH_DIM_FLOOR,
     CONF_CH_ENTITY,
@@ -527,7 +528,12 @@ class LightConductorOptionsFlow(OptionsFlow):
                     profile[key] = user_input[key]
             # Closed-loop lux tiers are clearable (suggested_value idiom): a blank
             # submission omits the key ⇒ drop it so the room reverts to auto.
-            for key in (CONF_LUX_ACTIVE_DAY, CONF_LUX_ACTIVE_EVENING, CONF_LUX_BACKGROUND):
+            for key in (
+                CONF_LUX_ACTIVE_DAY,
+                CONF_LUX_ACTIVE_EVENING,
+                CONF_LUX_BACKGROUND,
+                CONF_BOOST_EVENING_OUTPUT,
+            ):
                 if user_input.get(key) not in (None, ""):
                     profile[key] = user_input[key]
                 else:
@@ -621,6 +627,9 @@ class LightConductorOptionsFlow(OptionsFlow):
                 # suggested_value so a blank submission CLEARS the field ⇒ auto
                 # (a capacity fraction). Only meaningful for a room with a lux
                 # sensor; harmlessly ignored open-loop.
+                # Evening boost output (§4.5, D26): blank ⇒ the boost band stays
+                # locked out past boost_evening_max (the default).
+                _opt(CONF_BOOST_EVENING_OUTPUT, profile): _pct(0.0),
                 _opt(CONF_LUX_ACTIVE_DAY, profile): _lux(),
                 _opt(CONF_LUX_ACTIVE_EVENING, profile): _lux(),
                 _opt(CONF_LUX_BACKGROUND, profile): _lux(),

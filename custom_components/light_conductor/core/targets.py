@@ -58,6 +58,30 @@ def apply_evening_cap(
     return {b: min(v, cap) for b, v in outputs.items()}
 
 
+def apply_boost_evening_output(
+    outputs: dict[Band, float], e: float, role: Role, profile: Profile, tun: Tunables
+) -> tuple[dict[Band, float], bool]:
+    """Drive the BOOST band at the profile's evening output (rule 4.5, D26).
+
+    Returns ``(outputs, unlocked)``. Inside the evening lockout window
+    (``E >= boost_evening_max``) an **ACTIVE** room whose profile sets
+    ``boost_evening_output`` drives the boost band at exactly that normalized
+    value instead of having it gated off; ``unlocked`` tells
+    :func:`~.photometry.allocate` not to re-zero it.
+
+    Deliberately applied AFTER the evening cap and master gain, and subject to
+    neither: it is an explicit "this is what the bench strip does in the
+    evening" value, not a tier the cap should trim. It still goes through the
+    normal weight share and affine response mapping in ``allocate``.
+
+    ADJACENT/BACKGROUND, the §6 mode tables and the closed-loop path are
+    untouched — they never call this, so their boost band stays locked out.
+    """
+    if profile.boost_evening_output is None or role is not Role.ACTIVE or e < tun.boost_evening_max:
+        return outputs, False
+    return {**outputs, Band.BOOST: profile.boost_evening_output}, True
+
+
 def daylight_factor(n_hat: float, tun: Tunables, full: float | None = None) -> float:
     """Daylight damping factor ``D`` (rule 4.7).
 

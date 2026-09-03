@@ -134,6 +134,7 @@ def allocate(
     band_outputs: dict[Band, float],
     evening_factor: float,
     tun: Tunables,
+    boost_unlocked: bool = False,
 ) -> dict[str, float]:
     """Map per-band normalized outputs onto channels (rules 4.5/4.6).
 
@@ -143,7 +144,10 @@ def allocate(
     output (matching §4.6's "normalized output per band") while a lighter
     weight scales a channel down. Sharing uses ``weight``, **never** the
     calibrated sensor gain (§3.1). The boost band is gated off once
-    ``E >= boost_evening_max`` (benkebelysning evening lockout, rule 4.5).
+    ``E >= boost_evening_max`` (benkebelysning evening lockout, rule 4.5) —
+    unless ``boost_unlocked``, which the caller sets when the profile's
+    ``boost_evening_output`` has already put an explicit evening value in the
+    band (D26); the lockout must not then re-zero it.
     The lux ``band_overlap`` crossfade is a closed-loop mechanism (estimator).
 
     The per-channel affine RESPONSE MAPPING (rule 4.5) is the LAST step: after
@@ -159,7 +163,7 @@ def allocate(
     result: dict[str, float] = {}
     for ch in channels:
         out = band_outputs.get(ch.band, 0.0)
-        if ch.band is Band.BOOST and evening_factor >= tun.boost_evening_max:
+        if ch.band is Band.BOOST and evening_factor >= tun.boost_evening_max and not boost_unlocked:
             out = 0.0  # rule 4.5 evening lockout
         peak = max_weight.get(ch.band, 0.0)
         share = ch.weight / peak if peak > 0.0 else 1.0
