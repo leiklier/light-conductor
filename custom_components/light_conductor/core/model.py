@@ -460,6 +460,12 @@ class EstimatorState:
     #: Whether the pending observation feeds the first-night bootstrap (armed on
     #: observed ΔL) rather than the calibrated §3.4 refine (rule 3.5/4.4).
     pending_shadow: bool = False
+    #: The §4.7 daylight factor currently IN FORCE for this room when it is
+    #: sourced from a reference room (D26). N̂ moves continuously under drifting
+    #: cloud, and every move would otherwise re-command the room; a new factor is
+    #: adopted only once it differs by ``DAYLIGHT_MIN_STEP`` (or hits an
+    #: endpoint). ``None`` = nothing adopted yet / the reference went stale.
+    daylight_applied: float | None = None
     #: Latched §4.7 daylight factor held steady while a shadow observation
     #: settles: N̂-driven damping would otherwise nudge the open-loop output by
     #: sub-min_delta amounts each tick, re-commanding and disrupting the

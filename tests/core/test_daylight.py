@@ -312,6 +312,48 @@ def test_reference_with_per_room_daylight_full() -> None:
     assert _dep_level(plain) > 0.65
 
 
+def test_reference_daylight_has_hysteresis() -> None:
+    """§4.7/D26: N̂ drifts continuously under cloud and D feeds the output
+    directly, so every wobble re-commanded the room (~159 writes/h per channel
+    on a cloudy hour). A sub-step wobble must produce no command at all."""
+    eng = _booted_pair(_reference_pair())
+    t = _feed_room(eng, "sun", 100.0, START, n=6, dt=20.0)  # settle at D ≈ 0.5
+    settled = _dep_level(eng)
+
+    quiet = True
+    for i in range(12):  # ±4 lx wobble ⇒ ΔD ≈ 0.02 < DAYLIGHT_MIN_STEP (0.05)
+        cmds = eng.handle(LuxReport("sun", 100.0 + (4.0 if i % 2 else -4.0)), t)
+        quiet = quiet and not any(getattr(c, "channel_id", None) == "d" for c in cmds)
+        t = t + timedelta(seconds=20.0)
+    assert quiet, "reference daylight re-commanded the room on a sub-step wobble"
+    assert _dep_level(eng) == settled
+
+    # A real change (well past the step) is still adopted.
+    _feed_room(eng, "sun", 20.0, t, n=8, dt=20.0)
+    assert _dep_level(eng) > settled + 0.05
+
+
+def test_reference_daylight_endpoints_are_always_reachable() -> None:
+    """§4.7/D26: hysteresis must never strand the room short of full damping —
+    D = 0 (and D = 1) are the states the user actually asked for."""
+    eng = _booted_pair(_reference_pair())
+    _feed_room(eng, "sun", 190.0, START, n=4, dt=20.0)  # D ≈ 0.05, just off the floor
+    t = START + timedelta(seconds=100)
+    _feed_room(eng, "sun", 201.0, t, n=6, dt=20.0)  # N̂ crosses daylight_full ⇒ D = 0
+    assert eng.state.rooms["dep"].est.daylight_applied == 0.0
+    assert _dep_level(eng) == 0.0
+
+
+def test_stale_reference_clears_the_adopted_factor() -> None:
+    """The adopted factor is per-source: when the reference goes stale it is
+    dropped, so a returning reference adopts its first value immediately."""
+    eng = _booted_pair(_reference_pair())
+    _feed_room(eng, "sun", 100.0, START, n=3, dt=10.0)
+    assert eng.state.rooms["dep"].est.daylight_applied is not None
+    eng.handle(ReviewTick(), START + timedelta(seconds=400))  # past lux_stale
+    assert eng.state.rooms["dep"].est.daylight_applied is None
+
+
 def test_reference_room_publishes_the_source_natural_lux() -> None:
     """§10: a reference-damped room publishes the N̂ its level is a function of
     — for a sensorless room it is the only one there is."""

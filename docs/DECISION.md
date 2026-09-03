@@ -801,10 +801,17 @@ Decisions:
    when a reference is set: a closed-loop room's own N̂ is already subtracted by
    the estimator, so applying its own sensor twice would be a double count —
    but sofakrok's own sensor is *blind to daylight*, which is exactly the case a
-   reference fixes. At `D = 0` the target is 0 and the room goes dark; the
-   deadband is bypassed for a zero target on a lit room, because `|error| = Â`
-   can sit *inside* the deadband on a low-capacity room and would otherwise
-   strand the lamp lit all day — the sofakrok failure mode, one level down.
+   reference fixes. When the factor reaches its floor on a lit room the deadband
+   is bypassed, because `|error| = Â` can sit *inside* the deadband on a
+   low-capacity room and would otherwise strand the lamp lit all day — the
+   sofakrok failure mode, one level down. (Keyed on the floor rather than on
+   `T' == 0`, so a non-zero `daylight_min_factor` cannot silently disable it.)
+   The factor is adopted with **hysteresis** (`DAYLIGHT_MIN_STEP` 0.05, with
+   both endpoints always reachable): `N̂` drifts continuously under cloud and
+   `D` feeds the output directly, so the naive version re-commanded the room on
+   every wobble — ~159 writes/h per channel over a cloudy hour, on a mesh that
+   manages ~7 writes/s for the entire house. Cheap damping beats a clever
+   controller here.
    Rejected: a global "corridors follow the brightest sensor" rule (implicit,
    unpredictable when a sensor wedges); teaching gang a virtual sensor (a
    second estimator to keep honest, for a room with no measurement).

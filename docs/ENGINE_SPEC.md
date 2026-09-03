@@ -440,18 +440,33 @@ room's `LuxReport`s are events.
 (kjøkken reads 40-60 lx, spisebord 300-450 lx), so one global reference cannot
 serve both. Blank/0 ⇒ the tunable.
 
+**Reference hysteresis (D26).** `N̂` drifts continuously under moving cloud and
+`D` feeds the output directly, so every wobble crossed `min_delta` (§8.3) and
+re-commanded the room — measured at ~159 writes/h per channel over a cloudy
+hour, against a mesh that manages ~7 writes/s for the whole house. A
+reference-sourced factor is therefore **adopted with hysteresis**: recomputed
+every cycle, but only taken into force when it differs from the one in force by
+`DAYLIGHT_MIN_STEP` (0.05) **or** reaches an endpoint (`daylight_min_factor` or
+1.0 — fully damped and fully undamped must always be reachable). The adopted
+factor is cleared when the reference goes stale, so a returning reference
+adopts its first value at once. It is an engineering constant, not a §12
+tunable: the operator surface is `daylight_full` / `daylight_min_factor`.
+
 **Closed-loop target scaling (D26).** On the closed-loop path the daylight
 factor scales the lux target `T'` — **only** when a `daylight_reference` is
 set. A closed-loop room's own `N̂` is already subtracted by the estimator
 (`error = T' − (N̂ + Â)`), so applying its own sensor here would double-count
-it; a reference is exactly the case where that subtraction is not enough. At
-`D = 0` the target is 0 and the room goes dark: for a **zero target on a lit
-room** the deadband/sustain gate is bypassed and the correction fires at once,
-because on a low-capacity room `|error| = Â` can sit *inside* the deadband and
-would strand the lamp lit all day. A reference-damped room publishes the
-**reference's** `N̂` as its `natural_lux` diagnostic (§10) — that is the
-daylight figure its level is a function of, and for a sensorless room it is the
-only one there is; `target_lux` carries the scaled `T'`.
+it; a reference is exactly the case where that subtraction is not enough. When
+the reference factor reaches its **floor** (`daylight_min_factor`, i.e. full
+daylight) on a **lit** room, the deadband/sustain gate is bypassed and the
+correction fires at once: on a low-capacity room `|error| = Â` can sit *inside*
+the deadband and would strand the lamp lit all day. (Keyed on the floor, not on
+`T' == 0`, so a non-zero `daylight_min_factor` does not silently disable it.)
+A room with **no lux sensor of its own** that is damped through a reference
+publishes the **reference's** `N̂` as its `natural_lux` diagnostic (§10) — for a
+sensorless room it is the only daylight figure there is. A room that *has* a
+sensor keeps publishing its own `N̂`, so `natural_lux`/`target_lux` stay
+consistent with its loop's `error = T' − (N̂ + Â)`.
 
 ## 5. Color temperature policy
 
