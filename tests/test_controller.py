@@ -59,7 +59,7 @@ async def test_transition_vs_stepping(hass: HomeAssistant) -> None:
 async def _partial_fade_setup(hass, monkeypatch):
     """Set up a room whose ACTIVE output is pinned to 0.5 (circadian-independent).
 
-    A fake monotonic clock lets the corridor front advance deterministically.
+    A fake monotonic clock lets the corridor age deterministically.
     Returns (controller, overridden_entity_id, clock, envelope).
     """
     clock = [1000.0]
@@ -205,22 +205,135 @@ async def test_dial_transition_onto_standing_setpoint_latches(hass: HomeAssistan
 
 
 async def test_transition_fade_reports_no_override(hass: HomeAssistant, monkeypatch) -> None:
-    """Reports tracking the fade front must NOT latch; an off-front yank does (F1)."""
+    """D25: while the corridor lives, ANY level on the band start→goal is an
+    echo — however late or out of order it arrives (the mesh is serialized and
+    the gateway coalesces echoes). A value off the band still latches."""
     _controller, overridden, clock, env = await _partial_fade_setup(hass, monkeypatch)
 
-    # Reports that track the moving front over the whole fade — all echoes.
-    for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
-        clock[0] = env.start + frac * env.ramp
-        front = env.front(clock[0])
-        set_light(hass, "light.a", "on", brightness=max(1, round(front * 255)), transition=True)
+    # Late / out-of-order samples anywhere on the band — all echoes.
+    for dt, frac in ((0.5, 1.0), (2.0, 0.2), (3.5, 0.6), (5.0, 1.0)):
+        clock[0] = env.start + dt
+        level = env.frm + (env.to - env.frm) * frac
+        set_light(hass, "light.a", "on", brightness=max(1, round(level * 255)), transition=True)
         await hass.async_block_till_done()
     assert hass.states.get(overridden).state == "off"
 
-    # A wall dial yanks to full at the end of the fade — off the front ⇒ override.
-    clock[0] = env.start + env.ramp
+    # A wall dial yanks past the goal — off the band ⇒ override, mid-fade.
+    clock[0] = env.start + 1.0
     set_light(hass, "light.a", "on", brightness=255, transition=True)
     await hass.async_block_till_done()
     assert hass.states.get(overridden).state == "on"
+
+
+async def test_post_deadline_foreign_value_latches(hass: HomeAssistant, monkeypatch) -> None:
+    """D25: past the corridor deadline only the final-value echo matches, so the
+    first report at a foreign value latches (the band is not a blank cheque)."""
+    controller, overridden, clock, env = await _partial_fade_setup(hass, monkeypatch)
+
+    clock[0] = env.deadline + 1.0
+    mid = round((env.frm + env.to) * 0.5 * 255)  # mid-band, but the corridor is dead
+    set_light(hass, "light.a", "on", brightness=max(1, mid), transition=True)
+    await hass.async_block_till_done()
+    assert hass.states.get(overridden).state == "on"
+    assert controller.engine.room_state("a").overridden is True
+
+
+# --- D25 availability-recovery grace ---------------------------------------
+
+
+async def test_availability_recovery_report_folds_as_review(hass: HomeAssistant) -> None:
+    """D25: after every HA restart the Plejd entities go unavailable → off →
+    on(true level) ~29 s in. That off→on report used to latch every Plejd room;
+    inside RECOVERY_GRACE it is folded as a quiet ReviewTick (§8.5)."""
+    set_light(hass, "light.a", "on", brightness=128, transition=True)
+    hass.states.async_set("binary_sensor.pa", "on")
+    entry = await setup_entry(
+        hass,
+        options([room("a", ["light.a"], presence="binary_sensor.pa")]),
+        enabled=False,  # observe-only: the seed is the only ledger populator
+    )
+    controller = hass.data[DOMAIN][entry.entry_id]
+
+    hass.states.async_set("light.a", STATE_UNAVAILABLE)
+    await hass.async_block_till_done()
+    set_light(hass, "light.a", "off", transition=True)  # the recovery edge
+    await hass.async_block_till_done()
+    set_light(hass, "light.a", "on", brightness=250, transition=True)  # true level
+    await hass.async_block_till_done()
+    assert controller.engine.room_state("a").overridden is False
+
+    # Past the grace window the same report latches normally.
+    controller._recovered_at["light.a"] = (
+        lc_controller._monotonic() - lc_controller.RECOVERY_GRACE - 1.0
+    )
+    set_light(hass, "light.a", "on", brightness=200, transition=True)
+    await hass.async_block_till_done()
+    assert controller.engine.room_state("a").overridden is True
+
+
+async def test_first_report_of_unseeded_channel_does_not_latch(hass: HomeAssistant) -> None:
+    """D25: a channel with no state at seed time (its integration still loading
+    after a restart) has no standing setpoint, so its FIRST available report is
+    treated as the recovery edge — the restart signature that latched every
+    Plejd room, here with no unavailable→available event to key off."""
+    hass.states.async_set("binary_sensor.pa", "on")
+    entry = await setup_entry(
+        hass,
+        options([room("a", ["light.a"], presence="binary_sensor.pa")]),
+        enabled=False,
+    )
+    controller = hass.data[DOMAIN][entry.entry_id]
+    assert "light.a" not in controller._last_commanded
+    assert "light.a" in controller._unseeded
+
+    set_light(hass, "light.a", "on", brightness=245, transition=True)
+    await hass.async_block_till_done()
+    assert controller.engine.room_state("a").overridden is False
+    assert "light.a" not in controller._unseeded
+
+
+# --- D25/§5.4 CT ordering ---------------------------------------------------
+
+
+async def _ct_writer(hass: HomeAssistant, state: str, brightness: int | None):
+    """A CT-capable light in the given state, plus its (observe-only) writer."""
+    set_light(hass, "light.a", state, brightness=brightness, transition=True, color_temp=True)
+    entry = await setup_entry(
+        hass,
+        options([room("a", ["light.a"])]),
+        enabled=False,  # observe-only: only the writer calls below hit the bus
+    )
+    turn_on = async_mock_service(hass, "light", "turn_on")
+    return hass.data[DOMAIN][entry.entry_id]._writer("light.a"), turn_on
+
+
+async def test_ct_and_brightness_combined_when_lamp_is_off(hass: HomeAssistant) -> None:
+    """D25/§5.4: an OFF lamp takes CT + brightness (+ transition) in ONE call —
+    a CT-only write is the fork's plain ON command, which pops the lamp to its
+    remembered level and produces a report that is nobody's echo."""
+    writer, turn_on = await _ct_writer(hass, "off", None)
+
+    writer.set_channel(0.5, 2700, 2.0)
+    await hass.async_block_till_done()
+    assert len(turn_on) == 1
+    data = turn_on[0].data
+    assert data["color_temp_kelvin"] == 2700
+    assert data["brightness"] == round(0.5 * 255)
+    assert data["transition"] == 2.0
+
+
+async def test_ct_written_first_when_lamp_is_lit(hass: HomeAssistant) -> None:
+    """§5.4 still holds for a LIT lamp: CT first, brightness last (the OUTPUT_SET
+    can clobber CT)."""
+    writer, turn_on = await _ct_writer(hass, "on", 200)
+
+    writer.set_channel(0.5, 2700, 0.0)
+    await hass.async_block_till_done()
+    assert len(turn_on) == 2
+    assert turn_on[0].data["color_temp_kelvin"] == 2700
+    assert "brightness" not in turn_on[0].data
+    assert "color_temp_kelvin" not in turn_on[1].data
+    assert turn_on[1].data["brightness"] == round(0.5 * 255)
 
 
 async def test_min_write_interval_coalesces(hass: HomeAssistant) -> None:

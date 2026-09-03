@@ -123,8 +123,22 @@ TV_ON_STATES = frozenset({"on", "paused", "idle"})
 STEP_INTERVAL = 1.0
 
 #: Floor for the fade-corridor overshoot margin: deadline = start + ramp +
-#: max(ENVELOPE_MARGIN, 0.5*ramp) so a congested mesh tail never latches (§8.4, F1).
-ENVELOPE_MARGIN = 2.0
+#: max(ENVELOPE_MARGIN, 0.5*ramp) so a congested mesh tail never latches (§8.4,
+#: D25). Raised 2 -> 5 s in beta.19: the whole Plejd mesh is serialized at ~7
+#: writes/s, so a room transition that fades several channels at once (a sleep
+#: hard-off fades 7 channels in 4 s) pushes the last echoes seconds past the
+#: nominal end of their own ramp.
+ENVELOPE_MARGIN = 5.0
+
+#: Availability-recovery grace (§8.4/§8.5, D25): a report landing within this
+#: many seconds of an entity's unavailable -> available edge — or of its FIRST
+#: report when it was unavailable at ledger-seed time — is folded as a
+#: ``ReviewTick`` instead of a foreign change. After every HA restart the Plejd
+#: entities go unavailable -> off -> on(true level) ~29 s in, and that off->on
+#: report latched every Plejd room. Accepted trade-off: a genuine dial press
+#: within 20 s of a Plejd reconnect is absorbed once (the review reconciles
+#: quietly per §8.5, and any later press latches normally).
+RECOVERY_GRACE = 20.0
 
 #: After a lux-wedge Fix flow presses the sensor's ESP reboot button, suppress
 #: re-raising the wedge issue for this grace window (§3.5, D17 beta.11) — the
@@ -154,6 +168,11 @@ def _obs_level(state: State | None) -> float | None:
     if bri is None:
         return 1.0
     return float(bri) / 255.0
+
+
+def _fmt_level(level: float | None) -> str:
+    """A level for the §8.4 forensic log — ``None`` stays readable."""
+    return "None" if level is None else f"{level:.3f}"
 
 
 def _obs_ct(state: State | None) -> int | None:
@@ -193,14 +212,16 @@ class _Echo:
 
 @dataclass(slots=True)
 class _Envelope:
-    """A live fade-front corridor for a native-transition command (§8.4, F1).
+    """A live fade corridor for a native-transition command (§8.4, D25).
 
-    The Plejd fork steps brightness linearly during a transition, so the
-    expected level at time ``t`` is ``front(t)`` — a linear ramp from ``frm`` to
-    ``to`` over ``ramp`` seconds. A report is an echo only while it tracks that
-    moving front (within a temporal ``slack`` window absorbing device
-    nonlinearity/jitter), so a foreign dial is caught the moment the front
-    advances past where it stuck — not blindly absorbed for the whole fade.
+    The corridor is a **value band**, not a moving front: while it lives, a
+    report is an echo iff its level lies between the start level ``frm`` and
+    the goal ``to`` (± ``ECHO_LEVEL_TOL``). The fork paces a native
+    ``transition`` as a deadline-paced ramp that *skips levels* when writes are
+    slow, the whole mesh is serialized at ~7 GATT writes/s, and the gateway
+    coalesces LASTDATA echoes under load — so an echo's *timing* is unreliable
+    by seconds, but its *value* is always on the segment between where the
+    channel started and where it is going.
     """
 
     frm: float
@@ -209,27 +230,25 @@ class _Envelope:
     ramp: float
     deadline: float
 
-    def front(self, t: float) -> float:
-        if self.ramp <= 0.0:
-            return self.to
-        p = (t - self.start) / self.ramp
-        p = 0.0 if p < 0.0 else 1.0 if p > 1.0 else p
-        return self.frm + (self.to - self.frm) * p
+    def contains(self, level: float) -> bool:
+        """Whether ``level`` lies on the monotone band frm..to (± tolerance)."""
+        lo, hi = (self.frm, self.to) if self.frm <= self.to else (self.to, self.frm)
+        return lo - ECHO_LEVEL_TOL <= level <= hi + ECHO_LEVEL_TOL
 
 
 class EchoLedger:
     """Per-entity record of own commands; classifies incoming reports (§8.4).
 
     A one-shot write records a level echo and/or a CT echo (consume-one). A
-    *native-transition* write additionally opens a fade-front **corridor**
-    (:class:`_Envelope`): a report is an echo iff it lies within the front's
-    position over ``[now-slack, now+slack]`` (± ``ECHO_LEVEL_TOL``), so the
-    fork's ~150 ms intermediate fade reports are echoes but a dial that drifts
-    off the front — including one that sticks while a full-range fade sweeps
-    past it — is a foreign change and latches (§9.1). After the corridor
-    deadline a normal final-value echo (recorded at corridor creation) still
-    absorbs a late completion near target. Wall-event entities bypass all of
-    this and always latch (§9.4).
+    *native-transition* write additionally opens a fade **corridor**
+    (:class:`_Envelope`): while it lives, any report on the monotone band
+    between the start and goal levels is an echo, however late it arrives
+    (D25). A dial that sticks mid-fade or moves during the fade is still
+    caught: after the corridor deadline only the final-value echo (± tol,
+    recorded at corridor creation) and the ``_last_commanded`` no-op guard
+    match, so the first post-deadline report at a foreign value latches, and
+    the ~3 min true-state poll is the backstop. Wall-event entities bypass all
+    of this and always latch (§9.4).
     """
 
     def __init__(self, ttl: float) -> None:
@@ -248,9 +267,14 @@ class EchoLedger:
             q.append(_Echo(level=None, ct=ct, deadline=deadline))
 
     def record_envelope(
-        self, entity_id: str, from_level: float, to_level: float, ramp: float
+        self,
+        entity_id: str,
+        from_level: float,
+        to_level: float,
+        ramp: float,
+        ct: int | None = None,
     ) -> None:
-        """Open a fade-front corridor and a final-value echo (F1)."""
+        """Open a fade corridor and a final-value (+ optional CT) echo (D25)."""
         start = _monotonic()
         margin = max(ENVELOPE_MARGIN, 0.5 * ramp)  # a congested mesh tail must not latch
         self._envelopes[entity_id] = _Envelope(
@@ -260,7 +284,14 @@ class EchoLedger:
         # 4-10 s fade (sleep_fade, night_fade) expires it before the deadline,
         # and a completion report just past the deadline would latch a
         # spurious override.
-        self.record(entity_id, to_level, None, ttl=ramp + margin + self._ttl)
+        self.record(entity_id, to_level, ct, ttl=ramp + margin + self._ttl)
+
+    def corridor(self, entity_id: str) -> _Envelope | None:
+        """The LIVE corridor for an entity, or ``None`` (forensic logging only)."""
+        env = self._envelopes.get(entity_id)
+        if env is None or _monotonic() > env.deadline:
+            return None
+        return env
 
     def consume(self, entity_id: str, level: float | None, ct: int | None) -> bool:
         """True if this observation matches (and consumes) a recorded command."""
@@ -269,11 +300,18 @@ class EchoLedger:
         if env is not None:
             if now > env.deadline:
                 del self._envelopes[entity_id]
-            elif level is not None:
-                slack = max(0.5, 0.3 * env.ramp)
-                a, b = env.front(now - slack), env.front(now + slack)
-                if min(a, b) - ECHO_LEVEL_TOL <= level <= max(a, b) + ECHO_LEVEL_TOL:
-                    return True  # tracking the fade front — echo; corridor stays live
+            elif level is not None and env.contains(level):
+                # On the monotone band — an echo however late it arrives (D25);
+                # the corridor stays live for the rest of the fade.
+                _LOGGER.debug(
+                    "echo %s: %.3f in corridor %.3f->%.3f age %.1fs",
+                    entity_id,
+                    level,
+                    env.frm,
+                    env.to,
+                    now - env.start,
+                )
+                return True
         q = self._entries.get(entity_id)
         if not q:
             return False
@@ -288,9 +326,13 @@ class EchoLedger:
                 and abs(echo.level - level) <= ECHO_LEVEL_TOL
             ):
                 q.remove(echo)
+                _LOGGER.debug(
+                    "echo %s: level %.3f matches command %.3f", entity_id, level, echo.level
+                )
                 return True
             if echo.ct is not None and ct is not None and abs(echo.ct - ct) <= ECHO_CT_TOL:
                 q.remove(echo)
+                _LOGGER.debug("echo %s: ct %s matches command %s", entity_id, ct, echo.ct)
                 return True
         return False
 
@@ -431,21 +473,33 @@ class ChannelWriter:
     async def _do_single(self, level: float, ct: int | None, ramp: float) -> None:
         brightness = _level_to_brightness(level)
         native = self._c.supports_transition(self.entity_id) and ramp > 0
-        if ct is not None:
-            # CT before brightness (rule §5.4): the OUTPUT_SET can clobber CT.
+        frm = _obs_level(self._c.hass.states.get(self.entity_id)) or 0.0
+        # CT before brightness (rule §5.4) — but only for a lamp that is ALREADY
+        # LIT: there the OUTPUT_SET can clobber CT, so brightness must be the
+        # last mesh write. On an OFF lamp the split write is harmful (D25): the
+        # fork turns `turn_on(colortemp=…, dim=None)` into the plain ON command,
+        # so the lamp pops to its remembered level (e.g. 96 %) before the
+        # brightness write pulls it down — and that intermediate report (the
+        # remembered level, no ct) is nobody's echo, so it latched a false
+        # override on the room's own turn-on. An off lamp therefore takes CT and
+        # brightness (+ transition) in ONE turn_on.
+        combined = ct is not None and frm <= 0.0
+        if ct is not None and not combined:
             await self._c.async_call_light(
                 self.entity_id, {ATTR_COLOR_TEMP_KELVIN: ct}, level=None, ct=ct
             )
         data: dict[str, Any] = {ATTR_BRIGHTNESS: brightness}
+        if combined:
+            data[ATTR_COLOR_TEMP_KELVIN] = ct
         target = brightness / 255.0
+        echo_ct = ct if combined else None
         if native:
             data[ATTR_TRANSITION] = ramp
-            frm = _obs_level(self._c.hass.states.get(self.entity_id)) or 0.0
             await self._c.async_call_light(
-                self.entity_id, data, level=target, ct=None, envelope=(frm, target, ramp)
+                self.entity_id, data, level=target, ct=echo_ct, envelope=(frm, target, ramp)
             )
         else:
-            await self._c.async_call_light(self.entity_id, data, level=target, ct=None)
+            await self._c.async_call_light(self.entity_id, data, level=target, ct=echo_ct)
 
     async def _do_off(self, ramp: float) -> None:
         native = self._c.supports_transition(self.entity_id) and ramp > 0
@@ -525,6 +579,13 @@ class Controller:
         self._echo = EchoLedger(self.tun.echo_window)
         #: Standing setpoint per channel — poll re-confirmations are not foreign.
         self._last_commanded: dict[str, float] = {}
+        #: Channel -> monotonic stamp of its last availability-recovery edge
+        #: (§8.4/§8.5, D25). Reports inside ``RECOVERY_GRACE`` of it never latch.
+        self._recovered_at: dict[str, float] = {}
+        #: Channels that were unavailable at ``_seed_command_ledger`` time, so
+        #: they have no standing setpoint: their FIRST available report IS the
+        #: recovery edge (D25).
+        self._unseeded: set[str] = set()
         #: Last TV tri-state submitted (rule 6.3). Media players churn their
         #: attributes (position, artwork) while playing; only a real state
         #: transition is worth an engine recompute.
@@ -687,13 +748,19 @@ class Controller:
         as the standing setpoint (0.0 when off, the brightness/255 when on), using
         the SAME normalization + tolerance semantics the poll-reconfirmation path
         in ``_on_light_change`` consumes. An unavailable channel is left unseeded
-        (it reconciles on availability recovery). Idempotent on a fresh setup —
-        the first reconcile's own command overwrites the seed as usual.
+        and remembered in ``_unseeded``: it has no setpoint to match against, so
+        its first available report is treated as an availability-recovery edge
+        rather than a foreign change (§8.4, D25 — the post-restart Plejd
+        unavailable → off → on(true level) sequence latched every room).
+        Idempotent on a fresh setup — the first reconcile's own command
+        overwrites the seed as usual.
         """
         for cid in self._channel_room:
             level = _obs_level(self.hass.states.get(cid))
             if level is not None:  # 0.0 (off) is a valid setpoint; None (dead) is not
                 self._last_commanded[cid] = level
+            else:
+                self._unseeded.add(cid)
 
     def _reconfirm_live_state(self) -> None:
         """Re-submit live presence/activity per room after arming subscriptions.
@@ -1042,7 +1109,7 @@ class Controller:
         # native-transition write records a fade envelope so intermediate mesh
         # reports during the fade are not mistaken for a foreign change (F1).
         if envelope is not None:
-            self._echo.record_envelope(entity_id, *envelope)
+            self._echo.record_envelope(entity_id, *envelope, ct=ct)
         else:
             self._echo.record(entity_id, level, ct)
         # Persist the standing setpoint: integrations that poll true device
@@ -1126,11 +1193,19 @@ class Controller:
         level = _obs_level(new)
         ct = _obs_ct(new)
         # Availability recovery (§8.5): re-reconcile quietly, never override.
+        # Stamp the edge — the reports that follow it (the Plejd off -> on(true
+        # level) sequence ~29 s into a restart) must not latch either (D25).
         if old is not None and old.state == STATE_UNAVAILABLE:
+            self._recovered_at[entity_id] = _monotonic()
+            self._unseeded.discard(entity_id)  # the edge is stamped; it is seen
             self.submit(ReviewTick())
             return
         if level is None:
             return  # went unavailable — handled on recovery
+        if entity_id in self._unseeded:
+            # Unavailable at seed time: this first report IS the recovery edge.
+            self._unseeded.discard(entity_id)
+            self._recovered_at[entity_id] = _monotonic()
         if self._echo.consume(entity_id, level, ct):
             return  # our own command echo (incl. an intermediate fade sample)
         # Re-confirmation of the standing setpoint (e.g. Plejd's 3-min true-
@@ -1140,10 +1215,41 @@ class Controller:
         # genuine change (a wall dial restoring the previous level lands
         # exactly on our last command) and must latch (§9.1/§11.1).
         last = self._last_commanded.get(entity_id)
-        if last is not None and abs(level - last) <= ECHO_LEVEL_TOL:
-            old_level = _obs_level(old) if old is not None else None
-            if old_level is None or abs(old_level - last) <= ECHO_LEVEL_TOL:
+        old_level = _obs_level(old) if old is not None else None
+        if (
+            last is not None
+            and abs(level - last) <= ECHO_LEVEL_TOL
+            and (old_level is None or abs(old_level - last) <= ECHO_LEVEL_TOL)
+        ):
+            return
+        # Availability-recovery grace (§8.4/§8.5, D25): fold, never latch. The
+        # divergence — if any — is reconciled quietly by the review.
+        recovered = self._recovered_at.get(entity_id)
+        if recovered is not None:
+            if _monotonic() - recovered <= RECOVERY_GRACE:
+                _LOGGER.info(
+                    "recovery fold %s: %s -> %.3f (ct=%s, %.1fs after recovery, setpoint %s)",
+                    entity_id,
+                    _fmt_level(old_level),
+                    level,
+                    ct,
+                    _monotonic() - recovered,
+                    _fmt_level(last),
+                )
+                self.submit(ReviewTick())
                 return
+            del self._recovered_at[entity_id]  # window closed — classify normally
+        # Brightness attributes are not recorded on the live instance, so this
+        # single INFO line is the only forensic trail a false latch leaves.
+        _LOGGER.info(
+            "foreign change %s: %s -> %.3f (ct=%s, %s, setpoint %s)",
+            entity_id,
+            _fmt_level(old_level),
+            level,
+            ct,
+            self._corridor_note(entity_id),
+            _fmt_level(last),
+        )
         # level is 0.0 (off) or > 0 here — pass it through verbatim; the engine
         # reads 0/None alike as "off" but 0.0 must not become a spurious None.
         # The user owns this channel now (§9.1/§8.4a): abandon any in-flight
@@ -1152,6 +1258,13 @@ class Controller:
         if (w := self._writers.get(entity_id)) is not None:
             w.interrupt()
         self.submit(ForeignChange(channel_id=entity_id, level=level, ct=ct))
+
+    def _corridor_note(self, entity_id: str) -> str:
+        """One grep-friendly clause describing the channel's live corridor (D25)."""
+        env = self._echo.corridor(entity_id)
+        if env is None:
+            return "no corridor"
+        return f"corridor {env.frm:.2f}->{env.to:.2f} age {_monotonic() - env.start:.1f}s"
 
     @callback
     def _on_wall_event(self, event: Event) -> None:

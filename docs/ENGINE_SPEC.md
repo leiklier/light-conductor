@@ -422,6 +422,15 @@ below `warm_dim_output` (default 0.3 normalized) the cap slides toward
 5.4 CT writes go through the funnel ordered **CT before brightness** (the
 DWN-02 OUTPUT_SET can clobber a just-set level; brightness must be the last
 mesh write). CT is only rewritten when it moves ≥ `ct_min_delta` (100 K).
+The split write applies to a lamp that is **already lit**. When the lamp is
+**off** (observed level 0 or unavailable), CT and brightness (and the
+transition) go out in **one** `turn_on`: on the Plejd fork a
+`turn_on(colortemp=…, dim=None)` is sent as the plain ON command, so a CT-first
+write pops the lamp to its *remembered* level (96 % in the field) before the
+brightness write pulls it down — and that intermediate report (remembered
+level, no CT) is nobody's echo, so it latched a false override on the room's
+own turn-on (D25). The combined write records both the level corridor and the
+CT echo.
 
 ## 6. Modes
 
@@ -671,6 +680,39 @@ manual override within seconds (a live incident). Seeding makes that first
 re-report tolerance-match and be consumed. Accepted trade-off: a genuine manual
 change made in the snapshot→first-report gap is absorbed once (the same
 grossly-different report will re-latch on any subsequent change).
+
+**Fade corridor = a value band, not a moving front (D25).** A native-transition
+write opens a *corridor* for that channel: `start`, `ramp`, and the pair
+(`frm`, `to`). While the corridor lives, a report is an echo **iff its level
+lies on the monotone band `[min(frm,to) − echo_tolerance, max(frm,to) +
+echo_tolerance]`** — timing is not consulted. The fork paces a native
+`transition` as a deadline-paced ramp that skips levels when writes are slow,
+the whole mesh is serialized at ~7 GATT writes/s, and the gateway coalesces
+LASTDATA echoes under load, so an echo's *timing* is unreliable by seconds
+while its *value* is always on the segment between the start and the goal. The
+corridor dies at `start + ramp + max(5 s, 0.5·ramp)`; the final-value echo
+outlives it (`ramp + margin + echo_window`). A dial that sticks mid-fade or
+moves during the fade is still caught: after the deadline only the final-value
+echo (± tolerance) and the standing-setpoint no-op guard match, so the first
+post-deadline report at a foreign value latches, and the ~3 min true-state poll
+is the backstop.
+
+**Availability recovery never latches (D25).** Per light entity the adapter
+remembers the monotonic instant of its last `unavailable`/`unknown` →
+available edge — and, for a channel that had no state at ledger-seed time, the
+instant of its first available report (its integration may still have been
+loading). A report inside `RECOVERY_GRACE` (20 s) of that instant that would
+otherwise be classified foreign is folded as a `ReviewTick` instead: no latch,
+no writer interrupt, and §8.5 reconciles any divergence quietly. After an HA
+restart the Plejd entities go unavailable → off → on(true level) ~29 s in, and
+that off→on report latched **every** Plejd room. Accepted trade-off: a genuine
+dial press within 20 s of a Plejd reconnect is absorbed once.
+
+**Observability.** Every foreign classification is logged at INFO on one
+grep-friendly line — entity, old level, new level, CT, the live corridor
+(`frm`→`to` and its age) or `no corridor`, and the standing setpoint — and
+every consumed echo at DEBUG. Brightness attributes are not in the recorder on
+the live instance, so this log is the only forensic trail a false latch leaves.
 
 8.4a **Foreign changes interrupt the writer.** A report classified foreign —
 and a §9.4 wall event, for every channel in its room — additionally abandons

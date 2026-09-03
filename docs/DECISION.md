@@ -674,6 +674,137 @@ high summer (bright mornings need no light); exposed by August. Fix:
 `dt_util.now()`. Aware-vs-aware arithmetic everywhere else makes the zone
 otherwise irrelevant; no engine change.
 
+## D25. Echo corridor is a value band, not a moving front; availability recovery never latches (beta.19)
+
+Twelve days of live logs (2026-08-24 → 2026-09-03) turned up one cause behind
+every false override latch: the adapter was reasoning about **when** an echo
+should arrive, on a transport that cannot promise it.
+
+The evidence. (a) *kjøkken latched 2 s after its own turn-on*, with every
+channel sitting at exactly the commanded value — benkebelysning's first-step
+echo (0.016) arrived ~2 s late against a fade-front corridor of [0.033, 0.093]
+and was classified foreign. (b) *kontor + gang latched 4 s into the sleep
+hard-off* (twice), which kept gang dark on the night-path walk the hard-off
+had just fired. (c) *spisebord and gang latched within seconds of their own
+turn-ons*, repeatedly. The mechanism is the fork's transport: ~130 ms per GATT
+write, the whole mesh serialized at ~7 writes/s, a `transition` rendered as a
+**deadline-paced** ramp that skips levels when writes are slow, and a gateway
+that coalesces LASTDATA echoes under load. A room transition fades several
+channels at once (a sleep hard-off fades 7 channels in 4 s), so intermediate
+echoes routinely land seconds away from where a moving front expects them —
+while their *values* are always on the segment between start and goal.
+
+Decision: the corridor becomes a **monotone value band** (§8.4). While it
+lives, any level in `[min(frm,to) − tol, max(frm,to) + tol]` is an echo,
+whatever the timestamp; `_Envelope.front` and the temporal slack are gone. The
+overshoot margin floor goes 2 → 5 s (a congested mesh tail is normal, not
+exceptional). What still catches a real dial: after the deadline only the
+final-value echo and the standing-setpoint no-op guard match, so the first
+post-deadline report at a foreign value latches, and the ~3 min true-state poll
+corrects anything the band absorbed. Accepted residual: a dial *into* the band
+during our own fade (e.g. dialling to 30 % while we fade 0 → 60 %) is absorbed
+until the fade ends — a few seconds of the conductor's ramp, versus 4 hours of
+a false latch. That trade is the whole point.
+
+Alternatives rejected: widening the temporal slack (guesses at a distribution
+with no upper bound — the same bug with a bigger constant); requiring N
+consecutive foreign reports before latching (delays the *genuine* dial by a
+poll interval, the one thing §9.1 must never do); trusting the fork to report
+truthfully (upstream work, tracked in §13, and the conductor must be correct
+against the transport it has).
+
+**Availability recovery never latches.** Separately, every HA restart latched
+every Plejd room: the entities go unavailable → off → on(true level) ~29 s in,
+and that off→on report has no standing setpoint to match (the seed ran while
+the entity was unavailable, so nothing was seeded). The adapter now stamps each
+entity's recovery edge — its unavailable → available transition, or its first
+report when it was unseeded — and folds any would-be foreign report within
+`RECOVERY_GRACE` (20 s) as a `ReviewTick`: no latch, no writer interrupt, §8.5
+reconciles quietly. Accepted trade-off: a genuine dial press within 20 s of a
+Plejd reconnect is absorbed once.
+
+**CT-first pops an off lamp on (§5.4).** The third latch source: writing CT as
+its own `turn_on` before brightness. On the fork `turn_on(colortemp=…,
+dim=None)` becomes the plain ON command, so an *off* lamp jumps to its
+remembered level (96 %) and reports it — a level nobody commanded, with no CT,
+hence no echo. An off lamp now takes CT and brightness (and the transition) in
+one call; a lit lamp keeps the §5.4 split ordering, where the OUTPUT_SET
+clobber it exists to avoid is real.
+
+**Observability.** Brightness attributes are not recorded on the live instance,
+so a false latch left no trail at all — every diagnosis above came from
+correlating service calls with state history by hand. Every foreign
+classification is now one INFO line (entity, old → new level, CT, live
+corridor + age, standing setpoint) and every consumed echo a DEBUG line.
+
+## D26. Daylight reference rooms, per-room daylight_full, evening boost output, sleep_keeps_override, on_ramp_max (beta.19)
+
+The same twelve days produced a second class of complaint — not "the
+conductor stopped listening" but "the level is wrong" — and every instance
+traces to a global knob a room could not opt out of.
+
+The evidence. (a) **kjøkken runs 70-96 % all day**: its sensor reads only
+40-60 lx at noon against a *global* `daylight_full` of 200 lx, so `D` never
+falls far. (b) **spisebord's sensor sits behind a curtain** (10-60 lx at
+shoulder hours, 300-450 lx at noon) — the same 200 lx reference is wrong for it
+in the other direction. (c) **gang has no sensor at all** and glowed ADJACENT
+at 49 % all day whenever a neighbour was active; the user dialled it off
+repeatedly. (d) **sofakrok is the only closed-loop room** and its sensor sits
+in a dark corner under the lamp (N̂ ≈ 0.07 lx at noon), so the loop faithfully
+servoed the lamp to ~24 % in broad daylight. (e) The user turned the kitchen
+bench strip on at **22:04** and the boost band's evening lockout is
+unconditional. (f) Sleep onset released the latch on a bedroom light the user
+had *just* turned on and hard-offed it; they re-lit it 9 s later. (g) Turning a
+room on fades over ~9.6 s in an occupied room (`|Δflux| / slew_step`), which
+reads as sluggish rather than gentle.
+
+User decisions (given, not derived): kitchen much dimmer by day; kitchen
+evening cap 25 % with the bench strip allowed in the evening; gang off by day
+and ~15 % in the evening while ADJACENT; sofakrok off in daylight by following
+spisebord's sensor. This ADR is about making those expressible in config, not
+about the values.
+
+Decisions:
+
+1. **Daylight reference rooms + per-room `daylight_full` (§4.7).** A room may
+   name another room whose fresh N̂ supplies its daylight factor, and may
+   override the global `daylight_full`. A sensorless corridor (gang) and a room
+   whose own sensor is untrustworthy (spisebord's curtain) can now be damped by
+   a sensor that actually sees the sky, and kjøkken's 40-60 lx noon reading can
+   be scaled against a reference that matches it. A stale or missing source
+   still means `D = 1` (unchanged fallback, §3.5).
+   On the **closed-loop** path the factor scales the lux target `T'` **only**
+   when a reference is set: a closed-loop room's own N̂ is already subtracted by
+   the estimator, so applying its own sensor twice would be a double count —
+   but sofakrok's own sensor is *blind to daylight*, which is exactly the case a
+   reference fixes. At `D = 0` the target is 0 and the room goes dark; the
+   deadband is bypassed for a zero target on a lit room, because `|error| = Â`
+   can sit *inside* the deadband on a low-capacity room and would otherwise
+   strand the lamp lit all day — the sofakrok failure mode, one level down.
+   Rejected: a global "corridors follow the brightest sensor" rule (implicit,
+   unpredictable when a sensor wedges); teaching gang a virtual sensor (a
+   second estimator to keep honest, for a room with no measurement).
+2. **`boost_evening_output` (§4.5).** The evening lockout stays the default
+   (D6/Q4 — the boost band is task light, orthogonal to a cozy evening), but a
+   profile may name an explicit normalized output the BOOST band takes in an
+   **ACTIVE** room during the lockout window. It is applied after the evening
+   cap and master gain and is deliberately *not* subject to either: it is an
+   explicit "this is what the bench strip does in the evening" value, not a
+   tier the cap should trim. ADJACENT/BACKGROUND, the mode tables and the
+   closed-loop path stay locked out. Rejected: raising `boost_evening_max`
+   (a global that unlocks every boost band, in every room, at every tier).
+3. **`sleep_keeps_override` (§6.1/§9.2).** Per room, sleep's onset edge does
+   *not* release the latch. The standing sleep OFF already respects a latch
+   (D23), so a bedroom light latched a minute before bed survives sleep onset;
+   the latch still ends by timeout, master cycle, or a dial-off adopt. Off by
+   default — the house going dark at bedtime is the rule, and this is the one
+   room where the rule is wrong.
+4. **`on_ramp_max` (§8.2, default 3 s).** A turn-on from off is capped at
+   3 s; dimming and turn-off ramps keep the full slew-derived ramp. The slew
+   bound exists so a *change* in a lit room is not a jolt; a room that is dark
+   has no such continuity to protect, and 9.6 s of fade before the room is lit
+   reads as a slow integration, not as care.
+
 ## Open questions — RESOLVED (user, 2026-07-25)
 
 - **Q1 (D8):** master dimmer neutral at 50 % — confirmed (boost possible).
