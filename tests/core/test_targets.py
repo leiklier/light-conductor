@@ -69,16 +69,29 @@ def test_boost_evening_output_drives_an_active_room_in_the_lockout() -> None:
     """§4.5/D26: past boost_evening_max an ACTIVE room takes the explicit value
     instead of the lockout (the bench strip the user turned on at 22:04)."""
     outputs, unlocked = targets.apply_boost_evening_output(
-        {Band.PRIMARY: 0.3, Band.BOOST: 0.6}, 1.0, Role.ACTIVE, _boost_profile(0.35), TUN
+        {Band.PRIMARY: 0.3, Band.BOOST: 0.6}, 1.0, Role.ACTIVE, _boost_profile(0.35), TUN, 1.0
     )
     assert unlocked and outputs[Band.BOOST] == 0.35
     assert outputs[Band.PRIMARY] == 0.3  # other bands untouched
 
 
+def test_boost_evening_output_is_scaled_by_master_gain() -> None:
+    """§4.5/§7.2 (D26): the value is exempt from the evening CAP but not from the
+    master gain — g is 0 with the master off, and no band may survive that."""
+    outputs, unlocked = targets.apply_boost_evening_output(
+        {Band.BOOST: 0.6}, 1.0, Role.ACTIVE, _boost_profile(0.35), TUN, 0.5
+    )
+    assert unlocked and abs(outputs[Band.BOOST] - 0.175) < 1e-9
+    dark, unlocked = targets.apply_boost_evening_output(
+        {Band.BOOST: 0.6}, 1.0, Role.ACTIVE, _boost_profile(0.35), TUN, 0.0
+    )
+    assert unlocked and dark[Band.BOOST] == 0.0  # master off ⇒ the strip goes out
+
+
 def test_boost_evening_output_only_inside_the_lockout_window() -> None:
     """Below boost_evening_max the band is not locked out at all — nothing to do."""
     outputs, unlocked = targets.apply_boost_evening_output(
-        {Band.BOOST: 0.6}, 0.4, Role.ACTIVE, _boost_profile(0.35), TUN
+        {Band.BOOST: 0.6}, 0.4, Role.ACTIVE, _boost_profile(0.35), TUN, 1.0
     )
     assert not unlocked and outputs[Band.BOOST] == 0.6
 
@@ -88,11 +101,11 @@ def test_boost_evening_output_is_active_only_and_opt_in() -> None:
     the plain lockout (D6/Q4 — the default does not change)."""
     for role in (Role.ADJACENT, Role.BACKGROUND):
         _out, unlocked = targets.apply_boost_evening_output(
-            {Band.BOOST: 0.6}, 1.0, role, _boost_profile(0.35), TUN
+            {Band.BOOST: 0.6}, 1.0, role, _boost_profile(0.35), TUN, 1.0
         )
         assert not unlocked
     _out, unlocked = targets.apply_boost_evening_output(
-        {Band.BOOST: 0.6}, 1.0, Role.ACTIVE, _boost_profile(None), TUN
+        {Band.BOOST: 0.6}, 1.0, Role.ACTIVE, _boost_profile(None), TUN, 1.0
     )
     assert not unlocked
 

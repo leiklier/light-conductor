@@ -342,10 +342,12 @@ normalized band output the BOOST band takes *inside* the lockout window
 Blank (the default) keeps the plain lockout — the boost band is task light,
 orthogonal to a cozy evening (D6/Q4) — but the user does turn the kitchen bench
 strip on at 22:04, and no global knob can say that without unlocking every
-boost band in the house. It is applied **after** the evening cap (§2.4) and
-master gain (§7) and is subject to **neither**: it is an explicit "this is what
-the bench strip does in the evening" value, not a tier the cap should trim. It
-then flows through the normal weight share and affine response mapping below.
+boost band in the house. It is applied **after** the evening cap (§2.4) and is
+**exempt from it** — an explicit "this is what the bench strip does in the
+evening" value, not a tier the cap should trim — but it is still **scaled by
+master gain** (§7): `G` is 0 with the master off (§7.2), and no room may hold a
+band the master switch cannot extinguish. It then flows through the normal
+weight share and affine response mapping below.
 ADJACENT/BACKGROUND, the §6 mode tables and the closed-loop path stay locked
 out exactly as before.
 

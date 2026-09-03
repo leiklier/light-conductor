@@ -59,27 +59,35 @@ def apply_evening_cap(
 
 
 def apply_boost_evening_output(
-    outputs: dict[Band, float], e: float, role: Role, profile: Profile, tun: Tunables
+    outputs: dict[Band, float],
+    e: float,
+    role: Role,
+    profile: Profile,
+    tun: Tunables,
+    g: float,
 ) -> tuple[dict[Band, float], bool]:
     """Drive the BOOST band at the profile's evening output (rule 4.5, D26).
 
     Returns ``(outputs, unlocked)``. Inside the evening lockout window
     (``E >= boost_evening_max``) an **ACTIVE** room whose profile sets
-    ``boost_evening_output`` drives the boost band at exactly that normalized
-    value instead of having it gated off; ``unlocked`` tells
+    ``boost_evening_output`` drives the boost band at that normalized value
+    instead of having it gated off; ``unlocked`` tells
     :func:`~.photometry.allocate` not to re-zero it.
 
-    Deliberately applied AFTER the evening cap and master gain, and subject to
-    neither: it is an explicit "this is what the bench strip does in the
-    evening" value, not a tier the cap should trim. It still goes through the
-    normal weight share and affine response mapping in ``allocate``.
+    Applied after the evening cap and **exempt from it** — an explicit "this is
+    what the bench strip does in the evening" value, not a tier the cap should
+    trim — but it IS scaled by the master gain ``g``. The master switch has no
+    other mechanism: :func:`~.gain.multiplier` returns 0 when the master is off
+    (rule 7.2), so a band that ignored ``g`` would be the one light in the house
+    the master switch could not turn off. It still goes through the normal
+    weight share and affine response mapping in ``allocate``.
 
     ADJACENT/BACKGROUND, the §6 mode tables and the closed-loop path are
     untouched — they never call this, so their boost band stays locked out.
     """
     if profile.boost_evening_output is None or role is not Role.ACTIVE or e < tun.boost_evening_max:
         return outputs, False
-    return {**outputs, Band.BOOST: profile.boost_evening_output}, True
+    return {**outputs, Band.BOOST: max(0.0, min(1.0, profile.boost_evening_output * g))}, True
 
 
 def daylight_factor(n_hat: float, tun: Tunables, full: float | None = None) -> float:

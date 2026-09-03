@@ -812,11 +812,14 @@ Decisions:
    (D6/Q4 — the boost band is task light, orthogonal to a cozy evening), but a
    profile may name an explicit normalized output the BOOST band takes in an
    **ACTIVE** room during the lockout window. It is applied after the evening
-   cap and master gain and is deliberately *not* subject to either: it is an
-   explicit "this is what the bench strip does in the evening" value, not a
-   tier the cap should trim. ADJACENT/BACKGROUND, the mode tables and the
-   closed-loop path stay locked out. Rejected: raising `boost_evening_max`
-   (a global that unlocks every boost band, in every room, at every tier).
+   cap and is deliberately *not* subject to it — an explicit "this is what the
+   bench strip does in the evening" value, not a tier the cap should trim — but
+   it **is** scaled by master gain: `gain.multiplier` returns 0 when the master
+   is off (§7.2), which is the master switch's only mechanism, and a band that
+   ignored it would be the one light in the house the switch could not
+   extinguish. ADJACENT/BACKGROUND, the mode tables and the closed-loop path
+   stay locked out. Rejected: raising `boost_evening_max` (a global that
+   unlocks every boost band, in every room, at every tier).
 3. **`sleep_keeps_override` (§6.1/§9.2).** Per room, sleep's onset edge does
    *not* release the latch. The standing sleep OFF already respects a latch
    (D23), so a bedroom light latched a minute before bed survives sleep onset;

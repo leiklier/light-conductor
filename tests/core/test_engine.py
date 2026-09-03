@@ -94,6 +94,14 @@ def test_boost_evening_output_lights_the_bench_strip_after_sunset() -> None:
     assert 0.3 < cmds["kjokken_benke"].level < 0.4  # ~0.35, past the 0.3 cap
     assert "kjokken_taklys" not in cmds  # the evening tier is otherwise unchanged
 
+    # The master switch still owns it (§7.2): master off ⇒ g = 0 ⇒ the strip
+    # goes out. It is exempt from the evening CAP, not from the master gain.
+    off = eng.handle(MasterPowerChanged(False), at(1, 22, 1, 30))
+    assert "kjokken_benke" in offs(off)
+    assert not eng.state.rooms["kjokken"].channels["kjokken_benke"].on
+    eng.handle(MasterPowerChanged(True), at(1, 22, 1, 45))
+    assert eng.state.rooms["kjokken"].channels["kjokken_benke"].on
+
     # ADJACENT keeps the lockout: only an ACTIVE room gets the evening boost.
     eng.handle(PresenceChanged("kjokken", False), at(1, 22, 2))
     adj = eng.handle(PresenceChanged("sofakrok", True), at(1, 22, 10))
