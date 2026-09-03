@@ -478,7 +478,12 @@ latch times out (9.2). Anything else counters the wall dial within one
 review, in exactly the rooms whose dials are used during sleep (the
 2026-08-14 soverom/gang incident). Sleep turning off restores normal
 evaluation (morning ramp per §2.3); a during-sleep latch survives the
-morning like any other latch.
+morning like any other latch. A room configured `sleep_keeps_override`
+(D26) is **exempt from the onset release**: its latch survives sleep
+engaging, and since the standing hard-off already respects a latch, the lamp
+stays as the user left it. Default off — the house going dark at bedtime is
+the rule; the bedroom, where onset hard-offed the light the user had turned on
+a minute earlier (they re-lit it 9 s later), is the exception.
 
 6.2 **Night path.** While sleep is on, a night trigger (any configured
 `night_trigger` entity: bedroom door opening, or presence/pass-by in a living
@@ -784,7 +789,9 @@ stray dialed level on the morning descent (6.5b).
 (hold expiry at OFF tier) — **presence-capable rooms only**; the
 sleep/away/vacation **onset edge** (the moment the mode engages — never
 re-checked while it stands, so a during-mode latch survives until its
-timeout); master gain off/on cycle; or `override_timeout` (default 4 h).
+timeout), *except* in a room configured `sleep_keeps_override`, which is
+exempt from the SLEEP onset release only (§6.1, D26); master gain off/on
+cycle; or `override_timeout` (default 4 h).
 Release re-enters normal control with slew ramps (no jumps). A room is
 presence-capable when a presence or occupancy-fallback sensor is configured;
 in a blind room (door/corridor triggers only) OFF-decay merely means the

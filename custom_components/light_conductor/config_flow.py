@@ -73,6 +73,7 @@ from .const import (
     CONF_ROOMS,
     CONF_SHAPE,
     CONF_SLEEP_ENTITY,
+    CONF_SLEEP_KEEPS_OVERRIDE,
     CONF_TRIGGERS,
     CONF_TUNABLES,
     CONF_TV_ENTITIES,
@@ -496,6 +497,7 @@ class LightConductorOptionsFlow(OptionsFlow):
             ]
             updated[CONF_LIVING_GROUP] = user_input.get(CONF_LIVING_GROUP, False)
             updated[CONF_TV_MODE] = user_input.get(CONF_TV_MODE, False)
+            updated[CONF_SLEEP_KEEPS_OVERRIDE] = user_input.get(CONF_SLEEP_KEEPS_OVERRIDE, False)
             # Daylight reference / per-room daylight_full (§4.7, D26): both are
             # clearable — a blank submission omits the key, so drop it and the
             # room falls back to its own sensor / the global tunable.
@@ -568,6 +570,12 @@ class LightConductorOptionsFlow(OptionsFlow):
                 ): BooleanSelector(),
                 vol.Optional(
                     CONF_TV_MODE, default=room.get(CONF_TV_MODE, False)
+                ): BooleanSelector(),
+                # §6.1/§9.2 (D26): sleep's onset edge leaves this room's latch
+                # standing (the bedroom lamp lit a minute before bed).
+                vol.Optional(
+                    CONF_SLEEP_KEEPS_OVERRIDE,
+                    default=room.get(CONF_SLEEP_KEEPS_OVERRIDE, False),
                 ): BooleanSelector(),
                 _opt(CONF_HOLD_SECONDS, room): NumberSelector(
                     NumberSelectorConfig(min=10, max=1800, step=5, mode=NumberSelectorMode.BOX)

@@ -218,6 +218,11 @@ class RoomConfig:
     #: reaches ``daylight_min_factor``. A sensor reading 40-60 lx at noon
     #: (kjøkken) and one reading 300-450 lx (spisebord) cannot share a global.
     daylight_full: float | None = None
+    #: Sleep's ONSET edge does not release this room's override latch (§6.1/§9.2,
+    #: D26). Off by default — the house going dark at bedtime is the rule. On for
+    #: the bedroom, where the light the user turned on a minute before bed is
+    #: exactly what sleep onset used to hard-off (they re-lit it 9 s later).
+    sleep_keeps_override: bool = False
     #: Whether the room can OBSERVE vacancy (a presence or occupancy sensor is
     #: configured). Blind rooms (door/corridor with triggers only) decay to the
     #: OFF role on hold expiry without anyone having left — their manual

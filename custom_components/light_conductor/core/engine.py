@@ -208,7 +208,17 @@ class Engine:
                     # the house goes dark. A latch minted DURING sleep (the
                     # 03:00 reading light) is deliberate manual control and is
                     # respected by the standing hard-off (rule 6.1).
-                    for rs in s.rooms.values():
+                    # Exception (§6.1, D26): a room with ``sleep_keeps_override``
+                    # keeps its latch across the onset edge. The standing sleep
+                    # OFF already respects a latch, so the bedroom light turned
+                    # on a minute before bed survives — otherwise onset hard-offs
+                    # the very lamp the user just reached for (they re-lit it 9 s
+                    # later). The latch still ends by timeout, master cycle or a
+                    # dial-off adopt.
+                    for room_id, rs in s.rooms.items():
+                        keep = self.config.room(room_id)
+                        if keep is not None and keep.sleep_keeps_override:
+                            continue
                         override.release(rs)
                 s.sleep = event.active
                 if not event.active:

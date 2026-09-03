@@ -777,6 +777,73 @@ def test_night_path_expiry_uses_night_fade() -> None:
     assert fades and fades[0].ramp_seconds == 10.0
 
 
+# --- §6.1/§9.2 (D26): per-room sleep_keeps_override ----------------------
+
+
+def _sleep_keeps_config() -> EngineConfig:
+    """The apartment with soverom flagged ``sleep_keeps_override`` (the bedroom)."""
+    from dataclasses import replace
+
+    return EngineConfig(
+        rooms=tuple(
+            replace(r, sleep_keeps_override=True) if r.room_id == "soverom" else r
+            for r in apartment().rooms
+        )
+    )
+
+
+def test_sleep_onset_releases_every_latch_by_default() -> None:
+    """§9.2: the onset edge still clears latches in every ordinary room."""
+    eng = _engine()
+    eng.handle(TriggerFired("soverom"), at(1, 22, 0))
+    eng.handle(ForeignChange("soverom_taklys", 0.6), at(1, 22, 1))
+    assert eng.state.rooms["soverom"].overridden
+
+    plan = eng.handle(SleepChanged(True), at(1, 22, 2))
+    assert eng.state.rooms["soverom"].overridden is False
+    assert "soverom_taklys" in offs(plan)  # the house goes dark
+
+
+def test_sleep_keeps_override_survives_the_onset_edge() -> None:
+    """§6.1/§9.2 (D26): a flagged room keeps its latch across sleep onset, so
+    the lamp the user turned on a minute before bed stays lit — the standing
+    sleep OFF already respects a latch (§6.1), so nothing counters it later."""
+    eng = Engine(_sleep_keeps_config(), None)
+    eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))
+    eng.handle(TriggerFired("soverom"), at(1, 22, 1))
+    eng.handle(ForeignChange("soverom_taklys", 0.6), at(1, 22, 2))
+    eng.handle(ForeignChange("gang_taklys", 0.5), at(1, 22, 2, 30))
+
+    plan = eng.handle(SleepChanged(True), at(1, 23, 0))
+    soverom = eng.state.rooms["soverom"]
+    assert soverom.overridden  # the flagged room keeps the latch
+    assert "soverom_taklys" not in offs(plan)
+    assert soverom.channels["soverom_taklys"].commanded_b == 0.6
+    # Every other room still goes dark at the onset edge (gang is blind, so its
+    # latch would otherwise hold — only the onset edge clears it).
+    assert eng.state.rooms["gang"].overridden is False
+    assert "gang_taklys" in offs(plan)
+
+    # And the standing hard-off keeps respecting it on later reviews.
+    later = eng.handle(ReviewTick(), at(1, 23, 30))
+    assert "soverom_taklys" not in offs(later)
+    assert eng.state.rooms["soverom"].overridden
+
+
+def test_sleep_keeps_override_still_releases_on_a_master_cycle() -> None:
+    """§9.2 (D26): only SLEEP's onset is exempted — the master power cycle (and
+    the timeout) still release the latch."""
+    eng = Engine(_sleep_keeps_config(), None)
+    eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))
+    eng.handle(TriggerFired("soverom"), at(1, 22, 1))
+    eng.handle(ForeignChange("soverom_taklys", 0.6), at(1, 22, 2))
+    eng.handle(SleepChanged(True), at(1, 23, 0))
+    assert eng.state.rooms["soverom"].overridden
+
+    eng.handle(MasterPowerChanged(False), at(1, 23, 1))
+    assert eng.state.rooms["soverom"].overridden is False
+
+
 def test_role_arbitration_through_engine() -> None:
     """§1.2 (F9): the engine resolves competing roles — NIGHT_PATH > TV > ACTIVE."""
     # Night beats a room that is simultaneously occupied and TV-eligible.

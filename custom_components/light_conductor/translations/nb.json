@@ -89,6 +89,7 @@
           "trigger_entities": "Utløsere (dør / passering)",
           "living_group": "Oppholdsgruppe",
           "tv_mode": "Deltar i TV-modus",
+          "sleep_keeps_override": "Nattmodus beholder manuell overstyring",
           "hold_seconds": "Aktiv holdetid (sekunder)",
           "vacancy": "Oppførsel ved tomt rom",
           "active_day_output": "Aktiv utgang (dag)",

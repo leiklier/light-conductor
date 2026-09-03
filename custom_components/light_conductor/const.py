@@ -86,6 +86,8 @@ CONF_WALL_EVENTS = "wall_event_entities"
 CONF_TRIGGERS = "trigger_entities"
 CONF_LIVING_GROUP = "living_group"
 CONF_TV_MODE = "tv_mode"
+#: Sleep onset does not release this room's override latch (§6.1/§9.2, D26).
+CONF_SLEEP_KEEPS_OVERRIDE = "sleep_keeps_override"
 CONF_HOLD_SECONDS = "hold_seconds"
 CONF_PROFILE = "profile"
 
@@ -283,6 +285,7 @@ def build_engine_config(hass: HomeAssistant | None, options: Mapping[str, Any]) 
                 hold_seconds=room.get(CONF_HOLD_SECONDS),
                 night_path=room_id in night_path_rooms,
                 tv_mode=bool(room.get(CONF_TV_MODE, False)),
+                sleep_keeps_override=bool(room.get(CONF_SLEEP_KEEPS_OVERRIDE, False)),
                 has_lux_sensor=bool(room.get(CONF_LUX_SENSOR)),
                 daylight_reference=_daylight_reference(room, room_id, lux_rooms),
                 daylight_full=float(room[CONF_DAYLIGHT_FULL])
