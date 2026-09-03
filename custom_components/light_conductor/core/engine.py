@@ -224,8 +224,12 @@ class Engine:
                     # OFF already respects a latch, so the bedroom light turned
                     # on a minute before bed survives — otherwise onset hard-offs
                     # the very lamp the user just reached for (they re-lit it 9 s
-                    # later). The latch still ends by timeout, master cycle or a
-                    # dial-off adopt.
+                    # later). The latch then stands for the full override_timeout
+                    # (4 h), exactly like one minted during standing sleep today;
+                    # a master cycle or observed vacancy (presence-capable rooms)
+                    # also ends it. Turning the lamp off by hand does NOT: that
+                    # is another foreign change, so the room stays latched — and
+                    # dark, which is what the user asked for.
                     for room_id, rs in s.rooms.items():
                         keep = self.config.room(room_id)
                         if keep is not None and keep.sleep_keeps_override:

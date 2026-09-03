@@ -371,6 +371,21 @@ class LightConductorOptionsFlow(OptionsFlow):
         """Rooms usable as a §4.7 daylight reference — they own a lux sensor."""
         return [r[CONF_ROOM_ID] for r in self._rooms if r.get(CONF_LUX_SENSOR)]
 
+    def _reference_options(self, room: dict[str, Any]) -> tuple[str, ...]:
+        """Daylight-reference choices for a room (§4.7, D26).
+
+        Other lux rooms, plus whatever is CURRENTLY stored even if it no longer
+        qualifies: the stored value is prefilled as a ``suggested_value``, so a
+        reference whose room lost its lux sensor would fail schema validation
+        and the room could not be opened — let alone corrected — at all. The
+        engine independently drops an unusable reference at config build.
+        """
+        options = [r for r in self._lux_room_ids() if r != self._room_id]
+        current = room.get(CONF_DAYLIGHT_REFERENCE)
+        if current and current not in options:
+            options.append(str(current))
+        return tuple(options)
+
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if not self._options:
             self._options = dict(self.config_entry.options)
@@ -559,9 +574,7 @@ class LightConductorOptionsFlow(OptionsFlow):
                 # Daylight reference (§4.7, D26): only rooms that own a lux
                 # sensor can serve as one, and never this room itself. Blank ⇒
                 # the room's own sensor (or no damping at all).
-                _opt(CONF_DAYLIGHT_REFERENCE, room): _select(
-                    tuple(r for r in self._lux_room_ids() if r != self._room_id)
-                ),
+                _opt(CONF_DAYLIGHT_REFERENCE, room): _select(self._reference_options(room)),
                 # Per-room daylight_full in lx; blank ⇒ the global tunable.
                 _opt(CONF_DAYLIGHT_FULL, room): _lux(),
                 _opt(CONF_PRESENCE_PRIMARY, room): _entity("binary_sensor", "occupancy"),

@@ -346,6 +346,42 @@ async def test_options_room_detail_daylight_reference_round_trip(hass: HomeAssis
     assert CONF_DAYLIGHT_FULL not in gang
 
 
+async def test_room_detail_opens_with_a_dangling_daylight_reference(hass: HomeAssistant) -> None:
+    """A reference whose room lost its lux sensor must not brick the editor: the
+    stored value is prefilled as a suggested_value, so it has to stay in the
+    select's options or the form fails validation and cannot even be corrected."""
+    sunny = room("sunny", ["light.s"])  # NO lux sensor any more
+    gang = room("gang", ["light.g"])
+    gang[CONF_DAYLIGHT_REFERENCE] = "sunny"
+    entry = await setup_entry(hass, options([sunny, gang]))
+
+    async def configure(flow_id: str, data: dict) -> dict:
+        return await hass.config_entries.options.async_configure(flow_id, data)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await configure(result["flow_id"], {"next_step_id": "rooms"})
+    result = await configure(result["flow_id"], {"next_step_id": "edit_room"})
+    result = await configure(result["flow_id"], {"room_id": "gang"})
+    assert result["step_id"] == "room_detail"  # opened, not InvalidData
+
+    # The stale value can be re-submitted (still selectable) and cleared.
+    result = await configure(
+        result["flow_id"],
+        {
+            "name": "Gang",
+            "shape": "corridor",
+            "channels": ["light.g"],
+            CONF_DAYLIGHT_REFERENCE: "sunny",
+        },
+    )
+    assert result["type"] == FlowResultType.MENU
+    # ...and the engine drops it independently, so the room just runs undamped.
+    from custom_components.light_conductor.const import build_engine_config
+
+    cfg = build_engine_config(None, {CONF_ROOMS: [sunny, gang]})
+    assert cfg.room("gang").daylight_reference is None
+
+
 async def test_options_room_detail_accepts_hold_seconds(hass: HomeAssistant) -> None:
     """hold_seconds is now in the room_detail schema (no more extra-keys reject)."""
     entry = await setup_entry(hass, options([room("k", ["light.k"])]))

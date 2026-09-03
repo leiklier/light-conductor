@@ -511,9 +511,10 @@ evaluation (morning ramp per §2.3); a during-sleep latch survives the
 morning like any other latch. A room configured `sleep_keeps_override`
 (D26) is **exempt from the onset release**: its latch survives sleep
 engaging, and since the standing hard-off already respects a latch, the lamp
-stays as the user left it. Default off — the house going dark at bedtime is
-the rule; the bedroom, where onset hard-offed the light the user had turned on
-a minute earlier (they re-lit it 9 s later), is the exception.
+stays as the user left it — for the full `override_timeout` (4 h), exactly like
+a latch minted while sleep already stood. Default off — the house going dark at
+bedtime is the rule; the bedroom, where onset hard-offed the light the user had
+turned on a minute earlier (they re-lit it 9 s later), is the exception.
 
 6.2 **Night path.** While sleep is on, a night trigger (any configured
 `night_trigger` entity: bedroom door opening, or presence/pass-by in a living
@@ -727,7 +728,10 @@ positive, and no explicit mode `fade` is given, the ramp is capped at
 is not a jolt; a dark room has no continuity to protect, and the full-range
 `|Δflux| / slew_step` ramp (~9.6 s in an occupied room) reads as a slow
 integration rather than as care. Dimming and turn-off ramps are unchanged, and
-a mode fade (sleep/night) still wins outright.
+a mode fade (sleep/night) still wins outright. The cap bounds **both** adapter
+paths: the native transition is handed the capped `ramp_seconds`, and the
+software stepping fallback derives its step count from the same value, so a
+no-transition light lights in the same 3 s instead of ~10 one-second steps.
 
 8.3 **Write economy.** A channel is commanded only when the quantized goal
 differs from the ledger's last commanded value by ≥ `min_delta` (flux-relative
@@ -851,8 +855,9 @@ stray dialed level on the morning descent (6.5b).
 sleep/away/vacation **onset edge** (the moment the mode engages — never
 re-checked while it stands, so a during-mode latch survives until its
 timeout), *except* in a room configured `sleep_keeps_override`, which is
-exempt from the SLEEP onset release only (§6.1, D26); master gain off/on
-cycle; or `override_timeout` (default 4 h).
+exempt from the SLEEP onset release only and whose latch therefore stands
+until one of the remaining conditions — in practice the 4 h timeout (§6.1,
+D26); master gain off/on cycle; or `override_timeout` (default 4 h).
 Release re-enters normal control with slew ramps (no jumps). A room is
 presence-capable when a presence or occupancy-fallback sensor is configured;
 in a blind room (door/corridor triggers only) OFF-decay merely means the

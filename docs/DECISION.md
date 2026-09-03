@@ -829,15 +829,21 @@ Decisions:
    unlocks every boost band, in every room, at every tier).
 3. **`sleep_keeps_override` (§6.1/§9.2).** Per room, sleep's onset edge does
    *not* release the latch. The standing sleep OFF already respects a latch
-   (D23), so a bedroom light latched a minute before bed survives sleep onset;
-   the latch still ends by timeout, master cycle, or a dial-off adopt. Off by
-   default — the house going dark at bedtime is the rule, and this is the one
-   room where the rule is wrong.
+   (D23), so a bedroom light latched a minute before bed survives sleep onset.
+   The latch then stands for the full `override_timeout` (4 h) — the same
+   residual D23 already accepted for a latch minted *during* standing sleep —
+   or until a master cycle or, in a presence-capable room, observed vacancy.
+   Turning the lamp off by hand does **not** release it (that is simply another
+   foreign change; the room stays latched *and* dark, which is what was asked
+   for). Off by default — the house going dark at bedtime is the rule, and this
+   is the one room where the rule is wrong.
 4. **`on_ramp_max` (§8.2, default 3 s).** A turn-on from off is capped at
    3 s; dimming and turn-off ramps keep the full slew-derived ramp. The slew
    bound exists so a *change* in a lit room is not a jolt; a room that is dark
    has no such continuity to protect, and 9.6 s of fade before the room is lit
-   reads as a slow integration, not as care.
+   reads as a slow integration, not as care. The cap is engine-side, so it
+   bounds both adapter paths — the native transition and the software stepping
+   ramp, whose step count derives from the same `ramp_seconds`.
 
 ## Open questions — RESOLVED (user, 2026-07-25)
 

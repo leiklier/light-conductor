@@ -41,7 +41,7 @@ def _ramp_seconds(
     if override is not None:
         return override
     ramp = abs(f1 - f0) / slew * tun.slew_interval
-    if crossing_on and f1 > 0.0:
+    if crossing_on:  # the only caller passing True has already guaranteed f1 > 0
         ramp = min(ramp, tun.on_ramp_max)
     return ramp
 
