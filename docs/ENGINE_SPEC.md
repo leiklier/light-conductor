@@ -742,31 +742,54 @@ change made in the snapshot→first-report gap is absorbed once (the same
 grossly-different report will re-latch on any subsequent change).
 
 **Fade corridor = a value band, not a moving front (D25).** A native-transition
-write opens a *corridor* for that channel: `start`, `ramp`, and the pair
-(`frm`, `to`). While the corridor lives, a report is an echo **iff its level
-lies on the monotone band `[min(frm,to) − echo_tolerance, max(frm,to) +
-echo_tolerance]`** — timing is not consulted. The fork paces a native
+write opens a *corridor* for that channel: `start`, `ramp`, the band `[lo, hi]`
+spanning `frm`→`to`, and a monotone high-water mark. While the corridor lives, a
+report is an echo **iff its level lies on the band (± `echo_tolerance`) *and*
+does not regress** (below) — timing is not consulted. The fork paces a native
 `transition` as a deadline-paced ramp that skips levels when writes are slow,
 the whole mesh is serialized at ~7 GATT writes/s, and the gateway coalesces
 LASTDATA echoes under load, so an echo's *timing* is unreliable by seconds
 while its *value* is always on the segment between the start and the goal. The
 corridor dies at `start + ramp + max(5 s, 0.5·ramp)`; the final-value echo
-outlives it (`ramp + margin + echo_window`). A dial that sticks mid-fade or
-moves during the fade is still caught: after the deadline only the final-value
-echo (± tolerance) and the standing-setpoint no-op guard match, so the first
-post-deadline report at a foreign value latches, and the ~3 min true-state poll
-is the backstop.
+outlives it (`ramp + margin + echo_window`). No CT echo is recorded for a
+corridor write: a CT-only echo has no level test, and a CT-capable lamp repeats
+its kelvin on every state change, so it would consume a wall dial to full for
+the whole TTL.
+
+**Monotone progress.** A fade only ever approaches its goal, so the corridor
+tracks the smallest `|level − to|` any accepted report has reached; a report
+materially further from `to` than that high-water mark is **not** an echo. This
+is what catches a dial *during* our fade, and — since the band necessarily
+outlives the fade by the overshoot margin — a dial-down in the seconds after
+the lamp arrived. **Re-targeting** mid-fade (a mode resolution landing while a
+turn-on ramps) takes the **union** of the live band and the new segment,
+because `frm` is read from HA's state, which lags the lamp: the new segment
+alone would exclude where the lamp actually is. The high-water mark resets,
+since progress is measured toward the new goal.
+
+**What is *not* a backstop:** the ~3 min true-state poll. A report the ledger
+absorbs has already become the entity's HA state, so the poll re-reporting that
+same value fires `state_reported`, not `state_changed`, and never reaches the
+foreign-change path. A value the corridor absorbs stands until the next command
+re-asserts the setpoint — which is why the band must be tight and the progress
+test exists. After the deadline only the final-value echo (± tolerance) and the
+standing-setpoint no-op guard match, so the first post-deadline report at a
+foreign value latches.
 
 **Availability recovery never latches (D25).** Per light entity the adapter
 remembers the monotonic instant of its last `unavailable`/`unknown` →
 available edge — and, for a channel that had no state at ledger-seed time, the
 instant of its first available report (its integration may still have been
-loading). A report inside `RECOVERY_GRACE` (20 s) of that instant that would
-otherwise be classified foreign is folded as a `ReviewTick` instead: no latch,
-no writer interrupt, and §8.5 reconciles any divergence quietly. After an HA
-restart the Plejd entities go unavailable → off → on(true level) ~29 s in, and
-that off→on report latched **every** Plejd room. Accepted trade-off: a genuine
-dial press within 20 s of a Plejd reconnect is absorbed once.
+loading). The FIRST report inside `RECOVERY_GRACE` (20 s) of that instant that
+would otherwise be classified foreign is folded as a `ReviewTick` instead: no
+latch, no writer interrupt, and §8.5 reconciles any divergence quietly. After
+an HA restart the Plejd entities go unavailable → off → on(true level) ~29 s
+in, and that off→on report latched **every** Plejd room. The grace is
+**one-shot** (that sequence is exactly one fold) and an edge arriving within
+`RECOVERY_EDGE_DEBOUNCE` (60 s) of the previous one does **not** re-arm it —
+otherwise a flapping link would hold the window open forever and no dial in
+that room could ever latch. Accepted trade-off: a genuine dial press that is
+the first divergence within 20 s of a Plejd reconnect is absorbed once.
 
 **Observability.** Every foreign classification is logged at INFO on one
 grep-friendly line — entity, old level, new level, CT, the live corridor

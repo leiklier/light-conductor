@@ -205,13 +205,14 @@ async def test_dial_transition_onto_standing_setpoint_latches(hass: HomeAssistan
 
 
 async def test_transition_fade_reports_no_override(hass: HomeAssistant, monkeypatch) -> None:
-    """D25: while the corridor lives, ANY level on the band start→goal is an
-    echo — however late or out of order it arrives (the mesh is serialized and
-    the gateway coalesces echoes). A value off the band still latches."""
+    """D25: while the corridor lives, a level on the band start→goal that
+    advances toward the goal is an echo — however late it arrives and however
+    many levels it skips (the mesh is serialized and the gateway coalesces
+    echoes). A value off the band still latches."""
     _controller, overridden, clock, env = await _partial_fade_setup(hass, monkeypatch)
 
-    # Late / out-of-order samples anywhere on the band — all echoes.
-    for dt, frac in ((0.5, 1.0), (2.0, 0.2), (3.5, 0.6), (5.0, 1.0)):
+    # Late, level-skipping samples — all echoes (timing carries no information).
+    for dt, frac in ((0.5, 0.05), (2.0, 0.2), (2.1, 0.9), (6.0, 1.0)):
         clock[0] = env.start + dt
         level = env.frm + (env.to - env.frm) * frac
         set_light(hass, "light.a", "on", brightness=max(1, round(level * 255)), transition=True)
@@ -219,10 +220,31 @@ async def test_transition_fade_reports_no_override(hass: HomeAssistant, monkeypa
     assert hass.states.get(overridden).state == "off"
 
     # A wall dial yanks past the goal — off the band ⇒ override, mid-fade.
-    clock[0] = env.start + 1.0
+    clock[0] = env.start + 6.5
     set_light(hass, "light.a", "on", brightness=255, transition=True)
     await hass.async_block_till_done()
     assert hass.states.get(overridden).state == "on"
+
+
+async def test_dial_down_after_our_fade_completes_latches(hass: HomeAssistant, monkeypatch) -> None:
+    """S1/D25: the band outlives the fade by the overshoot margin, so without
+    the monotone high-water mark a dial-down landing in those seconds was
+    absorbed — and permanently: the absorbed value IS the entity's state, and
+    the ~3 min poll re-reports it as ``state_reported``, never ``state_changed``,
+    so nothing would have re-classified it."""
+    controller, overridden, clock, env = await _partial_fade_setup(hass, monkeypatch)
+
+    clock[0] = env.start + env.ramp
+    set_light(hass, "light.a", "on", brightness=round(env.to * 255), transition=True)
+    await hass.async_block_till_done()
+    assert hass.states.get(overridden).state == "off"  # our own completion
+
+    clock[0] = env.start + env.ramp + 1.0  # corridor still live (margin)
+    assert clock[0] < env.deadline
+    set_light(hass, "light.a", "on", brightness=round(env.to * 0.4 * 255), transition=True)
+    await hass.async_block_till_done()
+    assert hass.states.get(overridden).state == "on"
+    assert controller.engine.room_state("a").overridden is True
 
 
 async def test_post_deadline_foreign_value_latches(hass: HomeAssistant, monkeypatch) -> None:
@@ -241,10 +263,10 @@ async def test_post_deadline_foreign_value_latches(hass: HomeAssistant, monkeypa
 # --- D25 availability-recovery grace ---------------------------------------
 
 
-async def test_availability_recovery_report_folds_as_review(hass: HomeAssistant) -> None:
-    """D25: after every HA restart the Plejd entities go unavailable → off →
-    on(true level) ~29 s in. That off→on report used to latch every Plejd room;
-    inside RECOVERY_GRACE it is folded as a quiet ReviewTick (§8.5)."""
+async def _recovery_setup(hass: HomeAssistant, monkeypatch):
+    """An observe-only room on a fake monotonic clock (recovery windows)."""
+    clock = [1000.0]
+    monkeypatch.setattr(lc_controller, "_monotonic", lambda: clock[0])
     set_light(hass, "light.a", "on", brightness=128, transition=True)
     hass.states.async_set("binary_sensor.pa", "on")
     entry = await setup_entry(
@@ -252,21 +274,74 @@ async def test_availability_recovery_report_folds_as_review(hass: HomeAssistant)
         options([room("a", ["light.a"], presence="binary_sensor.pa")]),
         enabled=False,  # observe-only: the seed is the only ledger populator
     )
-    controller = hass.data[DOMAIN][entry.entry_id]
+    return hass.data[DOMAIN][entry.entry_id], clock
+
+
+async def test_availability_recovery_report_folds_as_review(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    """D25: after every HA restart the Plejd entities go unavailable → off →
+    on(true level) ~29 s in. That off→on report used to latch every Plejd room;
+    inside RECOVERY_GRACE it is folded as a quiet ReviewTick (§8.5)."""
+    controller, clock = await _recovery_setup(hass, monkeypatch)
 
     hass.states.async_set("light.a", STATE_UNAVAILABLE)
     await hass.async_block_till_done()
+    clock[0] += 1.0
     set_light(hass, "light.a", "off", transition=True)  # the recovery edge
     await hass.async_block_till_done()
+    clock[0] += 1.0
     set_light(hass, "light.a", "on", brightness=250, transition=True)  # true level
     await hass.async_block_till_done()
     assert controller.engine.room_state("a").overridden is False
 
-    # Past the grace window the same report latches normally.
-    controller._recovered_at["light.a"] = (
-        lc_controller._monotonic() - lc_controller.RECOVERY_GRACE - 1.0
-    )
-    set_light(hass, "light.a", "on", brightness=200, transition=True)
+
+async def test_recovery_grace_is_consumed_by_one_report(hass: HomeAssistant, monkeypatch) -> None:
+    """S2/D25: the grace is one-shot. The restart signature is exactly one fold
+    (off → on(true level)); a SECOND divergence inside the same window is a real
+    change and must latch — otherwise a 20 s hole opens after every reconnect."""
+    controller, clock = await _recovery_setup(hass, monkeypatch)
+
+    hass.states.async_set("light.a", STATE_UNAVAILABLE)
+    await hass.async_block_till_done()
+    clock[0] += 1.0
+    set_light(hass, "light.a", "off", transition=True)  # edge (arms the grace)
+    await hass.async_block_till_done()
+    clock[0] += 1.0
+    set_light(hass, "light.a", "on", brightness=250, transition=True)  # the one fold
+    await hass.async_block_till_done()
+    assert controller.engine.room_state("a").overridden is False
+
+    clock[0] += 2.0  # still well inside RECOVERY_GRACE
+    set_light(hass, "light.a", "on", brightness=120, transition=True)  # a dial
+    await hass.async_block_till_done()
+    assert controller.engine.room_state("a").overridden is True
+
+
+async def test_flapping_link_cannot_hold_the_recovery_window_open(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    """S2/D25: an edge inside RECOVERY_EDGE_DEBOUNCE of the previous one does not
+    re-arm the grace — a link flapping every few seconds would otherwise mean no
+    dial in that room could ever latch."""
+    controller, clock = await _recovery_setup(hass, monkeypatch)
+
+    # Flap every 5 s for well past RECOVERY_GRACE (20 s) but inside the 60 s
+    # debounce: only the FIRST edge arms a grace, and it expires on its own.
+    for _ in range(6):
+        hass.states.async_set("light.a", STATE_UNAVAILABLE)
+        await hass.async_block_till_done()
+        clock[0] += 2.0
+        set_light(hass, "light.a", "on", brightness=128, transition=True)
+        await hass.async_block_till_done()
+        clock[0] += 3.0
+    assert controller.engine.room_state("a").overridden is False
+    # The only armed grace is the FIRST edge's, and it has long expired.
+    armed = controller._recovered_at["light.a"]
+    assert clock[0] - armed > lc_controller.RECOVERY_GRACE
+
+    # The user dials while the link is still flapping: it must latch.
+    set_light(hass, "light.a", "on", brightness=250, transition=True)
     await hass.async_block_till_done()
     assert controller.engine.room_state("a").overridden is True
 

@@ -694,17 +694,32 @@ channels at once (a sleep hard-off fades 7 channels in 4 s), so intermediate
 echoes routinely land seconds away from where a moving front expects them —
 while their *values* are always on the segment between start and goal.
 
-Decision: the corridor becomes a **monotone value band** (§8.4). While it
-lives, any level in `[min(frm,to) − tol, max(frm,to) + tol]` is an echo,
-whatever the timestamp; `_Envelope.front` and the temporal slack are gone. The
-overshoot margin floor goes 2 → 5 s (a congested mesh tail is normal, not
-exceptional). What still catches a real dial: after the deadline only the
-final-value echo and the standing-setpoint no-op guard match, so the first
-post-deadline report at a foreign value latches, and the ~3 min true-state poll
-corrects anything the band absorbed. Accepted residual: a dial *into* the band
-during our own fade (e.g. dialling to 30 % while we fade 0 → 60 %) is absorbed
-until the fade ends — a few seconds of the conductor's ramp, versus 4 hours of
-a false latch. That trade is the whole point.
+Decision: the corridor becomes a **value band with monotone progress** (§8.4).
+While it lives, a level in `[lo − tol, hi + tol]` that does not move *away*
+from the goal is an echo, whatever the timestamp; `_Envelope.front` and the
+temporal slack are gone. The overshoot margin floor goes 2 → 5 s (a congested
+mesh tail is normal, not exceptional).
+
+The band alone would be too generous, and the first draft of this ADR was wrong
+about why that is survivable: it claimed the ~3 min true-state poll corrects
+anything the band absorbs. It does not. An absorbed report has already become
+the entity's HA state, so the poll re-reporting that same value fires
+`state_reported`, not `state_changed`, and never reaches the foreign-change
+path — an absorbed dial would have stood until the next command. Hence the
+**high-water mark**: a fade only ever approaches its goal, so a report
+materially further from the goal than the best progress so far is a hand on the
+dial and latches. That covers both the mid-fade back-dial and the dial-down in
+the margin seconds after our fade completed. Level skipping and late echoes
+still pass, since progress only ever advances. Re-targeting mid-fade takes the
+**union** of the live band and the new segment, because `frm` comes from HA's
+lagging state while the lamp is really somewhere mid-fade; the mark resets to
+measure progress toward the new goal.
+
+Accepted residual: a dial *toward* our goal during our own fade (dialling to
+40 % while we fade 0 → 60 %) is absorbed until the fade ends. It is
+indistinguishable from an intermediate echo by construction, it is a few
+seconds of the conductor's ramp, and the next command re-asserts the setpoint —
+versus 4 hours of a false latch. That trade is the whole point.
 
 Alternatives rejected: widening the temporal slack (guesses at a distribution
 with no upper bound — the same bug with a bigger constant); requiring N
@@ -718,10 +733,15 @@ every Plejd room: the entities go unavailable → off → on(true level) ~29 s i
 and that off→on report has no standing setpoint to match (the seed ran while
 the entity was unavailable, so nothing was seeded). The adapter now stamps each
 entity's recovery edge — its unavailable → available transition, or its first
-report when it was unseeded — and folds any would-be foreign report within
-`RECOVERY_GRACE` (20 s) as a `ReviewTick`: no latch, no writer interrupt, §8.5
-reconciles quietly. Accepted trade-off: a genuine dial press within 20 s of a
-Plejd reconnect is absorbed once.
+report when it was unseeded — and folds the **first** would-be foreign report
+within `RECOVERY_GRACE` (20 s) as a `ReviewTick`: no latch, no writer
+interrupt, §8.5 reconciles quietly. The grace is deliberately one-shot and
+debounced (an edge within 60 s of the previous one does not re-arm it): the
+restart signature is exactly one fold, while "fold everything for 20 s, re-armed
+on every flap" is a hole a flapping Plejd link could hold open indefinitely —
+the room would stop responding to its wall dial entirely, which is the very
+failure this ADR exists to end. Accepted trade-off: a genuine dial press that
+is the first divergence within 20 s of a reconnect is absorbed once.
 
 **CT-first pops an off lamp on (§5.4).** The third latch source: writing CT as
 its own `turn_on` before brightness. On the fork `turn_on(colortemp=…,
@@ -729,7 +749,11 @@ dim=None)` becomes the plain ON command, so an *off* lamp jumps to its
 remembered level (96 %) and reports it — a level nobody commanded, with no CT,
 hence no echo. An off lamp now takes CT and brightness (and the transition) in
 one call; a lit lamp keeps the §5.4 split ordering, where the OUTPUT_SET
-clobber it exists to avoid is real.
+clobber it exists to avoid is real. The combined write records **no** CT echo:
+a CT-only echo carries no level test, and a CT-capable lamp repeats its kelvin
+on every state change, so it would have swallowed any dial for the corridor's
+whole TTL — trading one false-latch bug for a silent-deafness bug. The level
+corridor and the final-value echo already cover the write.
 
 **Observability.** Brightness attributes are not recorded on the live instance,
 so a false latch left no trail at all — every diagnosis above came from
