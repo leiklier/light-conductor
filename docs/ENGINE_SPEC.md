@@ -704,6 +704,14 @@ Plejd fork's native transition support, or software stepping below the engine
 where the actuator has none. `ramp_seconds` is never optional; a 0 duration
 means "as fast as the actuator allows".
 
+**Turn-on cap (D26).** When the channel is currently **off** and the goal is
+positive, and no explicit mode `fade` is given, the ramp is capped at
+`on_ramp_max` (default 3 s). The slew bound exists so a *change* in a lit room
+is not a jolt; a dark room has no continuity to protect, and the full-range
+`|Δflux| / slew_step` ramp (~9.6 s in an occupied room) reads as a slow
+integration rather than as care. Dimming and turn-off ramps are unchanged, and
+a mode fade (sleep/night) still wins outright.
+
 8.3 **Write economy.** A channel is commanded only when the quantized goal
 differs from the ledger's last commanded value by ≥ `min_delta` (flux-relative
 0.03) or crosses on/off. Quantization is two-stage: the engine quantizes on
@@ -928,6 +936,7 @@ fresh install and a missed restore get).
 | outdoor_stale_zero_window | 45 s | 6.5b |
 | gain_range_stops / gain_reset | 1.0 / on | 7.1, 7.3 |
 | slew_step / slew_interval / slew_step_empty | 0.1 / 1.0 s / 0.25 | 8.2 |
+| on_ramp_max | 3 s | 8.2 |
 | min_delta / min_write_interval / max_inflight | 0.03 / 1.0 s / 3 | 8.3 |
 | echo_window | 10 s | 8.4 |
 | override_timeout | 4 h | 9.2 |

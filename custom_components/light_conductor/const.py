@@ -363,6 +363,7 @@ EDITABLE_TUNABLES: tuple[str, ...] = (
     "slew_step",
     "slew_interval",
     "slew_step_empty",
+    "on_ramp_max",
     "min_delta",
     "min_write_interval",
     "max_inflight",

@@ -156,6 +156,12 @@ class Tunables:
     slew_step: float = 0.1  # 8.2
     slew_interval: float = 1.0  # 8.2
     slew_step_empty: float = 0.25  # 8.2
+    #: Cap on the ramp of a TURN-ON (channel currently off, goal > 0) when no
+    #: explicit mode fade is given (§8.2, D26). The slew bound exists so a
+    #: *change* in a lit room is not a jolt; a dark room has no continuity to
+    #: protect, and the full-range ~9.6 s fade reads as a slow integration
+    #: rather than as care. Dimming and turn-off ramps are unaffected.
+    on_ramp_max: float = 3.0  # 8.2
     min_delta: float = 0.03  # 8.3
     min_write_interval: float = 1.0  # 8.3
     max_inflight: int = 3  # 8.3

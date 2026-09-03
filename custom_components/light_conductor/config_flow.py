@@ -137,6 +137,7 @@ _TUNABLE_UI: dict[str, tuple[float, float, float]] = {
     "slew_step": (0.02, 0.5, 0.01),
     "slew_interval": (0.5, 5, 0.5),
     "slew_step_empty": (0.05, 1, 0.05),
+    "on_ramp_max": (0, 30, 0.5),
     "min_delta": (0.01, 0.2, 0.01),
     "min_write_interval": (0.5, 5, 0.5),
     "max_inflight": (1, 8, 1),
