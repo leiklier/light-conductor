@@ -854,7 +854,10 @@ class Engine:
                 # A REFERENCE room supplies N̂ (D26): used directly — the latch
                 # below exists to protect this room's own bootstrap observation,
                 # and a reference room's N̂ owes nothing to this room's lamps.
-                # This is the path a sensorless corridor (gang) takes.
+                # This is the path a sensorless corridor (gang) takes. If such a
+                # room also has its own (untrusted) sensor, a moving reference D
+                # may re-command mid-settle: that RE-BASES the pending
+                # observation (record_step) rather than corrupting it.
                 outputs = targets.apply_daylight(outputs, ref_n_hat, tun, room.daylight_full)
             elif shadow:
                 # The room's OWN N̂ (untrusted lux room: fresh sensor, not yet
