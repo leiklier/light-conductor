@@ -10,6 +10,8 @@ from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.light_conductor.const import (
+    CONF_DAYLIGHT_FULL,
+    CONF_DAYLIGHT_REFERENCE,
     CONF_HOLD_SECONDS,
     CONF_LUX_ACTIVE_DAY,
     CONF_LUX_ACTIVE_EVENING,
@@ -267,6 +269,81 @@ async def test_options_room_detail_lux_tiers_round_trip(hass: HomeAssistant) -> 
     assert CONF_LUX_ACTIVE_DAY not in profile
     assert CONF_LUX_ACTIVE_EVENING not in profile
     assert CONF_LUX_BACKGROUND not in profile
+
+
+def test_build_engine_config_validates_daylight_reference() -> None:
+    """§4.7/D26: a reference must be an existing room WITH a lux sensor and never
+    the room itself; anything else is dropped (the room falls back to D = 1)."""
+    from custom_components.light_conductor.const import build_engine_config
+
+    sunny = room("sunny", ["light.s"], lux="sensor.lux")
+    corridor = room("gang", ["light.g"])
+    corridor[CONF_DAYLIGHT_REFERENCE] = "sunny"
+    corridor[CONF_DAYLIGHT_FULL] = 60
+    cfg = build_engine_config(None, options([sunny, corridor]))
+    assert cfg.room("gang").daylight_reference == "sunny"
+    assert cfg.room("gang").daylight_full == 60.0
+    assert cfg.room("sunny").daylight_reference is None
+    assert cfg.room("sunny").daylight_full is None
+
+    # A reference to a room without a lux sensor, to a missing room, or to
+    # itself is dropped.
+    for bad in ("gang", "nope", "sunny"):
+        broken = room("sunny", ["light.s"], lux="sensor.lux")
+        broken[CONF_DAYLIGHT_REFERENCE] = bad
+        dropped = build_engine_config(None, options([broken, corridor]))
+        assert dropped.room("sunny").daylight_reference is None
+
+
+async def test_options_room_detail_daylight_reference_round_trip(hass: HomeAssistant) -> None:
+    """The room step edits the reference + per-room full, and clears them blank."""
+    entry = await setup_entry(
+        hass,
+        options([room("sunny", ["light.s"], lux="sensor.lux"), room("gang", ["light.g"])]),
+    )
+
+    async def configure(flow_id: str, data: dict) -> dict:
+        return await hass.config_entries.options.async_configure(flow_id, data)
+
+    async def open_gang() -> dict:
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await configure(result["flow_id"], {"next_step_id": "rooms"})
+        result = await configure(result["flow_id"], {"next_step_id": "edit_room"})
+        result = await configure(result["flow_id"], {"room_id": "gang"})
+        assert result["step_id"] == "room_detail"
+        return result
+
+    async def finish(result: dict) -> None:
+        result = await configure(result["flow_id"], {"next_step_id": "init"})
+        result = await configure(result["flow_id"], {"next_step_id": "finish"})
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    result = await open_gang()
+    result = await configure(
+        result["flow_id"],
+        {
+            "name": "Gang",
+            "shape": "corridor",
+            "channels": ["light.g"],
+            CONF_DAYLIGHT_REFERENCE: "sunny",
+            CONF_DAYLIGHT_FULL: 60,
+        },
+    )
+    assert result["type"] == FlowResultType.MENU
+    await finish(result)
+    gang = next(r for r in entry.options[CONF_ROOMS] if r["room_id"] == "gang")
+    assert gang[CONF_DAYLIGHT_REFERENCE] == "sunny"
+    assert gang[CONF_DAYLIGHT_FULL] == 60
+
+    # Blank submission clears both.
+    result = await open_gang()
+    result = await configure(
+        result["flow_id"], {"name": "Gang", "shape": "corridor", "channels": ["light.g"]}
+    )
+    await finish(result)
+    gang = next(r for r in entry.options[CONF_ROOMS] if r["room_id"] == "gang")
+    assert CONF_DAYLIGHT_REFERENCE not in gang
+    assert CONF_DAYLIGHT_FULL not in gang
 
 
 async def test_options_room_detail_accepts_hold_seconds(hass: HomeAssistant) -> None:

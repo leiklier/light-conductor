@@ -79,6 +79,8 @@
           "shape": "Type",
           "channels": "Lys",
           "lux_sensor": "Lyssensor",
+          "daylight_reference": "Referanserom for dagslys",
+          "daylight_full": "Dagslys full (lx, tomt = global)",
           "presence_primary": "Primær tilstedeværelse",
           "activity_sensor": "Aktivitetssensor",
           "occupancy_fallback": "Reserve for tilstedeværelse",

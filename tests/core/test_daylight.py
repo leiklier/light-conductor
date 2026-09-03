@@ -3,15 +3,22 @@
 An untrusted lux-sensor room (fresh sensor, not yet calibrated/bootstrap-
 confident) runs the open-loop tables scaled by the daylight factor D; a stale
 sensor, a trusted room, and mode paths (outdoor/night/TV) are never scaled.
+
+D26 adds two ways to source that factor: a **daylight reference** room (another
+room's fresh N̂ — for a sensorless corridor, a curtained sensor, or a
+closed-loop room whose sensor is blind to daylight) and a **per-room
+daylight_full**.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 from custom_components.light_conductor.core.engine import Engine
 from custom_components.light_conductor.core.events import (
     LuxReport,
+    PresenceChanged,
     ReviewTick,
     SunElevationChanged,
 )
@@ -26,7 +33,7 @@ from custom_components.light_conductor.core.model import (
     Vacancy,
 )
 
-from .plant import Channel, booted_engine, closed_config
+from .plant import Channel, booted_engine, calibration_for, closed_config
 
 DAY = 20.0  # sun high ⇒ E = 0
 START = datetime(2026, 7, 1, 12, 1, 0)
@@ -213,6 +220,175 @@ def test_outdoor_mode_output_ignores_daylight_factor() -> None:
     eng.handle(ReviewTick(), t + timedelta(seconds=60))  # past startup grace
     # out_background is 0.3 — unscaled by D (which would give ~0.075).
     assert abs(eng.state.rooms["lab"].channels["c"].commanded_b - 0.3) < 0.03
+
+
+# --- D26: daylight reference rooms + per-room daylight_full ---------------
+
+
+def _reference_pair(**dep_kwargs) -> EngineConfig:
+    """A lux-sensor room ``sun`` plus a dependent room ``dep`` (no sensor of its
+    own, presence-driven so it resolves ACTIVE) that references it."""
+    source = RoomConfig(
+        room_id="sun",
+        channels=(ChannelConfig("s", band=Band.PRIMARY, fixed_ct=2700),),
+        profile=Profile(vacancy=Vacancy.DIM, out_active_day={Band.PRIMARY: 0.5}),
+        has_lux_sensor=True,
+    )
+    dep = RoomConfig(
+        room_id="dep",
+        channels=(ChannelConfig("d", band=Band.PRIMARY, fixed_ct=2700),),
+        profile=Profile(
+            vacancy=Vacancy.DIM,
+            out_active_day={Band.PRIMARY: 0.8},
+            out_active_evening={Band.PRIMARY: 0.8},
+        ),
+        daylight_reference="sun",
+        **dep_kwargs,
+    )
+    return EngineConfig(rooms=(source, dep))
+
+
+def _booted_pair(cfg: EngineConfig, occupied: str = "dep") -> Engine:
+    eng = Engine(cfg, InitialSnapshot(sun_elevation=DAY, occupancy={occupied: True}))
+    base = datetime(2026, 7, 1, 12, 0, 0)
+    eng.handle(SunElevationChanged(DAY), base)
+    eng.handle(PresenceChanged(occupied, True), base + timedelta(seconds=40))
+    return eng
+
+
+def _feed_room(
+    eng: Engine, room_id: str, lux: float, t: datetime, n: int = 4, dt: float = 2.0
+) -> datetime:
+    for _ in range(n):
+        eng.handle(LuxReport(room_id, lux), t)
+        t = t + timedelta(seconds=dt)
+    return t
+
+
+def _dep_level(eng: Engine) -> float:
+    return eng.state.rooms["dep"].channels["d"].commanded_b
+
+
+def test_sensorless_room_is_damped_through_its_reference() -> None:
+    """§4.7/D26: gang has no sensor of its own and glowed ADJACENT at 49 % all
+    day. With a reference room's fresh N̂ it damps like any lux room."""
+    eng = _booted_pair(_reference_pair())
+    eng.handle(LuxReport("sun", 150.0), START)  # N̂ ≈ 150 ⇒ D = 0.25
+    assert abs(_dep_level(eng) - 0.2) < 0.03  # 0.8 · 0.25
+
+    # The source darkens (its own low-pass falls over tau_lux_down) ⇒ D → 1.
+    _feed_room(eng, "sun", 0.0, START + timedelta(seconds=20), n=12, dt=20.0)
+    assert _dep_level(eng) > 0.7
+
+
+def test_reference_room_lux_report_recomputes_the_dependent_room() -> None:
+    """The dependent room follows on the SAME tick its source reports — every
+    event recomputes the whole engine, so no dependency wiring is needed."""
+    eng = _booted_pair(_reference_pair())
+    cmds = eng.handle(LuxReport("sun", 190.0), START)
+    assert any(getattr(c, "channel_id", None) == "d" for c in cmds)
+    assert _dep_level(eng) < 0.1  # D = 0.05
+
+
+def test_stale_reference_leaves_the_dependent_room_unscaled() -> None:
+    """§3.5/§4.7: a stale source is no daylight information ⇒ D → 1 (unchanged
+    open-loop), never darkness."""
+    eng = _booted_pair(_reference_pair())
+    eng.handle(LuxReport("sun", 150.0), START)
+    assert _dep_level(eng) < 0.5
+    t = START + timedelta(seconds=400)  # past lux_stale (300 s)
+    eng.handle(ReviewTick(), t)
+    assert _dep_level(eng) > 0.7
+
+
+def test_reference_with_per_room_daylight_full() -> None:
+    """§4.7/D26: the room's own ``daylight_full`` sets where D bottoms out."""
+    eng = _booted_pair(_reference_pair(daylight_full=60.0))
+    eng.handle(LuxReport("sun", 30.0), START)  # D = 1 - 30/60 = 0.5
+    assert abs(_dep_level(eng) - 0.4) < 0.03
+    # The same N̂ against the 200 lx global would barely damp at all.
+    plain = _booted_pair(_reference_pair())
+    plain.handle(LuxReport("sun", 30.0), START)
+    assert _dep_level(plain) > 0.65
+
+
+def test_reference_room_publishes_the_source_natural_lux() -> None:
+    """§10: a reference-damped room publishes the N̂ its level is a function of
+    — for a sensorless room it is the only one there is."""
+    eng = _booted_pair(_reference_pair())
+    cmds = eng.handle(LuxReport("sun", 120.0), START)
+    dep = next(c for c in cmds if hasattr(c, "rooms")).rooms[1]
+    assert dep.room_id == "dep"
+    assert dep.natural_lux is not None and abs(dep.natural_lux - 120.0) < 5.0
+
+
+def test_own_sensor_room_uses_per_room_daylight_full() -> None:
+    """§4.7/D26: the per-room full also applies on the OWN-sensor shadow path
+    (kjøkken reads 40-60 lx at noon against a 200 lx global)."""
+    chans = [Channel("c", gain=180.0, model_gain=1.0)]  # untrusted
+    cfg = closed_config(chans, out_active_day={Band.PRIMARY: 0.8})
+    cfg = EngineConfig(rooms=(replace(cfg.rooms[0], daylight_full=60.0),))
+    eng = booted_engine(cfg, sun=DAY, calibrated=False)
+    _feed(eng, 30.0, START, n=1)  # D = 1 - 30/60 = 0.5
+    assert abs(_commanded(eng) - 0.4) < 0.03
+
+
+# --- D26: the closed-loop path scales its lux target through a reference ---
+
+
+def _closed_with_reference(**dep_kwargs) -> EngineConfig:
+    """A calibrated closed-loop room ``lab`` referencing a lux room ``sun``."""
+    chans = [Channel("c", gain=20.0)]  # C = 20 ≥ min_closed_loop_capacity
+    cfg = closed_config(chans, lux_active_day=100.0, lux_background=0.0)
+    lab = replace(cfg.rooms[0], daylight_reference="sun", **dep_kwargs)
+    source = RoomConfig(
+        room_id="sun",
+        channels=(ChannelConfig("s", band=Band.PRIMARY, fixed_ct=2700),),
+        profile=Profile(vacancy=Vacancy.DIM),
+        has_lux_sensor=True,
+    )
+    return EngineConfig(rooms=(lab, source))
+
+
+def test_closed_loop_target_is_scaled_by_the_reference() -> None:
+    """§4.7/D26: sofakrok's own sensor sits in a dark corner under the lamp
+    (N̂ ≈ 0.07 lx at noon), so the loop lit it to ~24 % all day. A reference
+    room's N̂ scales the lux target — and only a reference may, since the room's
+    own N̂ is already subtracted by the estimator."""
+    cfg = _closed_with_reference()
+    eng = Engine(
+        cfg,
+        InitialSnapshot(sun_elevation=DAY, occupancy={"lab": True}),
+        calibrations={"lab": calibration_for(cfg, "lab")},
+    )
+    base = datetime(2026, 7, 1, 12, 0, 0)
+    eng.handle(SunElevationChanged(DAY), base)
+    eng.handle(PresenceChanged("lab", True), base + timedelta(seconds=40))
+    eng.handle(LuxReport("sun", 100.0), START)  # D = 0.5
+    t = _feed(eng, 0.5, START, n=3)  # the room's own (blind) sensor
+    diag = eng.handle(ReviewTick(), t)
+    target = _target_of(diag)
+    assert target is not None and abs(target - 50.0) < 1.0  # 100 lx · D 0.5
+
+
+def test_closed_loop_zero_target_darkens_the_room() -> None:
+    """§4.7/D26: at D = 0 the target is 0 and the room goes dark — the deadband
+    must not strand a lit lamp (|error| = Â can sit inside it)."""
+    cfg = _closed_with_reference()
+    eng = Engine(
+        cfg,
+        InitialSnapshot(sun_elevation=DAY, occupancy={"lab": True}),
+        calibrations={"lab": calibration_for(cfg, "lab")},
+    )
+    base = datetime(2026, 7, 1, 12, 0, 0)
+    eng.handle(SunElevationChanged(DAY), base)
+    eng.handle(PresenceChanged("lab", True), base + timedelta(seconds=40))
+    eng.handle(LuxReport("sun", 0.0), START)  # dark outside ⇒ D = 1
+    t = _feed(eng, 0.5, START, n=6, dt=10.0)
+    assert _commanded(eng) > 0.0  # the loop lit the room
+
+    eng.handle(LuxReport("sun", 400.0), t)  # broad daylight ⇒ D = 0
+    assert _commanded(eng) == 0.0  # dark, without waiting out a sustain window
 
 
 def test_daylight_latch_prevents_hunting_while_observations_pend() -> None:

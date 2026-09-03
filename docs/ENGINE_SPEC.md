@@ -404,6 +404,40 @@ so daylight and the cap can only agree to make the room dimmer. Lux staleness fa
 exactly as today (`D → 1` when `N̂` is unavailable). `daylight_full`
 (default 200 lx) and `daylight_min_factor` (default 0.0) are §12 tunables.
 
+**Daylight reference rooms (D26).** A room may name another room as its
+`daylight_reference`. When that room *has* a lux sensor and it is **fresh**
+(§3.5), **its** `N̂` is the daylight source; otherwise the room falls back to
+its own `N̂` (the path above) and, failing that, to `D = 1`. This is how a
+sensorless corridor (gang), a room whose own sensor is untrustworthy
+(spisebord, behind a curtain) and a closed-loop room whose sensor is blind to
+daylight (sofakrok, `N̂ ≈ 0.07 lx` at noon) get damped by a sensor that actually
+sees the sky. A reference-sourced `D` is applied **directly** — the
+`daylight_latch` hold exists to protect the room's own first-night bootstrap
+observation (§3.5), which a reference room's `N̂` cannot disturb. Validation:
+the reference must be a configured room that owns a lux sensor and must not be
+the room itself; anything else is dropped at config build (with a warning) and
+the room behaves exactly as it did pre-D26. A dependent room needs no
+dependency wiring: every event recomputes the whole engine, and the reference
+room's `LuxReport`s are events.
+
+**Per-room `daylight_full` (D26).** A room may override the global
+`daylight_full`. Sensors differ by an order of magnitude at the same noon
+(kjøkken reads 40-60 lx, spisebord 300-450 lx), so one global reference cannot
+serve both. Blank/0 ⇒ the tunable.
+
+**Closed-loop target scaling (D26).** On the closed-loop path the daylight
+factor scales the lux target `T'` — **only** when a `daylight_reference` is
+set. A closed-loop room's own `N̂` is already subtracted by the estimator
+(`error = T' − (N̂ + Â)`), so applying its own sensor here would double-count
+it; a reference is exactly the case where that subtraction is not enough. At
+`D = 0` the target is 0 and the room goes dark: for a **zero target on a lit
+room** the deadband/sustain gate is bypassed and the correction fires at once,
+because on a low-capacity room `|error| = Â` can sit *inside* the deadband and
+would strand the lamp lit all day. A reference-damped room publishes the
+**reference's** `N̂` as its `natural_lux` diagnostic (§10) — that is the
+daylight figure its level is a function of, and for a sensorless room it is the
+only one there is; `target_lux` carries the scaled `T'`.
+
 ## 5. Color temperature policy
 
 5.1 CT-capable channels track `ct_target = ct_day − E × (ct_day − ct_evening)`

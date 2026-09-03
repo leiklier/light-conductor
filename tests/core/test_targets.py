@@ -89,3 +89,15 @@ def test_daylight_disabled_when_full_nonpositive() -> None:
 
     off = replace(TUN, daylight_full=0.0)
     assert targets.daylight_factor(150.0, off) == 1.0  # guarded, no zero-division
+
+
+def test_per_room_daylight_full_overrides_the_global() -> None:
+    """§4.7/D26: a room whose sensor reads 40-60 lx at noon (kjøkken) cannot
+    share a 200 lx reference with one reading 300-450 lx (spisebord)."""
+    assert abs(targets.daylight_factor(30.0, TUN, 60.0) - 0.5) < 1e-9  # 1 - 30/60
+    assert targets.daylight_factor(60.0, TUN, 60.0) == 0.0  # at the room's full
+    # Blank / zero falls back to the global (200 lx).
+    assert abs(targets.daylight_factor(100.0, TUN, None) - 0.5) < 1e-9
+    assert abs(targets.daylight_factor(100.0, TUN, 0.0) - 0.5) < 1e-9
+    scaled = targets.apply_daylight({Band.PRIMARY: 0.8}, 30.0, TUN, 60.0)
+    assert abs(scaled[Band.PRIMARY] - 0.4) < 1e-9

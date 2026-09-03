@@ -208,6 +208,16 @@ class RoomConfig:
     #: Whether a usable lux sensor exists (§3.5). Always False this PR —
     #: every room runs open-loop; the flag is the closed-loop seam.
     has_lux_sensor: bool = False
+    #: Room whose FRESH N̂ supplies this room's daylight factor D (§4.7, D26).
+    #: Lets a sensorless corridor (gang), a room whose own sensor is untrusted
+    #: (spisebord behind a curtain) or a closed-loop room whose sensor is blind
+    #: to daylight (sofakrok, N̂ ≈ 0.07 lx at noon) be damped by a sensor that
+    #: actually sees the sky. ``None`` ⇒ the room's own N̂ (or no damping).
+    daylight_reference: str | None = None
+    #: Per-room override of ``tun.daylight_full`` (§4.7, D26): the N̂ at which D
+    #: reaches ``daylight_min_factor``. A sensor reading 40-60 lx at noon
+    #: (kjøkken) and one reading 300-450 lx (spisebord) cannot share a global.
+    daylight_full: float | None = None
     #: Whether the room can OBSERVE vacancy (a presence or occupancy sensor is
     #: configured). Blind rooms (door/corridor with triggers only) decay to the
     #: OFF role on hold expiry without anyone having left — their manual

@@ -813,6 +813,9 @@ class Engine:
         shadow = res is None and fresh and not eligible
         correcting = False
         target_lux: float | None = None
+        # Daylight reference (§4.7, D26): another room's FRESH N̂, or None when
+        # no reference is configured / its source is stale (⇒ D = 1, unchanged).
+        ref_n_hat = self._reference_n_hat(room, now)
 
         if res is not None:
             role = res.role
@@ -828,22 +831,30 @@ class Engine:
         elif closed:
             role = base
             channel_b, correcting, target_lux = self._closed_loop(
-                room, rs, base, prev_role, e, g, now, photo, capacity, plan, tv_ceiling
+                room, rs, base, prev_role, e, g, now, photo, capacity, plan, tv_ceiling, ref_n_hat
             )
         else:
             role = base
             outputs = targets.role_outputs(room.profile, role, e, tun)
-            # Daylight-aware open-loop (§4.7): an untrusted lux room (fresh sensor,
-            # not yet trusted) scales its tier outputs by the daylight factor D,
-            # replicating the legacy 100 - 0.5·lux daytime damping. A stale sensor
-            # (no fresh N̂) falls through unscaled (D → 1), exactly as before.
-            # While a first-night bootstrap observation is settling the factor is
-            # held steady (latched) so N̂ drift does not re-command and disrupt it.
-            if shadow:
+            # Daylight-aware open-loop (§4.7): the tier outputs are scaled by the
+            # daylight factor D, replicating the legacy 100 - 0.5·lux daytime
+            # damping. A stale/absent source falls through unscaled (D → 1),
+            # exactly as before.
+            if ref_n_hat is not None:
+                # A REFERENCE room supplies N̂ (D26): used directly — the latch
+                # below exists to protect this room's own bootstrap observation,
+                # and a reference room's N̂ owes nothing to this room's lamps.
+                # This is the path a sensorless corridor (gang) takes.
+                outputs = targets.apply_daylight(outputs, ref_n_hat, tun, room.daylight_full)
+            elif shadow:
+                # The room's OWN N̂ (untrusted lux room: fresh sensor, not yet
+                # trusted). While a first-night bootstrap observation is settling
+                # the factor is held steady (latched) so N̂ drift does not
+                # re-command and disrupt the measurement.
                 if rs.est.pending_valid and rs.est.daylight_latch is not None:
                     d_factor = rs.est.daylight_latch
                 else:
-                    d_factor = targets.daylight_factor(rs.est.n_hat, tun)
+                    d_factor = targets.daylight_factor(rs.est.n_hat, tun, room.daylight_full)
                 rs.est.daylight_latch = d_factor
                 outputs = {b: v * d_factor for b, v in outputs.items()}
             outputs = gain.scale(outputs, g)
@@ -899,9 +910,15 @@ class Engine:
         if room.shape is RoomShape.OUTDOOR and res is not None and not res.off:
             plan.review_at(now + timedelta(seconds=tun.circadian_tick))
         # Natural lux is published for the closed-loop/shadow paths and for an
-        # outdoor room whose fresh sensor drives its dusk ramp (§6.5a).
+        # outdoor room whose fresh sensor drives its dusk ramp (§6.5a). A room
+        # damped through a REFERENCE publishes the reference's N̂ (§4.7, D26) —
+        # that is the daylight figure its level is actually a function of, and
+        # for a sensorless room (gang) it is the only one there is.
         outdoor_lux = fresh and room.shape is RoomShape.OUTDOOR
-        natural = rs.est.n_hat if (closed or shadow or outdoor_lux) else None
+        if ref_n_hat is not None and res is None:
+            natural = ref_n_hat
+        else:
+            natural = rs.est.n_hat if (closed or shadow or outdoor_lux) else None
         return self._diag(room, rs, role, max(channel_b.values(), default=0.0), natural, target_lux)
 
     def _outdoor_dusk(self, room: RoomConfig, now: datetime, e: float) -> float:
@@ -917,6 +934,29 @@ class Engine:
         rs = self.state.rooms[room.room_id]
         fresh = room.has_lux_sensor and not estimator.is_stale(rs.est, now, self.tun)
         return targets.outdoor_dusk_factor(rs.est.n_hat if fresh else None, e, self.tun)
+
+    def _reference_n_hat(self, room: RoomConfig, now: datetime) -> float | None:
+        """The daylight source N̂ of ``room``'s reference room (§4.7, D26).
+
+        ``None`` when no reference is configured, the reference has vanished
+        from config, has no lux sensor, or its sensor is STALE — all of which
+        mean "no daylight information", i.e. D = 1 and the unscaled open-loop
+        tables, exactly the §3.5 fallback a room with its own stale sensor gets.
+
+        No dependency graph is needed to keep this fresh: every event triggers a
+        whole-engine recompute, and the reference room's own ``LuxReport``s are
+        events, so a dependent room re-resolves on the same tick its source
+        updates.
+        """
+        if room.daylight_reference is None:
+            return None
+        ref = self.config.room(room.daylight_reference)
+        if ref is None or not ref.has_lux_sensor:
+            return None
+        ref_rs = self.state.rooms.get(ref.room_id)
+        if ref_rs is None or estimator.is_stale(ref_rs.est, now, self.tun):
+            return None
+        return ref_rs.est.n_hat
 
     def _room_capacity(self, rs: RoomState, room: RoomConfig, photo: RoomPhotometry) -> float:
         """Room calibrated capacity ``C = Σ_i g_i·f_i(1)·m`` (§2.1, §4.5).
@@ -943,6 +983,7 @@ class Engine:
         capacity: float,
         plan: Plan,
         tv_ceiling: Mapping[Band, float] | None = None,
+        ref_n_hat: float | None = None,
     ) -> tuple[dict[str, float], bool, float]:
         """Feed-forward closed-loop control for one room (§3.6/§4.5).
 
@@ -952,9 +993,19 @@ class Engine:
         corrects, a single model-predicted (feed-forward) write lands near goal.
         ``capacity`` is the room capacity C the engine already computed for the
         capacity gate (§4.5) — reused here for the auto tiers and the deadband.
+
+        ``ref_n_hat`` is a REFERENCE room's fresh N̂ (§4.7, D26). It scales the
+        lux target, and only a reference may: this room's own N̂ is already
+        subtracted by the estimator (``error = T' - (N̂ + Â)``), so applying its
+        own sensor here would double-count it. A reference is the case where
+        that subtraction is not enough — sofakrok's sensor sits in a dark corner
+        under the lamp (N̂ ≈ 0.07 lx at noon), so the loop faithfully lit the
+        room to ~24 % in broad daylight.
         """
         tun = self.tun
         t_prime = estimator.target_lux(rs, role, room.profile, e, g, tun, capacity)
+        if ref_n_hat is not None:
+            t_prime *= targets.daylight_factor(ref_n_hat, tun, room.daylight_full)
         a_now = estimator.a_hat(rs, photo)
         n = rs.est.n_hat
         if tv_ceiling is not None:
@@ -975,6 +1026,14 @@ class Engine:
         error = t_prime - (n + a_now)
         fast_edge = role is not prev_role
         correct, review = estimator.should_correct(rs.est, error, deadband, now, fast_edge, tun)
+        if t_prime <= 0.0 and any(cs.on for cs in rs.channels.values()):
+            # A ZERO target must always reach the lamps (§4.7, D26): at D = 0 the
+            # reference says it is broad daylight and the room goes dark. The
+            # deadband would otherwise strand it lit — on a low-capacity room
+            # |error| = Â can sit INSIDE the deadband — which is the sofakrok
+            # failure mode one level down.
+            rs.est.error_sustain_until = None
+            correct, review = True, None
         plan.review_at(review)
         if not correct:
             hold = {ch.channel_id: rs.channels[ch.channel_id].commanded_b for ch in room.channels}

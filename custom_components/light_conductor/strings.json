@@ -79,6 +79,8 @@
           "shape": "Shape",
           "channels": "Lights",
           "lux_sensor": "Illuminance sensor",
+          "daylight_reference": "Daylight reference room",
+          "daylight_full": "Daylight full (lx, empty = global)",
           "presence_primary": "Primary occupancy",
           "activity_sensor": "Activity sensor",
           "occupancy_fallback": "Fallback occupancy",
