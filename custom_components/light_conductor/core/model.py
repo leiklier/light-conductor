@@ -172,6 +172,12 @@ class Profile:
     out_background: BandMap = field(default_factory=dict)
     # Evening cap (rule 2.4): clamp on normalized output once E >= threshold.
     evening_output_cap: float = 1.0
+    #: Explicit BOOST-band output inside the evening lockout window (§4.5, D26).
+    #: ``None`` keeps the plain lockout (the default: the boost band is task
+    #: light, orthogonal to a cozy evening — D6/Q4). A value unlocks the band for
+    #: an ACTIVE room only, at exactly this normalized output: the user turned
+    #: the kitchen bench strip on at 22:04 and the lockout was unconditional.
+    boost_evening_output: float | None = None
     # Mode outputs.
     night_output: BandMap = field(default_factory=dict)  # rule 6.2 (fixed dim warm)
     tv_output: BandMap = field(default_factory=dict)  # rule 6.3 (playing, occupied)
@@ -208,6 +214,21 @@ class RoomConfig:
     #: Whether a usable lux sensor exists (§3.5). Always False this PR —
     #: every room runs open-loop; the flag is the closed-loop seam.
     has_lux_sensor: bool = False
+    #: Room whose FRESH N̂ supplies this room's daylight factor D (§4.7, D26).
+    #: Lets a sensorless corridor (gang), a room whose own sensor is untrusted
+    #: (spisebord behind a curtain) or a closed-loop room whose sensor is blind
+    #: to daylight (sofakrok, N̂ ≈ 0.07 lx at noon) be damped by a sensor that
+    #: actually sees the sky. ``None`` ⇒ the room's own N̂ (or no damping).
+    daylight_reference: str | None = None
+    #: Per-room override of ``tun.daylight_full`` (§4.7, D26): the N̂ at which D
+    #: reaches ``daylight_min_factor``. A sensor reading 40-60 lx at noon
+    #: (kjøkken) and one reading 300-450 lx (spisebord) cannot share a global.
+    daylight_full: float | None = None
+    #: Sleep's ONSET edge does not release this room's override latch (§6.1/§9.2,
+    #: D26). Off by default — the house going dark at bedtime is the rule. On for
+    #: the bedroom, where the light the user turned on a minute before bed is
+    #: exactly what sleep onset used to hard-off (they re-lit it 9 s later).
+    sleep_keeps_override: bool = False
     #: Whether the room can OBSERVE vacancy (a presence or occupancy sensor is
     #: configured). Blind rooms (door/corridor with triggers only) decay to the
     #: OFF role on hold expiry without anyone having left — their manual
@@ -439,6 +460,12 @@ class EstimatorState:
     #: Whether the pending observation feeds the first-night bootstrap (armed on
     #: observed ΔL) rather than the calibrated §3.4 refine (rule 3.5/4.4).
     pending_shadow: bool = False
+    #: The §4.7 daylight factor currently IN FORCE for this room when it is
+    #: sourced from a reference room (D26). N̂ moves continuously under drifting
+    #: cloud, and every move would otherwise re-command the room; a new factor is
+    #: adopted only once it differs by ``DAYLIGHT_MIN_STEP`` (or hits an
+    #: endpoint). ``None`` = nothing adopted yet / the reference went stale.
+    daylight_applied: float | None = None
     #: Latched §4.7 daylight factor held steady while a shadow observation
     #: settles: N̂-driven damping would otherwise nudge the open-loop output by
     #: sub-min_delta amounts each tick, re-commanding and disrupting the

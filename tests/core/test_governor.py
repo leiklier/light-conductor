@@ -65,24 +65,30 @@ def test_min_delta_skips_tiny_moves() -> None:
     assert plan.commands == []
 
 
+def _lit(flux: float) -> ChannelState:
+    """A channel already lit at ``flux`` (b² curve) — a MOVE, not a turn-on, so
+    the §8.2 turn-on cap (D26) does not apply and the slew formula is visible."""
+    return ChannelState(commanded_b=sqrt(flux), on=True)
+
+
 def test_slew_ramp_numeric_active_and_empty() -> None:
     """§8.2: ramp_seconds = flux_step / slew * interval — concrete values.
 
     A flux step of 0.5 at slew_step 0.1 / interval 1.0 must ramp over exactly
     5.0 s while ACTIVE; the same step at slew_step_empty 0.25 must ramp over
-    2.0 s. (min_delta 0.05 keeps flux 0.5 exactly on the quantization grid.)"""
+    2.0 s. (min_delta 0.05 keeps the fluxes exactly on the quantization grid.)"""
     from dataclasses import replace
 
     tun = replace(TUN, min_delta=0.05, slew_step=0.1, slew_interval=1.0, slew_step_empty=0.25)
     photo = _photo()
-    goal_b = sqrt(0.5)  # b**2 curve => flux 0.5
+    goal_b = sqrt(0.75)  # b**2 curve => flux 0.75, i.e. a step of 0.5 from 0.25
 
     active = Plan()
-    governor.plan_channel(active, CH, ChannelState(), True, goal_b, None, photo, tun)
+    governor.plan_channel(active, CH, _lit(0.25), True, goal_b, None, photo, tun)
     assert active.commands[0].ramp_seconds == 5.0  # 0.5 / 0.1 * 1.0
 
     empty = Plan()
-    governor.plan_channel(empty, CH, ChannelState(), False, goal_b, None, photo, tun)
+    governor.plan_channel(empty, CH, _lit(0.25), False, goal_b, None, photo, tun)
     assert empty.commands[0].ramp_seconds == 2.0  # 0.5 / 0.25 * 1.0
 
 
@@ -93,9 +99,9 @@ def test_slew_ramp_scales_linearly_with_step() -> None:
     tun = replace(TUN, min_delta=0.05, slew_step=0.1, slew_interval=1.0)
     photo = _photo()
     big = Plan()
-    governor.plan_channel(big, CH, ChannelState(), True, sqrt(0.5), None, photo, tun)
+    governor.plan_channel(big, CH, _lit(0.25), True, sqrt(0.75), None, photo, tun)
     small = Plan()
-    governor.plan_channel(small, CH, ChannelState(), True, sqrt(0.25), None, photo, tun)
+    governor.plan_channel(small, CH, _lit(0.25), True, sqrt(0.5), None, photo, tun)
     # Steps 0.5 and 0.25 -> ramps 5.0 and 2.5; ratio matches the step ratio.
     assert big.commands[0].ramp_seconds / small.commands[0].ramp_seconds == 2.0
 
@@ -132,3 +138,53 @@ def test_fade_override() -> None:
     """Mode transitions pass an explicit fade (sleep/night)."""
     cmd = _plan(ChannelState(), False, 0.5, fade=4.0).commands[0]
     assert cmd.ramp_seconds == 4.0
+
+
+# --- §8.2 (D26): the turn-on ramp cap -------------------------------------
+
+
+def test_turn_on_ramp_is_capped_at_on_ramp_max() -> None:
+    """§8.2/D26: lighting a dark channel is capped at on_ramp_max — the
+    full-range ramp (flux 1.0 / slew_step 0.1 = 10 s) read as sluggish."""
+    from dataclasses import replace
+
+    tun = replace(TUN, min_delta=0.05, slew_step=0.1, slew_interval=1.0, on_ramp_max=3.0)
+    photo = _photo()
+    plan = Plan()
+    governor.plan_channel(plan, CH, ChannelState(), True, 1.0, None, photo, tun)
+    assert plan.commands[0].ramp_seconds == 3.0  # capped, not 10.0
+
+    # A turn-on already shorter than the cap is untouched.
+    short = Plan()
+    governor.plan_channel(short, CH, ChannelState(), True, sqrt(0.2), None, photo, tun)
+    assert short.commands[0].ramp_seconds == 2.0  # 0.2 / 0.1 * 1.0
+
+
+def test_dim_and_off_ramps_are_not_capped() -> None:
+    """§8.2/D26: only a TURN-ON is capped — a dim and a fade to off keep their
+    full slew-derived ramp (that continuity is what the slew bound is for)."""
+    from dataclasses import replace
+
+    tun = replace(TUN, min_delta=0.05, slew_step=0.1, slew_interval=1.0, on_ramp_max=3.0)
+    photo = _photo()
+    dim = Plan()
+    lit = ChannelState(commanded_b=1.0, on=True)
+    governor.plan_channel(dim, CH, lit, True, sqrt(0.5), None, photo, tun)
+    assert dim.commands[0].ramp_seconds == 5.0  # |1.0 - 0.5| / 0.1
+
+    off = Plan()
+    governor.plan_channel(
+        off, CH, ChannelState(commanded_b=1.0, on=True), True, 0.0, None, photo, tun
+    )
+    assert isinstance(off.commands[0], TurnOffChannel)
+    assert off.commands[0].ramp_seconds == 10.0  # 1.0 / 0.1
+
+
+def test_mode_fade_still_wins_over_the_turn_on_cap() -> None:
+    """§6.1/§8.2: an explicit mode fade is the ramp, cap or no cap."""
+    from dataclasses import replace
+
+    tun = replace(TUN, on_ramp_max=3.0)
+    plan = Plan()
+    governor.plan_channel(plan, CH, ChannelState(), False, 0.5, None, _photo(), tun, 10.0)
+    assert plan.commands[0].ramp_seconds == 10.0

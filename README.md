@@ -10,7 +10,11 @@ What it does:
 
 - **Regulates illuminance, not brightness** — a per-room estimator separates
   natural light from the lights' own contribution to the lux sensor, so the
-  control loop doesn't chase its own output.
+  control loop doesn't chase its own output. A room with no sensor (a corridor)
+  or an untrustworthy one (behind a curtain, or in a dark corner under its own
+  lamp) can name another room as its **daylight reference** and be damped by a
+  sensor that actually sees the sky; each room sets the daylight level it calls
+  "full".
 - **Circadian shaping** — targets and color temperature drift continuously
   toward cozy warm evenings; no hard clock steps.
 - **Follow-me with room personalities** — living-area rooms make subtle
@@ -31,7 +35,10 @@ What it does:
   a mode onset (sleep or away *engaging*), or a timeout. A change made while
   sleep or away already stands — the 03:00 reading light — is respected
   outright until the timeout; modes win once, at their edge, and never fight
-  the hand on the dial.
+  the hand on the dial. A room may opt out of even that one edge for sleep
+  (`sleep_keeps_override`) — the bedroom lamp lit a minute before bed stays
+  lit. A profile may likewise name what its **boost** band does in the evening
+  (the kitchen bench strip at 22:00) instead of being locked out.
 - **Whole-home setup** — one config entry for the house, prefilled by
   discovery from your Home Assistant areas (lights, illuminance sensor,
   presence-conductor occupancy), then editable room-by-room under Options.

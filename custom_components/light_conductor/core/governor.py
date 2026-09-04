@@ -23,12 +23,27 @@ from .tunables import Tunables
 
 
 def _ramp_seconds(
-    f0: float, f1: float, slew: float, tun: Tunables, override: float | None
+    f0: float,
+    f1: float,
+    slew: float,
+    tun: Tunables,
+    override: float | None,
+    crossing_on: bool = False,
 ) -> float:
-    """Seconds to move flux ``f0 -> f1`` at the slew rate (rule 8.2)."""
+    """Seconds to move flux ``f0 -> f1`` at the slew rate (rule 8.2).
+
+    A TURN-ON (``crossing_on`` — the channel is off and the goal is positive)
+    is additionally capped at ``on_ramp_max`` (D26): the slew bound protects the
+    continuity of a lit room, and a dark room has none. An explicit mode
+    ``override`` fade (sleep/night) always wins, and dimming/turn-off ramps are
+    untouched.
+    """
     if override is not None:
         return override
-    return abs(f1 - f0) / slew * tun.slew_interval
+    ramp = abs(f1 - f0) / slew * tun.slew_interval
+    if crossing_on:  # the only caller passing True has already guaranteed f1 > 0
+        ramp = min(ramp, tun.on_ramp_max)
+    return ramp
 
 
 def plan_channel(
@@ -96,7 +111,9 @@ def plan_channel(
     if delta < tun.min_delta and not crossing_on and ct_cmd is None:
         return
 
-    plan.set_channel(cid, goal_b_q, ct_cmd, _ramp_seconds(cur_flux, q_flux, slew, tun, fade))
+    plan.set_channel(
+        cid, goal_b_q, ct_cmd, _ramp_seconds(cur_flux, q_flux, slew, tun, fade, crossing_on)
+    )
     cs.on = True
     cs.commanded_b = goal_b_q
     if ct_cmd is not None:

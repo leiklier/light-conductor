@@ -336,6 +336,21 @@ the light being aesthetically dominant). A `boost` band additionally requires `E
 (benkebelysning stays off in the evening, matching legacy kitchen-off
 behavior where only the accent band survives sunset).
 
+**Evening boost output (D26).** A profile may set `boost_evening_output`: a
+normalized band output the BOOST band takes *inside* the lockout window
+(`E ≥ boost_evening_max`) in an **ACTIVE** room, instead of being gated off.
+Blank (the default) keeps the plain lockout — the boost band is task light,
+orthogonal to a cozy evening (D6/Q4) — but the user does turn the kitchen bench
+strip on at 22:04, and no global knob can say that without unlocking every
+boost band in the house. It is applied **after** the evening cap (§2.4) and is
+**exempt from it** — an explicit "this is what the bench strip does in the
+evening" value, not a tier the cap should trim — but it is still **scaled by
+master gain** (§7): `G` is 0 with the master off (§7.2), and no room may hold a
+band the master switch cannot extinguish. It then flows through the normal
+weight share and affine response mapping below.
+ADJACENT/BACKGROUND, the §6 mode tables and the closed-loop path stay locked
+out exactly as before.
+
 **Per-channel response mapping.** After weight sharing and the boost evening
 lockout, each channel applies an affine RESPONSE MAPPING to its post-weight
 band output `out`: the emitted command is `clamp(response_slope · out +
@@ -404,6 +419,55 @@ so daylight and the cap can only agree to make the room dimmer. Lux staleness fa
 exactly as today (`D → 1` when `N̂` is unavailable). `daylight_full`
 (default 200 lx) and `daylight_min_factor` (default 0.0) are §12 tunables.
 
+**Daylight reference rooms (D26).** A room may name another room as its
+`daylight_reference`. When that room *has* a lux sensor and it is **fresh**
+(§3.5), **its** `N̂` is the daylight source; otherwise the room falls back to
+its own `N̂` (the path above) and, failing that, to `D = 1`. This is how a
+sensorless corridor (gang), a room whose own sensor is untrustworthy
+(spisebord, behind a curtain) and a closed-loop room whose sensor is blind to
+daylight (sofakrok, `N̂ ≈ 0.07 lx` at noon) get damped by a sensor that actually
+sees the sky. A reference-sourced `D` is applied **directly** — the
+`daylight_latch` hold exists to protect the room's own first-night bootstrap
+observation (§3.5), which a reference room's `N̂` cannot disturb. Validation:
+the reference must be a configured room that owns a lux sensor and must not be
+the room itself; anything else is dropped at config build (with a warning) and
+the room behaves exactly as it did pre-D26. A dependent room needs no
+dependency wiring: every event recomputes the whole engine, and the reference
+room's `LuxReport`s are events.
+
+**Per-room `daylight_full` (D26).** A room may override the global
+`daylight_full`. Sensors differ by an order of magnitude at the same noon
+(kjøkken reads 40-60 lx, spisebord 300-450 lx), so one global reference cannot
+serve both. Blank/0 ⇒ the tunable.
+
+**Reference hysteresis (D26).** `N̂` drifts continuously under moving cloud and
+`D` feeds the output directly, so every wobble crossed `min_delta` (§8.3) and
+re-commanded the room — measured at ~159 writes/h per channel over a cloudy
+hour, against a mesh that manages ~7 writes/s for the whole house. A
+reference-sourced factor is therefore **adopted with hysteresis**: recomputed
+every cycle, but only taken into force when it differs from the one in force by
+`DAYLIGHT_MIN_STEP` (0.05) **or** reaches an endpoint (`daylight_min_factor` or
+1.0 — fully damped and fully undamped must always be reachable). The adopted
+factor is cleared when the reference goes stale, so a returning reference
+adopts its first value at once. It is an engineering constant, not a §12
+tunable: the operator surface is `daylight_full` / `daylight_min_factor`.
+
+**Closed-loop target scaling (D26).** On the closed-loop path the daylight
+factor scales the lux target `T'` — **only** when a `daylight_reference` is
+set. A closed-loop room's own `N̂` is already subtracted by the estimator
+(`error = T' − (N̂ + Â)`), so applying its own sensor here would double-count
+it; a reference is exactly the case where that subtraction is not enough. When
+the reference factor reaches its **floor** (`daylight_min_factor`, i.e. full
+daylight) on a **lit** room, the deadband/sustain gate is bypassed and the
+correction fires at once: on a low-capacity room `|error| = Â` can sit *inside*
+the deadband and would strand the lamp lit all day. (Keyed on the floor, not on
+`T' == 0`, so a non-zero `daylight_min_factor` does not silently disable it.)
+A room with **no lux sensor of its own** that is damped through a reference
+publishes the **reference's** `N̂` as its `natural_lux` diagnostic (§10) — for a
+sensorless room it is the only daylight figure there is. A room that *has* a
+sensor keeps publishing its own `N̂`, so `natural_lux`/`target_lux` stay
+consistent with its loop's `error = T' − (N̂ + Â)`.
+
 ## 5. Color temperature policy
 
 5.1 CT-capable channels track `ct_target = ct_day − E × (ct_day − ct_evening)`
@@ -422,6 +486,15 @@ below `warm_dim_output` (default 0.3 normalized) the cap slides toward
 5.4 CT writes go through the funnel ordered **CT before brightness** (the
 DWN-02 OUTPUT_SET can clobber a just-set level; brightness must be the last
 mesh write). CT is only rewritten when it moves ≥ `ct_min_delta` (100 K).
+The split write applies to a lamp that is **already lit**. When the lamp is
+**off** (observed level 0 or unavailable), CT and brightness (and the
+transition) go out in **one** `turn_on`: on the Plejd fork a
+`turn_on(colortemp=…, dim=None)` is sent as the plain ON command, so a CT-first
+write pops the lamp to its *remembered* level (96 % in the field) before the
+brightness write pulls it down — and that intermediate report (remembered
+level, no CT) is nobody's echo, so it latched a false override on the room's
+own turn-on (D25). The combined write records both the level corridor and the
+CT echo.
 
 ## 6. Modes
 
@@ -435,7 +508,13 @@ latch times out (9.2). Anything else counters the wall dial within one
 review, in exactly the rooms whose dials are used during sleep (the
 2026-08-14 soverom/gang incident). Sleep turning off restores normal
 evaluation (morning ramp per §2.3); a during-sleep latch survives the
-morning like any other latch.
+morning like any other latch. A room configured `sleep_keeps_override`
+(D26) is **exempt from the onset release**: its latch survives sleep
+engaging, and since the standing hard-off already respects a latch, the lamp
+stays as the user left it — for the full `override_timeout` (4 h), exactly like
+a latch minted while sleep already stood. Default off — the house going dark at
+bedtime is the rule; the bedroom, where onset hard-offed the light the user had
+turned on a minute earlier (they re-lit it 9 s later), is the exception.
 
 6.2 **Night path.** While sleep is on, a night trigger (any configured
 `night_trigger` entity: bedroom door opening, or presence/pass-by in a living
@@ -643,6 +722,17 @@ Plejd fork's native transition support, or software stepping below the engine
 where the actuator has none. `ramp_seconds` is never optional; a 0 duration
 means "as fast as the actuator allows".
 
+**Turn-on cap (D26).** When the channel is currently **off** and the goal is
+positive, and no explicit mode `fade` is given, the ramp is capped at
+`on_ramp_max` (default 3 s). The slew bound exists so a *change* in a lit room
+is not a jolt; a dark room has no continuity to protect, and the full-range
+`|Δflux| / slew_step` ramp (~9.6 s in an occupied room) reads as a slow
+integration rather than as care. Dimming and turn-off ramps are unchanged, and
+a mode fade (sleep/night) still wins outright. The cap bounds **both** adapter
+paths: the native transition is handed the capped `ramp_seconds`, and the
+software stepping fallback derives its step count from the same value, so a
+no-transition light lights in the same 3 s instead of ~10 one-second steps.
+
 8.3 **Write economy.** A channel is commanded only when the quantized goal
 differs from the ledger's last commanded value by ≥ `min_delta` (flux-relative
 0.03) or crosses on/off. Quantization is two-stage: the engine quantizes on
@@ -671,6 +761,62 @@ manual override within seconds (a live incident). Seeding makes that first
 re-report tolerance-match and be consumed. Accepted trade-off: a genuine manual
 change made in the snapshot→first-report gap is absorbed once (the same
 grossly-different report will re-latch on any subsequent change).
+
+**Fade corridor = a value band, not a moving front (D25).** A native-transition
+write opens a *corridor* for that channel: `start`, `ramp`, the band `[lo, hi]`
+spanning `frm`→`to`, and a monotone high-water mark. While the corridor lives, a
+report is an echo **iff its level lies on the band (± `echo_tolerance`) *and*
+does not regress** (below) — timing is not consulted. The fork paces a native
+`transition` as a deadline-paced ramp that skips levels when writes are slow,
+the whole mesh is serialized at ~7 GATT writes/s, and the gateway coalesces
+LASTDATA echoes under load, so an echo's *timing* is unreliable by seconds
+while its *value* is always on the segment between the start and the goal. The
+corridor dies at `start + ramp + max(5 s, 0.5·ramp)`; the final-value echo
+outlives it (`ramp + margin + echo_window`). No CT echo is recorded for a
+corridor write: a CT-only echo has no level test, and a CT-capable lamp repeats
+its kelvin on every state change, so it would consume a wall dial to full for
+the whole TTL.
+
+**Monotone progress.** A fade only ever approaches its goal, so the corridor
+tracks the smallest `|level − to|` any accepted report has reached; a report
+materially further from `to` than that high-water mark is **not** an echo. This
+is what catches a dial *during* our fade, and — since the band necessarily
+outlives the fade by the overshoot margin — a dial-down in the seconds after
+the lamp arrived. **Re-targeting** mid-fade (a mode resolution landing while a
+turn-on ramps) takes the **union** of the live band and the new segment,
+because `frm` is read from HA's state, which lags the lamp: the new segment
+alone would exclude where the lamp actually is. The high-water mark resets,
+since progress is measured toward the new goal.
+
+**What is *not* a backstop:** the ~3 min true-state poll. A report the ledger
+absorbs has already become the entity's HA state, so the poll re-reporting that
+same value fires `state_reported`, not `state_changed`, and never reaches the
+foreign-change path. A value the corridor absorbs stands until the next command
+re-asserts the setpoint — which is why the band must be tight and the progress
+test exists. After the deadline only the final-value echo (± tolerance) and the
+standing-setpoint no-op guard match, so the first post-deadline report at a
+foreign value latches.
+
+**Availability recovery never latches (D25).** Per light entity the adapter
+remembers the monotonic instant of its last `unavailable`/`unknown` →
+available edge — and, for a channel that had no state at ledger-seed time, the
+instant of its first available report (its integration may still have been
+loading). The FIRST report inside `RECOVERY_GRACE` (20 s) of that instant that
+would otherwise be classified foreign is folded as a `ReviewTick` instead: no
+latch, no writer interrupt, and §8.5 reconciles any divergence quietly. After
+an HA restart the Plejd entities go unavailable → off → on(true level) ~29 s
+in, and that off→on report latched **every** Plejd room. The grace is
+**one-shot** (that sequence is exactly one fold) and an edge arriving within
+`RECOVERY_EDGE_DEBOUNCE` (60 s) of the previous one does **not** re-arm it —
+otherwise a flapping link would hold the window open forever and no dial in
+that room could ever latch. Accepted trade-off: a genuine dial press that is
+the first divergence within 20 s of a Plejd reconnect is absorbed once.
+
+**Observability.** Every foreign classification is logged at INFO on one
+grep-friendly line — entity, old level, new level, CT, the live corridor
+(`frm`→`to` and its age) or `no corridor`, and the standing setpoint — and
+every consumed echo at DEBUG. Brightness attributes are not in the recorder on
+the live instance, so this log is the only forensic trail a false latch leaves.
 
 8.4a **Foreign changes interrupt the writer.** A report classified foreign —
 and a §9.4 wall event, for every channel in its room — additionally abandons
@@ -708,7 +854,10 @@ stray dialed level on the morning descent (6.5b).
 (hold expiry at OFF tier) — **presence-capable rooms only**; the
 sleep/away/vacation **onset edge** (the moment the mode engages — never
 re-checked while it stands, so a during-mode latch survives until its
-timeout); master gain off/on cycle; or `override_timeout` (default 4 h).
+timeout), *except* in a room configured `sleep_keeps_override`, which is
+exempt from the SLEEP onset release only and whose latch therefore stands
+until one of the remaining conditions — in practice the 4 h timeout (§6.1,
+D26); master gain off/on cycle; or `override_timeout` (default 4 h).
 Release re-enters normal control with slew ramps (no jumps). A room is
 presence-capable when a presence or occupancy-fallback sensor is configured;
 in a blind room (door/corridor triggers only) OFF-decay merely means the
@@ -832,6 +981,7 @@ fresh install and a missed restore get).
 | outdoor_stale_zero_window | 45 s | 6.5b |
 | gain_range_stops / gain_reset | 1.0 / on | 7.1, 7.3 |
 | slew_step / slew_interval / slew_step_empty | 0.1 / 1.0 s / 0.25 | 8.2 |
+| on_ramp_max | 3 s | 8.2 |
 | min_delta / min_write_interval / max_inflight | 0.03 / 1.0 s / 3 | 8.3 |
 | echo_window | 10 s | 8.4 |
 | override_timeout | 4 h | 9.2 |

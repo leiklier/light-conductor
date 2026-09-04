@@ -13,6 +13,7 @@ dataclasses (``build_engine_config`` / ``build_tunables``).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
@@ -29,6 +30,8 @@ from .core.tunables import Tunables
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
+
+_LOGGER = logging.getLogger(__name__)
 
 DOMAIN = "light_conductor"
 
@@ -71,6 +74,10 @@ CONF_NAME = "name"
 CONF_SHAPE = "shape"
 CONF_CHANNELS = "channels"
 CONF_LUX_SENSOR = "lux_sensor"
+#: Room whose fresh N̂ supplies this room's daylight factor D (§4.7, D26).
+CONF_DAYLIGHT_REFERENCE = "daylight_reference"
+#: Per-room override of the global ``daylight_full`` (§4.7, D26); blank/0 = global.
+CONF_DAYLIGHT_FULL = "daylight_full"
 CONF_PRESENCE_PRIMARY = "presence_primary"
 CONF_ACTIVITY_SENSOR = "activity_sensor"
 CONF_OCCUPANCY_FALLBACK = "occupancy_fallback"
@@ -79,6 +86,8 @@ CONF_WALL_EVENTS = "wall_event_entities"
 CONF_TRIGGERS = "trigger_entities"
 CONF_LIVING_GROUP = "living_group"
 CONF_TV_MODE = "tv_mode"
+#: Sleep onset does not release this room's override latch (§6.1/§9.2, D26).
+CONF_SLEEP_KEEPS_OVERRIDE = "sleep_keeps_override"
 CONF_HOLD_SECONDS = "hold_seconds"
 CONF_PROFILE = "profile"
 
@@ -102,6 +111,9 @@ CONF_ACTIVE_DAY = "active_day_output"
 CONF_ACTIVE_EVENING = "active_evening_output"
 CONF_BACKGROUND = "background_output"
 CONF_EVENING_CAP = "evening_output_cap"
+#: Explicit BOOST-band output inside the evening lockout window (§4.5, D26);
+#: blank ⇒ the band stays locked out (the default).
+CONF_BOOST_EVENING_OUTPUT = "boost_evening_output"
 CONF_NIGHT_OUTPUT = "night_output"
 CONF_TV_OUTPUT = "tv_output"
 CONF_TV_OUTPUT_EMPTY = "tv_output_empty"
@@ -177,12 +189,16 @@ def _profile_from_options(opts: Mapping[str, Any]) -> Profile:
     lux_day = float(opts.get(CONF_LUX_ACTIVE_DAY) or 0.0)
     lux_evening = float(opts.get(CONF_LUX_ACTIVE_EVENING) or 0.0)
     lux_background = float(opts.get(CONF_LUX_BACKGROUND) or 0.0)
+    # Evening boost output (§4.5, D26): absent/blank ⇒ None = locked out.
+    boost_evening = opts.get(CONF_BOOST_EVENING_OUTPUT)
+    boost_evening = None if boost_evening in (None, "") else float(boost_evening)
     return Profile(
         vacancy=vacancy,
         out_active_day=_band_map(day),
         out_active_evening=_band_map(evening),
         out_background=_band_map(background),
         evening_output_cap=float(opts.get(CONF_EVENING_CAP, Tunables().evening_output_cap)),
+        boost_evening_output=boost_evening,
         night_output=_band_map(night),
         tv_output=_band_map(tv),
         tv_output_empty=_band_map(tv_empty),
@@ -224,6 +240,31 @@ def _channel_from_options(hass: HomeAssistant | None, opts: Mapping[str, Any]) -
     )
 
 
+def _daylight_reference(room: Mapping[str, Any], room_id: str, lux_rooms: set[str]) -> str | None:
+    """Validate a room's daylight reference (§4.7, D26); drop it when unusable.
+
+    The reference must be an EXISTING room that owns a lux sensor, and never the
+    room itself (a room referencing itself would double-apply its own N̂ on the
+    closed-loop path). An invalid reference is dropped with a warning rather
+    than raising: the engine then falls back to D = 1 / the room's own sensor,
+    which is the pre-D26 behaviour — a stale config must not take the house down.
+    """
+    ref = room.get(CONF_DAYLIGHT_REFERENCE)
+    if not ref:
+        return None
+    if ref == room_id:
+        _LOGGER.warning("Room %s: daylight_reference cannot be the room itself", room_id)
+        return None
+    if ref not in lux_rooms:
+        _LOGGER.warning(
+            "Room %s: daylight_reference %s is not a configured room with a lux sensor",
+            room_id,
+            ref,
+        )
+        return None
+    return str(ref)
+
+
 def build_engine_config(hass: HomeAssistant | None, options: Mapping[str, Any]) -> EngineConfig:
     """Translate ``entry.options`` into the frozen core :class:`EngineConfig`.
 
@@ -232,8 +273,12 @@ def build_engine_config(hass: HomeAssistant | None, options: Mapping[str, Any]) 
     conservative range.
     """
     night_path_rooms = set(options.get(CONF_NIGHT_PATH_ROOMS, ()))
+    raw_rooms = list(options.get(CONF_ROOMS, ()))
+    # Rooms that can SERVE as a daylight reference (§4.7, D26): they must exist
+    # and own a lux sensor, or there is no N̂ to read.
+    lux_rooms = {r[CONF_ROOM_ID] for r in raw_rooms if r.get(CONF_LUX_SENSOR)}
     rooms: list[RoomConfig] = []
-    for room in options.get(CONF_ROOMS, ()):
+    for room in raw_rooms:
         room_id = room[CONF_ROOM_ID]
         channels = tuple(_channel_from_options(hass, ch) for ch in room.get(CONF_CHANNELS, ()))
         rooms.append(
@@ -247,7 +292,12 @@ def build_engine_config(hass: HomeAssistant | None, options: Mapping[str, Any]) 
                 hold_seconds=room.get(CONF_HOLD_SECONDS),
                 night_path=room_id in night_path_rooms,
                 tv_mode=bool(room.get(CONF_TV_MODE, False)),
+                sleep_keeps_override=bool(room.get(CONF_SLEEP_KEEPS_OVERRIDE, False)),
                 has_lux_sensor=bool(room.get(CONF_LUX_SENSOR)),
+                daylight_reference=_daylight_reference(room, room_id, lux_rooms),
+                daylight_full=float(room[CONF_DAYLIGHT_FULL])
+                if room.get(CONF_DAYLIGHT_FULL)
+                else None,
                 presence_capable=bool(
                     room.get(CONF_PRESENCE_PRIMARY) or room.get(CONF_OCCUPANCY_FALLBACK)
                 ),
@@ -313,6 +363,7 @@ EDITABLE_TUNABLES: tuple[str, ...] = (
     "slew_step",
     "slew_interval",
     "slew_step_empty",
+    "on_ramp_max",
     "min_delta",
     "min_write_interval",
     "max_inflight",

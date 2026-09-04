@@ -88,6 +88,7 @@ DOC_ROWS: dict[str, tuple[tuple[str, ...], tuple[object, ...]]] = {
         ("slew_step", "slew_interval", "slew_step_empty"),
         (0.1, 1.0, 0.25),
     ),
+    "on_ramp_max": (("on_ramp_max",), (3.0,)),
     "min_delta / min_write_interval / max_inflight": (
         ("min_delta", "min_write_interval", "max_inflight"),
         (0.03, 1.0, 3),

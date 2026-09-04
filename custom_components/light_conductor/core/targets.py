@@ -58,18 +58,56 @@ def apply_evening_cap(
     return {b: min(v, cap) for b, v in outputs.items()}
 
 
-def daylight_factor(n_hat: float, tun: Tunables) -> float:
-    """Daylight damping factor ``D`` for the untrusted open-loop path (rule 4.7).
+def apply_boost_evening_output(
+    outputs: dict[Band, float],
+    e: float,
+    role: Role,
+    profile: Profile,
+    tun: Tunables,
+    g: float,
+) -> tuple[dict[Band, float], bool]:
+    """Drive the BOOST band at the profile's evening output (rule 4.5, D26).
 
-    ``D = clamp(1 - N̂ / daylight_full, daylight_min_factor, 1.0)``: bright
-    daylight pulls the open-loop tables down, darkness leaves them at full.
-    Replicates the legacy ``100 - 0.5·lux`` damping for rooms whose sensors read
-    daylight well but are nearly blind to their own lamps (§3.1). ``N̂`` for an
-    untrusted room ≈ the filtered lux.
+    Returns ``(outputs, unlocked)``. Inside the evening lockout window
+    (``E >= boost_evening_max``) an **ACTIVE** room whose profile sets
+    ``boost_evening_output`` drives the boost band at that normalized value
+    instead of having it gated off; ``unlocked`` tells
+    :func:`~.photometry.allocate` not to re-zero it.
+
+    Applied after the evening cap and **exempt from it** — an explicit "this is
+    what the bench strip does in the evening" value, not a tier the cap should
+    trim — but it IS scaled by the master gain ``g``. The master switch has no
+    other mechanism: :func:`~.gain.multiplier` returns 0 when the master is off
+    (rule 7.2), so a band that ignored ``g`` would be the one light in the house
+    the master switch could not turn off. It still goes through the normal
+    weight share and affine response mapping in ``allocate``.
+
+    ADJACENT/BACKGROUND, the §6 mode tables and the closed-loop path are
+    untouched — they never call this, so their boost band stays locked out.
     """
-    if tun.daylight_full <= 0.0:
+    if profile.boost_evening_output is None or role is not Role.ACTIVE or e < tun.boost_evening_max:
+        return outputs, False
+    return {**outputs, Band.BOOST: max(0.0, min(1.0, profile.boost_evening_output * g))}, True
+
+
+def daylight_factor(n_hat: float, tun: Tunables, full: float | None = None) -> float:
+    """Daylight damping factor ``D`` (rule 4.7).
+
+    ``D = clamp(1 - N̂ / full, daylight_min_factor, 1.0)``: bright daylight
+    pulls the open-loop tables down, darkness leaves them at full. Replicates
+    the legacy ``100 - 0.5·lux`` damping for rooms whose sensors read daylight
+    well but are nearly blind to their own lamps (§3.1). ``N̂`` for an untrusted
+    room ≈ the filtered lux.
+
+    ``full`` is the room's per-room ``daylight_full`` override (D26); ``None``
+    (or a non-positive value) falls back to the global tunable — sensors differ
+    by an order of magnitude at the same noon (kjøkken 40-60 lx, spisebord
+    300-450 lx), so one global reference cannot serve both.
+    """
+    reference = full if full else tun.daylight_full
+    if reference <= 0.0:
         return 1.0
-    d = 1.0 - n_hat / tun.daylight_full
+    d = 1.0 - n_hat / reference
     return max(tun.daylight_min_factor, min(1.0, d))
 
 
@@ -101,9 +139,11 @@ def outdoor_dusk_factor(n_hat: float | None, e: float, tun: Tunables) -> float:
     return max(0.0, min(1.0, measured))
 
 
-def apply_daylight(outputs: dict[Band, float], n_hat: float, tun: Tunables) -> dict[Band, float]:
+def apply_daylight(
+    outputs: dict[Band, float], n_hat: float, tun: Tunables, full: float | None = None
+) -> dict[Band, float]:
     """Scale the ACTIVE/ADJACENT/BACKGROUND open-loop outputs by ``D`` (rule 4.7)."""
-    d = daylight_factor(n_hat, tun)
+    d = daylight_factor(n_hat, tun, full)
     return {b: v * d for b, v in outputs.items()}
 
 

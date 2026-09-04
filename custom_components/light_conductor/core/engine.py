@@ -82,6 +82,17 @@ SUSPECT_ZERO_TTL = 360.0
 #: is the poll re-reading our own level; beyond it, it is a user action.
 SUSPECT_LEVEL_TOL = 0.03
 
+#: Hysteresis on a REFERENCE-sourced §4.7 daylight factor (D26). N̂ moves
+#: continuously under drifting cloud, and the factor feeds the output directly,
+#: so every wobble crossed the §8.3 min_delta and re-commanded the room —
+#: ~159 writes/h per channel on a cloudy hour, against a mesh that manages ~7
+#: writes/s for the whole house. A new factor is adopted only once it differs
+#: from the one in force by this much (or reaches an endpoint, which must always
+#: be reachable: fully damped and fully undamped are the two states the user
+#: actually asked for). An engineering constant, not a §12 tunable — the
+#: operator surface is ``daylight_full`` / ``daylight_min_factor``.
+DAYLIGHT_MIN_STEP = 0.05
+
 
 class Engine:
     """Deterministic core of Light Conductor."""
@@ -208,7 +219,21 @@ class Engine:
                     # the house goes dark. A latch minted DURING sleep (the
                     # 03:00 reading light) is deliberate manual control and is
                     # respected by the standing hard-off (rule 6.1).
-                    for rs in s.rooms.values():
+                    # Exception (§6.1, D26): a room with ``sleep_keeps_override``
+                    # keeps its latch across the onset edge. The standing sleep
+                    # OFF already respects a latch, so the bedroom light turned
+                    # on a minute before bed survives — otherwise onset hard-offs
+                    # the very lamp the user just reached for (they re-lit it 9 s
+                    # later). The latch then stands for the full override_timeout
+                    # (4 h), exactly like one minted during standing sleep today;
+                    # a master cycle or observed vacancy (presence-capable rooms)
+                    # also ends it. Turning the lamp off by hand does NOT: that
+                    # is another foreign change, so the room stays latched — and
+                    # dark, which is what the user asked for.
+                    for room_id, rs in s.rooms.items():
+                        keep = self.config.room(room_id)
+                        if keep is not None and keep.sleep_keeps_override:
+                            continue
                         override.release(rs)
                 s.sleep = event.active
                 if not event.active:
@@ -813,6 +838,10 @@ class Engine:
         shadow = res is None and fresh and not eligible
         correcting = False
         target_lux: float | None = None
+        # Daylight reference (§4.7, D26): the factor D from another room's FRESH
+        # N̂, hysteresis-damped, or None when no reference is configured or its
+        # source is stale (⇒ D = 1, unchanged behaviour).
+        ref_d = self._reference_daylight(room, rs, now)
 
         if res is not None:
             role = res.role
@@ -828,27 +857,47 @@ class Engine:
         elif closed:
             role = base
             channel_b, correcting, target_lux = self._closed_loop(
-                room, rs, base, prev_role, e, g, now, photo, capacity, plan, tv_ceiling
+                room, rs, base, prev_role, e, g, now, photo, capacity, plan, tv_ceiling, ref_d
             )
         else:
             role = base
             outputs = targets.role_outputs(room.profile, role, e, tun)
-            # Daylight-aware open-loop (§4.7): an untrusted lux room (fresh sensor,
-            # not yet trusted) scales its tier outputs by the daylight factor D,
-            # replicating the legacy 100 - 0.5·lux daytime damping. A stale sensor
-            # (no fresh N̂) falls through unscaled (D → 1), exactly as before.
-            # While a first-night bootstrap observation is settling the factor is
-            # held steady (latched) so N̂ drift does not re-command and disrupt it.
-            if shadow:
+            # Daylight-aware open-loop (§4.7): the tier outputs are scaled by the
+            # daylight factor D, replicating the legacy 100 - 0.5·lux daytime
+            # damping. A stale/absent source falls through unscaled (D → 1),
+            # exactly as before.
+            if ref_d is not None:
+                # A REFERENCE room supplies D (D26): used directly — the latch
+                # below exists to protect this room's own bootstrap observation,
+                # and a reference room's N̂ owes nothing to this room's lamps.
+                # This is the path a sensorless corridor (gang) takes. If such a
+                # room also has its own (untrusted) sensor, a moving reference D
+                # may re-command mid-settle: that RE-BASES the pending
+                # observation (record_step) rather than corrupting it.
+                outputs = {b: v * ref_d for b, v in outputs.items()}
+            elif shadow:
+                # The room's OWN N̂ (untrusted lux room: fresh sensor, not yet
+                # trusted). While a first-night bootstrap observation is settling
+                # the factor is held steady (latched) so N̂ drift does not
+                # re-command and disrupt the measurement.
                 if rs.est.pending_valid and rs.est.daylight_latch is not None:
                     d_factor = rs.est.daylight_latch
                 else:
-                    d_factor = targets.daylight_factor(rs.est.n_hat, tun)
+                    d_factor = targets.daylight_factor(rs.est.n_hat, tun, room.daylight_full)
                 rs.est.daylight_latch = d_factor
                 outputs = {b: v * d_factor for b, v in outputs.items()}
             outputs = gain.scale(outputs, g)
             outputs = targets.apply_evening_cap(outputs, e, room.profile, tun)
-            channel_b = photometry.allocate(room.channels, outputs, e, tun)
+            # Evening boost output (§4.5, D26): LAST band-level word — an
+            # explicit per-room evening value for the boost band (the kitchen
+            # bench strip the user turned on at 22:04), unlocked for an ACTIVE
+            # room only. Exempt from the evening cap, but scaled by the master
+            # gain: g is 0 when the master is off, and no room may hold a band
+            # the master switch cannot extinguish (rule 7.2).
+            outputs, boost_unlocked = targets.apply_boost_evening_output(
+                outputs, e, role, room.profile, tun, g
+            )
+            channel_b = photometry.allocate(room.channels, outputs, e, tun, boost_unlocked)
 
         # The TV ON ceiling is the LAST word on output (rule 6.3): applied to the
         # final per-channel values, after weight share, response mapping and the
@@ -899,9 +948,18 @@ class Engine:
         if room.shape is RoomShape.OUTDOOR and res is not None and not res.off:
             plan.review_at(now + timedelta(seconds=tun.circadian_tick))
         # Natural lux is published for the closed-loop/shadow paths and for an
-        # outdoor room whose fresh sensor drives its dusk ramp (§6.5a).
+        # outdoor room whose fresh sensor drives its dusk ramp (§6.5a). A room
+        # with NO sensor of its own that is damped through a reference publishes
+        # the SOURCE's N̂ (§4.7, D26) — for a sensorless room (gang) it is the
+        # only daylight figure there is, and its level is a function of it. A
+        # room that has its own sensor keeps publishing its own N̂ even when a
+        # reference drives its damping, so `natural_lux` and `target_lux` stay
+        # consistent with the loop's own error = T' - (N̂ + Â).
         outdoor_lux = fresh and room.shape is RoomShape.OUTDOOR
-        natural = rs.est.n_hat if (closed or shadow or outdoor_lux) else None
+        if ref_d is not None and res is None and not room.has_lux_sensor:
+            natural = self._reference_n_hat(room, now)
+        else:
+            natural = rs.est.n_hat if (closed or shadow or outdoor_lux) else None
         return self._diag(room, rs, role, max(channel_b.values(), default=0.0), natural, target_lux)
 
     def _outdoor_dusk(self, room: RoomConfig, now: datetime, e: float) -> float:
@@ -917,6 +975,56 @@ class Engine:
         rs = self.state.rooms[room.room_id]
         fresh = room.has_lux_sensor and not estimator.is_stale(rs.est, now, self.tun)
         return targets.outdoor_dusk_factor(rs.est.n_hat if fresh else None, e, self.tun)
+
+    def _reference_n_hat(self, room: RoomConfig, now: datetime) -> float | None:
+        """The daylight source N̂ of ``room``'s reference room (§4.7, D26).
+
+        ``None`` when no reference is configured, the reference has vanished
+        from config, has no lux sensor, or its sensor is STALE — all of which
+        mean "no daylight information", i.e. D = 1 and the unscaled open-loop
+        tables, exactly the §3.5 fallback a room with its own stale sensor gets.
+
+        No dependency graph is needed to keep this fresh: every event triggers a
+        whole-engine recompute, and the reference room's own ``LuxReport``s are
+        events, so a dependent room re-resolves on the same tick its source
+        updates.
+        """
+        if room.daylight_reference is None:
+            return None
+        ref = self.config.room(room.daylight_reference)
+        if ref is None or not ref.has_lux_sensor:
+            return None
+        ref_rs = self.state.rooms.get(ref.room_id)
+        if ref_rs is None or estimator.is_stale(ref_rs.est, now, self.tun):
+            return None
+        return ref_rs.est.n_hat
+
+    def _reference_daylight(self, room: RoomConfig, rs: RoomState, now: datetime) -> float | None:
+        """The reference-sourced daylight factor D in force for a room (§4.7, D26).
+
+        ``None`` when there is no usable reference (D = 1, unchanged behaviour);
+        the room's adopted factor is cleared then, so a reference coming back
+        adopts its first value immediately.
+
+        Hysteresis (``DAYLIGHT_MIN_STEP``): D feeds the output directly, so
+        every wobble of a drifting N̂ crossed the §8.3 min_delta and re-commanded
+        the room — a cloudy hour measured ~159 writes/h per channel against a
+        mesh that manages ~7 writes/s for the whole house. A new factor is
+        adopted only once it differs from the one in force by a real step, or
+        when it reaches an endpoint (fully damped / fully undamped are the two
+        states the user actually asked for and must always be reachable).
+        """
+        n_hat = self._reference_n_hat(room, now)
+        if n_hat is None:
+            rs.est.daylight_applied = None
+            return None
+        d = targets.daylight_factor(n_hat, self.tun, room.daylight_full)
+        applied = rs.est.daylight_applied
+        endpoint = d <= self.tun.daylight_min_factor or d >= 1.0
+        if applied is None or endpoint or abs(d - applied) >= DAYLIGHT_MIN_STEP:
+            rs.est.daylight_applied = d
+            return d
+        return applied
 
     def _room_capacity(self, rs: RoomState, room: RoomConfig, photo: RoomPhotometry) -> float:
         """Room calibrated capacity ``C = Σ_i g_i·f_i(1)·m`` (§2.1, §4.5).
@@ -943,6 +1051,7 @@ class Engine:
         capacity: float,
         plan: Plan,
         tv_ceiling: Mapping[Band, float] | None = None,
+        ref_d: float | None = None,
     ) -> tuple[dict[str, float], bool, float]:
         """Feed-forward closed-loop control for one room (§3.6/§4.5).
 
@@ -952,9 +1061,20 @@ class Engine:
         corrects, a single model-predicted (feed-forward) write lands near goal.
         ``capacity`` is the room capacity C the engine already computed for the
         capacity gate (§4.5) — reused here for the auto tiers and the deadband.
+
+        ``ref_d`` is the daylight factor from a REFERENCE room (§4.7, D26),
+        already hysteresis-damped. It scales the lux target, and only a
+        reference may: this room's own N̂ is already subtracted by the estimator
+        (``error = T' - (N̂ + Â)``), so applying its own sensor here would
+        double-count it. A reference is the case where that subtraction is not
+        enough — sofakrok's sensor sits in a dark corner under the lamp
+        (N̂ ≈ 0.07 lx at noon), so the loop faithfully lit the room to ~24 % in
+        broad daylight.
         """
         tun = self.tun
         t_prime = estimator.target_lux(rs, role, room.profile, e, g, tun, capacity)
+        if ref_d is not None:
+            t_prime *= ref_d
         a_now = estimator.a_hat(rs, photo)
         n = rs.est.n_hat
         if tv_ceiling is not None:
@@ -975,6 +1095,19 @@ class Engine:
         error = t_prime - (n + a_now)
         fast_edge = role is not prev_role
         correct, review = estimator.should_correct(rs.est, error, deadband, now, fast_edge, tun)
+        if (
+            ref_d is not None
+            and ref_d <= tun.daylight_min_factor
+            and any(cs.on for cs in rs.channels.values())
+        ):
+            # The reference says it is FULL daylight: D has reached its floor, so
+            # the damped target must reach the lamps this cycle. The deadband
+            # would otherwise strand the room lit — on a low-capacity room
+            # |error| = Â can sit INSIDE it — which is the sofakrok failure mode
+            # one level down. Keyed on the FLOOR, not on "T' == 0", so a
+            # non-zero daylight_min_factor does not silently disable it.
+            rs.est.error_sustain_until = None
+            correct, review = True, None
         plan.review_at(review)
         if not correct:
             hold = {ch.channel_id: rs.channels[ch.channel_id].commanded_b for ch in room.channels}

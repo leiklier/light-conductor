@@ -43,6 +43,7 @@ from .const import (
     CONF_ACTIVITY_SENSOR,
     CONF_ANYONE_HOME_ENTITY,
     CONF_BACKGROUND,
+    CONF_BOOST_EVENING_OUTPUT,
     CONF_CH_BAND,
     CONF_CH_DIM_FLOOR,
     CONF_CH_ENTITY,
@@ -51,6 +52,8 @@ from .const import (
     CONF_CH_RESPONSE_SLOPE,
     CONF_CH_WEIGHT,
     CONF_CHANNELS,
+    CONF_DAYLIGHT_FULL,
+    CONF_DAYLIGHT_REFERENCE,
     CONF_EVENING_CAP,
     CONF_HOLD_SECONDS,
     CONF_LIVING_GROUP,
@@ -71,6 +74,7 @@ from .const import (
     CONF_ROOMS,
     CONF_SHAPE,
     CONF_SLEEP_ENTITY,
+    CONF_SLEEP_KEEPS_OVERRIDE,
     CONF_TRIGGERS,
     CONF_TUNABLES,
     CONF_TV_ENTITIES,
@@ -133,6 +137,7 @@ _TUNABLE_UI: dict[str, tuple[float, float, float]] = {
     "slew_step": (0.02, 0.5, 0.01),
     "slew_interval": (0.5, 5, 0.5),
     "slew_step_empty": (0.05, 1, 0.05),
+    "on_ramp_max": (0, 30, 0.5),
     "min_delta": (0.01, 0.2, 0.01),
     "min_write_interval": (0.5, 5, 0.5),
     "max_inflight": (1, 8, 1),
@@ -362,6 +367,25 @@ class LightConductorOptionsFlow(OptionsFlow):
     def _room_ids(self) -> list[str]:
         return [r[CONF_ROOM_ID] for r in self._rooms]
 
+    def _lux_room_ids(self) -> list[str]:
+        """Rooms usable as a §4.7 daylight reference — they own a lux sensor."""
+        return [r[CONF_ROOM_ID] for r in self._rooms if r.get(CONF_LUX_SENSOR)]
+
+    def _reference_options(self, room: dict[str, Any]) -> tuple[str, ...]:
+        """Daylight-reference choices for a room (§4.7, D26).
+
+        Other lux rooms, plus whatever is CURRENTLY stored even if it no longer
+        qualifies: the stored value is prefilled as a ``suggested_value``, so a
+        reference whose room lost its lux sensor would fail schema validation
+        and the room could not be opened — let alone corrected — at all. The
+        engine independently drops an unusable reference at config build.
+        """
+        options = [r for r in self._lux_room_ids() if r != self._room_id]
+        current = room.get(CONF_DAYLIGHT_REFERENCE)
+        if current and current not in options:
+            options.append(str(current))
+        return tuple(options)
+
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if not self._options:
             self._options = dict(self.config_entry.options)
@@ -490,6 +514,15 @@ class LightConductorOptionsFlow(OptionsFlow):
             ]
             updated[CONF_LIVING_GROUP] = user_input.get(CONF_LIVING_GROUP, False)
             updated[CONF_TV_MODE] = user_input.get(CONF_TV_MODE, False)
+            updated[CONF_SLEEP_KEEPS_OVERRIDE] = user_input.get(CONF_SLEEP_KEEPS_OVERRIDE, False)
+            # Daylight reference / per-room daylight_full (§4.7, D26): both are
+            # clearable — a blank submission omits the key, so drop it and the
+            # room falls back to its own sensor / the global tunable.
+            for key in (CONF_DAYLIGHT_REFERENCE, CONF_DAYLIGHT_FULL):
+                if user_input.get(key) not in (None, ""):
+                    updated[key] = user_input[key]
+                else:
+                    updated.pop(key, None)
             if user_input.get(CONF_HOLD_SECONDS):
                 updated[CONF_HOLD_SECONDS] = user_input[CONF_HOLD_SECONDS]
             else:
@@ -511,7 +544,12 @@ class LightConductorOptionsFlow(OptionsFlow):
                     profile[key] = user_input[key]
             # Closed-loop lux tiers are clearable (suggested_value idiom): a blank
             # submission omits the key ⇒ drop it so the room reverts to auto.
-            for key in (CONF_LUX_ACTIVE_DAY, CONF_LUX_ACTIVE_EVENING, CONF_LUX_BACKGROUND):
+            for key in (
+                CONF_LUX_ACTIVE_DAY,
+                CONF_LUX_ACTIVE_EVENING,
+                CONF_LUX_BACKGROUND,
+                CONF_BOOST_EVENING_OUTPUT,
+            ):
                 if user_input.get(key) not in (None, ""):
                     profile[key] = user_input[key]
                 else:
@@ -533,6 +571,12 @@ class LightConductorOptionsFlow(OptionsFlow):
                 vol.Required(CONF_SHAPE, default=room.get(CONF_SHAPE, "presence")): _select(SHAPES),
                 vol.Optional(CONF_CHANNELS, default=channel_entities): _entities("light"),
                 _opt(CONF_LUX_SENSOR, room): _entity("sensor", "illuminance"),
+                # Daylight reference (§4.7, D26): only rooms that own a lux
+                # sensor can serve as one, and never this room itself. Blank ⇒
+                # the room's own sensor (or no damping at all).
+                _opt(CONF_DAYLIGHT_REFERENCE, room): _select(self._reference_options(room)),
+                # Per-room daylight_full in lx; blank ⇒ the global tunable.
+                _opt(CONF_DAYLIGHT_FULL, room): _lux(),
                 _opt(CONF_PRESENCE_PRIMARY, room): _entity("binary_sensor", "occupancy"),
                 _opt(CONF_ACTIVITY_SENSOR, room): _entity("sensor"),
                 _opt(CONF_OCCUPANCY_FALLBACK, room): _entities(["binary_sensor"]),
@@ -546,6 +590,12 @@ class LightConductorOptionsFlow(OptionsFlow):
                 ): BooleanSelector(),
                 vol.Optional(
                     CONF_TV_MODE, default=room.get(CONF_TV_MODE, False)
+                ): BooleanSelector(),
+                # §6.1/§9.2 (D26): sleep's onset edge leaves this room's latch
+                # standing (the bedroom lamp lit a minute before bed).
+                vol.Optional(
+                    CONF_SLEEP_KEEPS_OVERRIDE,
+                    default=room.get(CONF_SLEEP_KEEPS_OVERRIDE, False),
                 ): BooleanSelector(),
                 _opt(CONF_HOLD_SECONDS, room): NumberSelector(
                     NumberSelectorConfig(min=10, max=1800, step=5, mode=NumberSelectorMode.BOX)
@@ -591,6 +641,9 @@ class LightConductorOptionsFlow(OptionsFlow):
                 # suggested_value so a blank submission CLEARS the field ⇒ auto
                 # (a capacity fraction). Only meaningful for a room with a lux
                 # sensor; harmlessly ignored open-loop.
+                # Evening boost output (§4.5, D26): blank ⇒ the boost band stays
+                # locked out past boost_evening_max (the default).
+                _opt(CONF_BOOST_EVENING_OUTPUT, profile): _pct(0.0),
                 _opt(CONF_LUX_ACTIVE_DAY, profile): _lux(),
                 _opt(CONF_LUX_ACTIVE_EVENING, profile): _lux(),
                 _opt(CONF_LUX_BACKGROUND, profile): _lux(),

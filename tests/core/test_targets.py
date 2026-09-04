@@ -58,6 +58,58 @@ def test_peak_output() -> None:
     assert targets.peak_output({}) == 0.0
 
 
+# --- §4.5 evening boost output (D26) --------------------------------------
+
+
+def _boost_profile(value: float | None) -> Profile:
+    return Profile(out_active_day={Band.BOOST: 0.6}, boost_evening_output=value)
+
+
+def test_boost_evening_output_drives_an_active_room_in_the_lockout() -> None:
+    """§4.5/D26: past boost_evening_max an ACTIVE room takes the explicit value
+    instead of the lockout (the bench strip the user turned on at 22:04)."""
+    outputs, unlocked = targets.apply_boost_evening_output(
+        {Band.PRIMARY: 0.3, Band.BOOST: 0.6}, 1.0, Role.ACTIVE, _boost_profile(0.35), TUN, 1.0
+    )
+    assert unlocked and outputs[Band.BOOST] == 0.35
+    assert outputs[Band.PRIMARY] == 0.3  # other bands untouched
+
+
+def test_boost_evening_output_is_scaled_by_master_gain() -> None:
+    """§4.5/§7.2 (D26): the value is exempt from the evening CAP but not from the
+    master gain — g is 0 with the master off, and no band may survive that."""
+    outputs, unlocked = targets.apply_boost_evening_output(
+        {Band.BOOST: 0.6}, 1.0, Role.ACTIVE, _boost_profile(0.35), TUN, 0.5
+    )
+    assert unlocked and abs(outputs[Band.BOOST] - 0.175) < 1e-9
+    dark, unlocked = targets.apply_boost_evening_output(
+        {Band.BOOST: 0.6}, 1.0, Role.ACTIVE, _boost_profile(0.35), TUN, 0.0
+    )
+    assert unlocked and dark[Band.BOOST] == 0.0  # master off ⇒ the strip goes out
+
+
+def test_boost_evening_output_only_inside_the_lockout_window() -> None:
+    """Below boost_evening_max the band is not locked out at all — nothing to do."""
+    outputs, unlocked = targets.apply_boost_evening_output(
+        {Band.BOOST: 0.6}, 0.4, Role.ACTIVE, _boost_profile(0.35), TUN, 1.0
+    )
+    assert not unlocked and outputs[Band.BOOST] == 0.6
+
+
+def test_boost_evening_output_is_active_only_and_opt_in() -> None:
+    """§4.5/D26: ADJACENT/BACKGROUND stay locked out, and an unset profile keeps
+    the plain lockout (D6/Q4 — the default does not change)."""
+    for role in (Role.ADJACENT, Role.BACKGROUND):
+        _out, unlocked = targets.apply_boost_evening_output(
+            {Band.BOOST: 0.6}, 1.0, role, _boost_profile(0.35), TUN, 1.0
+        )
+        assert not unlocked
+    _out, unlocked = targets.apply_boost_evening_output(
+        {Band.BOOST: 0.6}, 1.0, Role.ACTIVE, _boost_profile(None), TUN, 1.0
+    )
+    assert not unlocked
+
+
 # --- §4.7 daylight-aware open-loop ---------------------------------------
 
 
@@ -89,3 +141,15 @@ def test_daylight_disabled_when_full_nonpositive() -> None:
 
     off = replace(TUN, daylight_full=0.0)
     assert targets.daylight_factor(150.0, off) == 1.0  # guarded, no zero-division
+
+
+def test_per_room_daylight_full_overrides_the_global() -> None:
+    """§4.7/D26: a room whose sensor reads 40-60 lx at noon (kjøkken) cannot
+    share a 200 lx reference with one reading 300-450 lx (spisebord)."""
+    assert abs(targets.daylight_factor(30.0, TUN, 60.0) - 0.5) < 1e-9  # 1 - 30/60
+    assert targets.daylight_factor(60.0, TUN, 60.0) == 0.0  # at the room's full
+    # Blank / zero falls back to the global (200 lx).
+    assert abs(targets.daylight_factor(100.0, TUN, None) - 0.5) < 1e-9
+    assert abs(targets.daylight_factor(100.0, TUN, 0.0) - 0.5) < 1e-9
+    scaled = targets.apply_daylight({Band.PRIMARY: 0.8}, 30.0, TUN, 60.0)
+    assert abs(scaled[Band.PRIMARY] - 0.4) < 1e-9
