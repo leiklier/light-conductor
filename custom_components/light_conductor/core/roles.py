@@ -23,6 +23,14 @@ from .model import (
 )
 from .tunables import Tunables
 
+#: Fallback dropouts this short do not restart a raw spell (rule 1.1, D31).
+#: The raw mmWave fallbacks re-trigger through near-instant off->on toggles —
+#: about half of all kjøkken/sofakrok off-gaps are under 50 ms and ~60-73 %
+#: under 2 s — so an unbridged "continuously on" would almost never accumulate
+#: even on a person sitting still. An engineering constant, not a §12 tunable:
+#: the operator surface is ``fallback_min_on``.
+FALLBACK_BRIDGE = 2.0
+
 
 def hold_scale(peak: Activity | None, tun: Tunables) -> float:
     """Vacancy-hold multiplier from the episode peak (rule 1.3)."""
@@ -37,9 +45,35 @@ def hold_scale(peak: Activity | None, tun: Tunables) -> float:
 
 
 def ingest_presence(
-    rs: RoomState, primary: bool | None, fallback: bool | None, now: datetime
+    rs: RoomState,
+    primary: bool | None,
+    fallback: bool | None,
+    now: datetime,
+    tun: Tunables | None = None,
+    min_on: float | None = None,
 ) -> None:
-    """Fold a :class:`~.events.PresenceChanged` into the room (rule 1.1)."""
+    """Fold a :class:`~.events.PresenceChanged` into the room (rule 1.1).
+
+    Tracks the fallback's on-spell for episode confirmation (D31): a rising
+    edge starts a new spell unless the fallback dropped out at most
+    ``FALLBACK_BRIDGE`` ago, in which case the old spell continues. A spell
+    that ends having persisted ``fallback_min_on`` confirms the room's current
+    episode — evaluated HERE, before the falling edge is folded, because the
+    vacancy hold this very edge starts must already be the normal one.
+    """
+    was_on = rs.fallback is True
+    if fallback is True and not was_on:
+        bridged = (
+            rs.fallback_on_since is not None
+            and rs.fallback_off_at is not None
+            and (now - rs.fallback_off_at).total_seconds() <= FALLBACK_BRIDGE
+        )
+        if not bridged:
+            rs.fallback_on_since = now
+    elif was_on and fallback is not True:
+        if rs.self_active and fallback_persisted(rs, now, tun, min_on):
+            rs.episode_confirmed = True
+        rs.fallback_off_at = now
     if primary is None and rs.primary is not None:
         rs.primary_blind_since = now  # primary just went blind
     elif primary is not None:
@@ -50,6 +84,32 @@ def ingest_presence(
         rs.last_definitive_occupied = bool(primary) or bool(fallback)
 
 
+def _min_on(tun: Tunables | None, min_on: float | None) -> float:
+    """The room's effective fallback persistence: its override, else the tunable."""
+    if min_on is not None:
+        return min_on
+    return tun.fallback_min_on if tun is not None else 0.0
+
+
+def fallback_persisted(
+    rs: RoomState, now: datetime, tun: Tunables | None, min_on: float | None = None
+) -> bool:
+    """Whether the fallback's current spell is CONFIRMED evidence (D31).
+
+    True while the fallback is on and its spell (dropouts up to
+    ``FALLBACK_BRIDGE`` bridged) has lasted the room's effective
+    ``fallback_min_on``. A ``fallback_min_on`` of 0 makes every spell
+    confirmed (beta.19). Called on the falling edge BEFORE it is folded (the
+    spell's full length), and by the engine for the away debounce (§6.4, D29).
+    """
+    if rs.fallback is not True:
+        return False
+    need = _min_on(tun, min_on)
+    if need <= 0.0:
+        return True
+    return rs.fallback_on_since is not None and (now - rs.fallback_on_since).total_seconds() >= need
+
+
 def ingest_activity(rs: RoomState, activity: Activity | None) -> None:
     """Fold a :class:`~.events.ActivityChanged` (rule 1.3)."""
     rs.activity = activity
@@ -57,14 +117,31 @@ def ingest_activity(rs: RoomState, activity: Activity | None) -> None:
         rs.episode_peak = max_activity(rs.episode_peak, activity)
 
 
-def ingest_trigger(rs: RoomState, closing: bool, now: datetime, tun: Tunables) -> None:
+def ingest_trigger(
+    rs: RoomState,
+    closing: bool,
+    now: datetime,
+    tun: Tunables,
+    shape: RoomShape = RoomShape.DOOR,
+) -> None:
     """Fold a corridor/door trigger (rules 1.7, 1.9).
 
     The door-lighting toggle gates INGESTION (rule 1.9): with it off no pulse —
     opening or closing — mints a hold, so the room simply has no trigger input
     while the occupant has switched the behaviour away.
+
+    The closing edge depends on the room's shape (D34). A DOOR-shaped room
+    (soverom) shortens to ``door_close_hold``: the door closing behind you
+    means you left — or shut yourself in, and the dial is yours. A CORRIDOR
+    ignores it: its triggers are pass-through contacts (the front door on
+    gang), and closing the front door behind you must not darken the hallway
+    15 s later — only the opening edge pulses ``trigger_hold``. A PRESENCE
+    room with triggers keeps the door behaviour (its presence sensing carries
+    the occupant past the short hold anyway).
     """
     if not rs.door_lighting:
+        return
+    if closing and shape is RoomShape.CORRIDOR:
         return
     hold = tun.door_close_hold if closing else tun.trigger_hold
     rs.trigger_hold_until = now + timedelta(seconds=hold)
@@ -73,12 +150,17 @@ def ingest_trigger(rs: RoomState, closing: bool, now: datetime, tun: Tunables) -
 # --- occupancy resolution (rule 1.1) -------------------------------------
 
 
-def occupancy(rs: RoomState, now: datetime, tun: Tunables) -> bool | None:
+def occupancy(
+    rs: RoomState, now: datetime, tun: Tunables, min_on: float | None = None
+) -> bool | None:
     """Resolve room occupancy (rule 1.1). ``None`` = fully blind (rule 1.8).
 
-    An unavailable primary holds its last definitive value for
-    ``presence_blind_hold`` before falling back to the fallback entities
-    (blind != absent).
+    The fallbacks are OR-ed with the primary and count at once — they are the
+    fast detectors (presence-conductor lags them by 8-27 s). What D31 limits is
+    the HOLD an unconfirmed raw-only episode gets (:func:`_step_presence`), not
+    the turn-on. An unavailable primary holds its last definitive value for
+    ``presence_blind_hold`` before falling back to the fallback entities alone
+    (blind != absent). ``min_on`` is unused here (kept for call symmetry).
     """
     if rs.primary is not None:
         return bool(rs.primary) or bool(rs.fallback)
@@ -103,8 +185,13 @@ def step(
     hold_seconds: float | None,
     e: float = 0.0,
     dusk: float | None = None,
+    fallback_min_on: float | None = None,
 ) -> None:
-    """Advance ``self_active`` and its holds up to ``now`` (rules 1.3-1.9)."""
+    """Advance ``self_active`` and its holds up to ``now`` (rules 1.3-1.9).
+
+    ``fallback_min_on`` is the room's override of the §1.1 fallback
+    persistence (D31); ``None`` uses the tunable.
+    """
     if shape is RoomShape.OUTDOOR:
         # Outdoor rooms ignore presence SENSING (rule 6.5); modes.py owns their
         # own lighting. But the occupational switch is a *declaration* of
@@ -134,7 +221,7 @@ def step(
     if shape in (RoomShape.CORRIDOR, RoomShape.DOOR):
         _step_trigger(rs, now)
         return
-    _step_presence(rs, now, tun, hold_seconds)
+    _step_presence(rs, now, tun, hold_seconds, fallback_min_on)
 
 
 def _step_trigger(rs: RoomState, now: datetime) -> None:
@@ -146,8 +233,14 @@ def _step_trigger(rs: RoomState, now: datetime) -> None:
     rs.self_active = active
 
 
-def _step_presence(rs: RoomState, now: datetime, tun: Tunables, hold_seconds: float | None) -> None:
-    raw = occupancy(rs, now, tun)
+def _step_presence(
+    rs: RoomState,
+    now: datetime,
+    tun: Tunables,
+    hold_seconds: float | None,
+    fallback_min_on: float | None = None,
+) -> None:
+    raw = occupancy(rs, now, tun, fallback_min_on)
     was_active = rs.self_active
     trigger_active = rs.trigger_hold_until is not None and now < rs.trigger_hold_until
 
@@ -155,11 +248,18 @@ def _step_presence(rs: RoomState, now: datetime, tun: Tunables, hold_seconds: fl
         rs.blind_steps = 0
         rs.blind_freeze_until = None
         rs.vacancy_hold_until = None
+        if not was_active:
+            rs.episode_confirmed = False  # a new episode starts unconfirmed (D31)
         rs.episode_peak = (
             (rs.activity or Activity.EMPTY)
             if not was_active
             else max_activity(rs.episode_peak, rs.activity)
         )
+        # Confirmation (D31): presence-conductor saw someone, or a raw spell
+        # has persisted fallback_min_on. Once confirmed, the episode keeps its
+        # normal holds until it ends.
+        if rs.primary is True or fallback_persisted(rs, now, tun, fallback_min_on):
+            rs.episode_confirmed = True
         rs.self_active = True
         return
 
@@ -168,7 +268,17 @@ def _step_presence(rs: RoomState, now: datetime, tun: Tunables, hold_seconds: fl
         rs.blind_freeze_until = None
         if was_active and rs.vacancy_hold_until is None:
             base = tun.hold_seconds if hold_seconds is None else hold_seconds
-            rs.vacancy_hold_until = now + timedelta(seconds=base * hold_scale(rs.episode_peak, tun))
+            hold = base * hold_scale(rs.episode_peak, tun)
+            if (
+                not rs.episode_confirmed
+                and rs.primary is not None  # blind path unchanged
+                and _min_on(tun, fallback_min_on) > 0.0
+            ):
+                # Provisional hold (D31): an episode only unconfirmed raw
+                # evidence ever supported — the raw sensors' blips — releases
+                # after fallback_provisional_hold instead of the full hold.
+                hold = min(hold, tun.fallback_provisional_hold)
+            rs.vacancy_hold_until = now + timedelta(seconds=hold)
         if rs.vacancy_hold_until is not None and now < rs.vacancy_hold_until:
             rs.self_active = True
         elif trigger_active:
@@ -180,6 +290,7 @@ def _step_presence(rs: RoomState, now: datetime, tun: Tunables, hold_seconds: fl
             rs.self_active = False
             rs.vacancy_hold_until = None
             rs.episode_peak = None
+            rs.episode_confirmed = False
         return
 
     # raw is None: fully blind (rule 1.8). Only an ACTIVE room has a role to
@@ -275,11 +386,23 @@ def lower(role: Role, steps: int) -> Role:
     return _DEMOTION_LADDER[idx]
 
 
-def next_review(rs: RoomState, now: datetime) -> datetime | None:
-    """Earliest future FSM review for this room (holds / blind clock)."""
+def next_review(
+    rs: RoomState, now: datetime, tun: Tunables | None = None, min_on: float | None = None
+) -> datetime | None:
+    """Earliest future FSM review for this room (holds / blind clock / D31).
+
+    With ``tun`` supplied, a fallback spell that is on but has not yet
+    persisted schedules the instant it will (rule 1.1, D31): the episode is
+    confirmed and the away debounce (§6.4) sees confirmed evidence on time,
+    without waiting for the next unrelated event.
+    """
+    pending = None
+    need = _min_on(tun, min_on)
+    if need > 0.0 and rs.fallback is True and rs.fallback_on_since is not None:
+        pending = rs.fallback_on_since + timedelta(seconds=need)
     candidates = [
         t
-        for t in (rs.vacancy_hold_until, rs.trigger_hold_until, rs.blind_freeze_until)
+        for t in (rs.vacancy_hold_until, rs.trigger_hold_until, rs.blind_freeze_until, pending)
         if t is not None and t > now
     ]
     return min(candidates) if candidates else None

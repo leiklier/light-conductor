@@ -84,6 +84,7 @@ from .core.events import (
     HomeChanged,
     LuxReport,
     NightTriggerFired,
+    ObservedLevel,
     PresenceChanged,
     ReviewTick,
     SleepChanged,
@@ -110,6 +111,27 @@ SUN_ENTITY = "sun.sun"
 #: Brightness echo tolerance (normalized flux) and CT echo tolerance (kelvin).
 ECHO_LEVEL_TOL = 0.03
 ECHO_CT_TOL = 60
+
+#: Absolute floor of the STANDING-SETPOINT tolerance (§8.4): two 8-bit steps.
+#: Plejd's true-state poll re-reports a level as uint16/256 — 184 -> 184.355,
+#: 204 -> 204.754 (the largest flip in a live poll log, 0.754/255) — so 2/255
+#: absorbs every poll flip with margin.
+SETPOINT_TOL_FLOOR = 2.0 / 255.0
+
+
+def _setpoint_tol(setpoint: float) -> float:
+    """Tolerance of the standing-setpoint no-op consume (§8.4, D28).
+
+    ``min(ECHO_LEVEL_TOL, max(2/255, 0.1·setpoint))``: relative at the dim end
+    — where the D27 grid now really renders 2-8 % tiers, and an absolute 0.03
+    swallowed a hand nudging TV 5 % to 8 % (diff 0.027) as a poll re-report,
+    so the next write overwrote it — and capped at the echo tolerance above.
+    Only this consume is tightened; the time-boxed echo ledger and the fade
+    corridor keep ``ECHO_LEVEL_TOL`` (their reports are in flight, not
+    re-reads).
+    """
+    return min(ECHO_LEVEL_TOL, max(SETPOINT_TOL_FLOOR, 0.1 * setpoint))
+
 
 #: Media-player states that resolve the tri-state TV input (rule 6.3).
 #: PLAYING wins over ON; everything unlisted (off / standby / unavailable /
@@ -1256,38 +1278,56 @@ class Controller:
         old: State | None = event.data.get("old_state")
         level = _obs_level(new)
         ct = _obs_ct(new)
-        # Availability recovery (§8.5): re-reconcile quietly, never override.
-        # Stamp the edge — the reports that follow it (the Plejd off -> on(true
-        # level) sequence ~29 s into a restart) must not latch either (D25).
-        if old is not None and old.state == STATE_UNAVAILABLE:
-            self._arm_recovery_grace(entity_id)
-            self._unseeded.discard(entity_id)  # the edge is stamped; it is seen
-            self.submit(ReviewTick())
-            return
         if level is None:
-            return  # went unavailable — handled on recovery
-        if entity_id in self._unseeded:
-            # Unavailable at seed time: this first report IS the recovery edge.
+            # Went (or stays) unavailable — handled on recovery. An
+            # unavailable -> unavailable attribute rewrite (the Plejd entities
+            # re-register ~5 s into a restart) is NOT a recovery edge: arming
+            # the grace there let the real edge, ~20 s later, fall inside the
+            # debounce and miss it.
+            return
+        old_level = _obs_level(old) if old is not None else None
+        # Availability recovery (§8.5, D28): the first AVAILABLE report after an
+        # unavailable/unknown state — or the first report of a channel that had
+        # no state when the ledger was seeded — is the lamp's true level, not a
+        # change anyone made. Adopt it as the standing setpoint AND the engine's
+        # belief (ObservedLevel never latches), and arm the one-shot grace for
+        # the report that follows it (the Plejd off -> on(true level) sequence
+        # ~29 s into a restart, D25).
+        if (
+            old is None
+            or old.state in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+            or entity_id in self._unseeded
+        ):
             self._unseeded.discard(entity_id)
             self._arm_recovery_grace(entity_id)
+            _LOGGER.debug(
+                "recovery edge %s: %s -> %.3f (ct=%s)",
+                entity_id,
+                old.state if old is not None else "None",
+                level,
+                ct,
+            )
+            self._observe(entity_id, level, ct)
+            return
         if self._echo.consume(entity_id, level, ct):
             return  # our own command echo (incl. an intermediate fade sample)
         # Re-confirmation of the standing setpoint (e.g. Plejd's 3-min true-
-        # state poll re-reporting our value as a float): not a foreign change.
+        # state poll re-reporting the level as a float): not a foreign change.
         # Only a NO-OP re-report qualifies — if the light actually moved to
         # reach the setpoint value (old level differs materially), that is a
         # genuine change (a wall dial restoring the previous level lands
-        # exactly on our last command) and must latch (§9.1/§11.1).
+        # exactly on our last command) and must latch (§9.1/§11.1). The
+        # setpoint is our last command OR the level last adopted from a foreign
+        # change / recovery (D28), so a user-set level's poll flips are consumed
+        # too.
         last = self._last_commanded.get(entity_id)
-        old_level = _obs_level(old) if old is not None else None
-        if (
-            last is not None
-            and abs(level - last) <= ECHO_LEVEL_TOL
-            and (old_level is None or abs(old_level - last) <= ECHO_LEVEL_TOL)
-        ):
-            return
+        if last is not None:
+            tol = _setpoint_tol(last)
+            if abs(level - last) <= tol and (old_level is None or abs(old_level - last) <= tol):
+                return
         # Availability-recovery grace (§8.4/§8.5, D25): fold, never latch. The
-        # divergence — if any — is reconciled quietly by the review.
+        # folded report is the lamp's true level: it becomes the setpoint and
+        # the engine's belief (D28), and §8.5 reconciles any divergence quietly.
         recovered = self._recovered_at.pop(entity_id, None)
         if recovered is not None and _monotonic() - recovered <= RECOVERY_GRACE:
             # Consumed by this ONE report (popped above): the restart signature
@@ -1302,7 +1342,7 @@ class Controller:
                 _monotonic() - recovered,
                 _fmt_level(last),
             )
-            self.submit(ReviewTick())
+            self._observe(entity_id, level, ct)
             return
         # Brightness attributes are not recorded on the live instance, so this
         # single INFO line is the only forensic trail a false latch leaves.
@@ -1315,6 +1355,14 @@ class Controller:
             self._corridor_note(entity_id),
             _fmt_level(last),
         )
+        # The adopted level is the room's new standing setpoint (§8.4, D28):
+        # Plejd's ~3-min poll flips a lit lamp between integer and float
+        # brightness (184 -> 184.355 -> 184), and with the setpoint left at our
+        # last OWN command every flip of a user-set level re-latched and
+        # re-stamped override_since — the 4 h timeout never fired while the lamp
+        # was lit. The transition-aware rule above still latches a real dial
+        # move (its old level is the adopted one, its new level is not).
+        self._last_commanded[entity_id] = level
         # level is 0.0 (off) or > 0 here — pass it through verbatim; the engine
         # reads 0/None alike as "off" but 0.0 must not become a spurious None.
         # The user owns this channel now (§9.1/§8.4a): abandon any in-flight
@@ -1323,6 +1371,12 @@ class Controller:
         if (w := self._writers.get(entity_id)) is not None:
             w.interrupt()
         self.submit(ForeignChange(channel_id=entity_id, level=level, ct=ct))
+
+    @callback
+    def _observe(self, entity_id: str, level: float, ct: int | None) -> None:
+        """Adopt an observed true level as setpoint + engine belief (§8.5, D28)."""
+        self._last_commanded[entity_id] = level
+        self.submit(ObservedLevel(channel_id=entity_id, level=level, ct=ct))
 
     @callback
     def _arm_recovery_grace(self, entity_id: str) -> None:

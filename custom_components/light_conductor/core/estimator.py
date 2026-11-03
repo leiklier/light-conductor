@@ -114,6 +114,24 @@ def invalidate_pending(est: EstimatorState) -> None:
     est.pending_shadow = False
 
 
+def resync_belief(est: EstimatorState, a_before: float, a_after: float) -> None:
+    """Re-base ``Â_filt``/``N̂`` on a BELIEF correction (§3.2, §8.5, D28).
+
+    An :class:`~.events.ObservedLevel` changes what the engine believes a lamp
+    is doing, not what the lamp does: the sensor has been seeing the true light
+    all along, so ``L_filt`` is already right and only the own-light term was
+    wrong (after a restart the engine believed every lamp off, so sofakrok's
+    own lamp was being counted as daylight). Shift ``Â_filt`` by the belief
+    step and re-derive ``N̂`` from the unchanged ``L_filt`` at once — filtering
+    the step in would keep the error alive for minutes. Any pending gain
+    observation straddles the correction and is dropped.
+    """
+    invalidate_pending(est)
+    est.a_filt = max(0.0, est.a_filt + (a_after - a_before))
+    if est.l_filt is not None:
+        est.n_hat = max(0.0, est.l_filt - est.a_filt)
+
+
 def record_step(
     est: EstimatorState,
     l_before: float | None,
@@ -311,14 +329,15 @@ def target_lux(
     rs: RoomState,
     role: Role,
     profile,
-    e: float,
+    w: float,
     g: float,
     tun: Tunables,
     capacity: float = 0.0,
 ) -> float:
     """Sensor-relative lux target ``T'`` for a role tier (rules 2.1, 2.5, 1.5).
 
-    ACTIVE interpolates ``lux_active_day``↔``lux_active_evening`` by E;
+    ACTIVE interpolates ``lux_active_day``↔``lux_active_evening`` by the
+    wind-down factor W (rule 2.3, D33);
     ADJACENT scales it by ``adjacent_fraction`` (capped ``adjacent_cap``);
     BACKGROUND by ``background_fraction`` (capped ``background_cap``); OFF is 0.
     The master gain scales the target (rule 2.5), clamped to ``lux_max``.
@@ -334,7 +353,7 @@ def target_lux(
         return 0.0
     day = profile.lux_active_day or tun.lux_day_frac * capacity
     evening = profile.lux_active_evening or tun.lux_evening_frac * capacity
-    active = day * (1.0 - e) + evening * e
+    active = day * (1.0 - w) + evening * w
     if role is Role.ACTIVE:
         t = active
     elif role is Role.ADJACENT:
@@ -396,7 +415,7 @@ def _band_allotments(
 def channel_outputs_for_demand(
     channels: tuple[ChannelConfig, ...],
     demand: float,
-    e: float,
+    boost_weight: float,
     photo: PhotometricModel,
     gain_mult: float,
     tun: Tunables,
@@ -406,13 +425,17 @@ def channel_outputs_for_demand(
     Per-channel lux capacity ``c_i = g_i · f_i(1) · m`` orders the band fill;
     within a band the allotted lux is shared by aesthetic ``weight`` (never the
     sensor gain, §3.1), then inverted through the flux curve to a command. The
-    boost band is gated off once ``E ≥ boost_evening_max`` (rule 4.5).
+    boost band's capacity is scaled by ``boost_weight`` (β, rule 4.5, D33): it
+    fades out across the W window below ``boost_evening_max`` and the demand
+    moves to the other bands continuously, instead of the band vanishing at
+    the threshold. The closed loop has no boost evening value (D26).
     """
+    beta = max(0.0, min(1.0, boost_weight))
     caps: dict[Band, float] = dict.fromkeys(BAND_ORDER, 0.0)
     cap_i: dict[str, float] = {}
     for ch in channels:
-        gated = ch.band is Band.BOOST and e >= tun.boost_evening_max
-        c = 0.0 if gated else photo.gain(ch.channel_id) * photo.flux(ch.channel_id, 1.0) * gain_mult
+        scale = beta if ch.band is Band.BOOST else 1.0
+        c = scale * photo.gain(ch.channel_id) * photo.flux(ch.channel_id, 1.0) * gain_mult
         cap_i[ch.channel_id] = c
         caps[ch.band] += c
 

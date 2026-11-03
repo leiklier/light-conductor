@@ -25,7 +25,7 @@ def _room(room_id: str):
 def test_away_turns_indoor_off_keeps_outdoor_background() -> None:
     """§6.4: away => indoor OFF; outdoor keeps its dusk background as presence
     simulation while away_lighting is on (occupational ignored, rule 6.5)."""
-    state = EngineState(anyone_home=False, away_lighting=True)
+    state = EngineState(anyone_home=False, away=True, away_lighting=True)
     away = modes.resolve(_room("sofakrok"), RoomState(), state, 1.0, TUN)
     assert away.off
     # A standing away hard-off respects a latch minted during away (6.4): the
@@ -39,7 +39,7 @@ def test_away_turns_indoor_off_keeps_outdoor_background() -> None:
 
 def test_away_lighting_off_darkens_outdoor() -> None:
     """§6.4: away_lighting off => outdoor rooms go dark on away too."""
-    state = EngineState(anyone_home=False, away_lighting=False)
+    state = EngineState(anyone_home=False, away=True, away_lighting=False)
     assert modes.resolve(_room("balkong"), RoomState(), state, 0.8, TUN).off
 
 
@@ -47,6 +47,14 @@ def test_none_home_fails_safe_as_home() -> None:
     """§6.4: None/unavailable home is not away."""
     state = EngineState(anyone_home=None)
     assert not modes.is_away(state)
+
+
+def test_is_away_reads_the_debounced_flag_not_the_raw_input() -> None:
+    """§6.4/D29: a raw anyone_home False is not away until the engine's debounce
+    engages it; vacation is away at once."""
+    assert not modes.is_away(EngineState(anyone_home=False))
+    assert modes.is_away(EngineState(anyone_home=False, away=True))
+    assert modes.is_away(EngineState(anyone_home=True, vacation=True))
 
 
 def test_sleep_off_except_night_path() -> None:

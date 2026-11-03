@@ -112,7 +112,7 @@ def test_mode_off_at_zero_dusk_and_unscaled_at_full() -> None:
 
 def test_away_background_is_scaled_too() -> None:
     """§6.4 presence simulation follows the same ramp (occupational ignored)."""
-    state = EngineState(anyone_home=False, away_lighting=True)
+    state = EngineState(anyone_home=False, away=True, away_lighting=True)
     res = modes.resolve(_balkong(), RoomState(occupational=True), state, 0.0, TUN, dusk=0.5)
     assert res.band_outputs == {Band.PRIMARY: 0.1}
 
@@ -428,6 +428,9 @@ def test_press_during_sleep_or_away_mints_no_declaration() -> None:
         eng, t = _dusk_engine()
         t += timedelta(seconds=10)
         eng.handle(mode_event, t)
+        if isinstance(mode_event, HomeChanged):  # away engages after its debounce (D29)
+            t = _feed(eng, TUN.outdoor_full_lux, t, n=int(eng.tun.away_debounce / 30.0))
+            assert eng.state.away
         if isinstance(mode_event, SleepChanged):
             assert _commanded(eng) == 0.0  # sleep hard-off
         else:

@@ -181,24 +181,24 @@ def test_pause_grace_holds_the_playing_level_then_steps_up() -> None:
     """§6.3a: pausing holds the playing level for tv_pause_grace, then the ON cap
     takes over — and the engine schedules the review that does it."""
     eng = _engine()
-    eng.handle(PresenceChanged("spisebord", True), at(1, 20, 0))
-    playing = eng.handle(TvChanged(TvState.PLAYING), at(1, 20, 0, 1))
+    eng.handle(PresenceChanged("spisebord", True), at(1, 18, 0))
+    playing = eng.handle(TvChanged(TvState.PLAYING), at(1, 18, 0, 1))
     assert isclose(diag(playing, "spisebord").target_output, 0.15)
 
-    paused = eng.handle(TvChanged(TvState.ON), at(1, 20, 0, 30))
+    paused = eng.handle(TvChanged(TvState.ON), at(1, 18, 0, 30))
     assert eng.state.rooms["spisebord"].role is Role.TV  # still the playing tier
     assert isclose(diag(paused, "spisebord").target_output, 0.15)
 
-    # The engine wakes itself at the expiry: once the sooner circadian tick has
-    # fired, the pause-grace review is the next thing on the calendar.
-    ticked = eng.handle(ReviewTick(), at(1, 20, 1, 0))
-    assert review(ticked) == at(1, 20, 0, 30) + timedelta(seconds=120)
+    # The engine wakes itself at the expiry: in the daytime circadian plateau
+    # (no ramp ticking) the pause-grace review is the next thing on the calendar.
+    ticked = eng.handle(ReviewTick(), at(1, 18, 1, 0))
+    assert review(ticked) == at(1, 18, 0, 30) + timedelta(seconds=120)
 
     # A rewind-length pause elapses without moving the room...
-    held = eng.handle(ReviewTick(), at(1, 20, 2, 0))
+    held = eng.handle(ReviewTick(), at(1, 18, 2, 0))
     assert isclose(diag(held, "spisebord").target_output, 0.15)
     # ...and at the grace expiry it returns to its own role, capped.
-    stepped = eng.handle(ReviewTick(), at(1, 20, 2, 31))
+    stepped = eng.handle(ReviewTick(), at(1, 18, 2, 31))
     assert eng.state.rooms["spisebord"].role is Role.ACTIVE
     assert isclose(diag(stepped, "spisebord").target_output, 0.3)
 
@@ -269,13 +269,23 @@ def test_night_path_episode_and_expiry() -> None:
 # --- §6.4: away turns the house off --------------------------------------
 
 
+def _depart(eng: Engine, t) -> list:
+    """§6.4/D29: anyone_home False, held empty past the away debounce."""
+    eng.handle(HomeChanged(False), t)
+    return eng.handle(ReviewTick(), t + timedelta(seconds=eng.tun.away_debounce))
+
+
 def test_away_turns_house_off() -> None:
-    """§6.4: anyone_home False => every managed room OFF."""
+    """§6.4: an empty house (anyone_home False, no room occupied) for
+    away_debounce => every managed room OFF."""
     eng = _engine()
     eng.handle(PresenceChanged("kjokken", True), at(1, 20, 0))
     eng.handle(PresenceChanged("sofakrok", True), at(1, 20, 0))
     eng.handle(ReviewTick(), at(1, 20, 1))
-    gone = eng.handle(HomeChanged(False), at(1, 20, 2))
+    # Everyone leaves: rooms empty, then the house reads empty.
+    eng.handle(PresenceChanged("kjokken", False), at(1, 20, 2))
+    eng.handle(PresenceChanged("sofakrok", False), at(1, 20, 2))
+    gone = _depart(eng, at(1, 20, 2))
     for room in ("kjokken", "sofakrok", "gang", "spisebord"):
         assert eng.state.rooms[room].role is Role.OFF
     assert "kjokken_taklys" in offs(gone)
@@ -318,9 +328,9 @@ def test_away_keeps_outdoor_until_away_lighting_off() -> None:
     eng = _engine()
     eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))  # balkong dusk-on
     eng.handle(ReviewTick(), at(1, 22, 1))
-    eng.handle(HomeChanged(False), at(1, 22, 2))
+    _depart(eng, at(1, 22, 2))
     assert eng.state.rooms["balkong"].channels["balkong_taklys"].on  # presence sim
-    dark = eng.handle(SetAwayLighting(False), at(1, 22, 3))
+    dark = eng.handle(SetAwayLighting(False), at(1, 22, 13))
     assert "balkong_taklys" in offs(dark)
 
 
@@ -340,8 +350,12 @@ def test_override_latches_then_releases_on_away() -> None:
     assert "kontor_taklys" not in sets(quiet)  # not fighting the manual level
     assert eng.state.rooms["kontor"].channels["kontor_taklys"].commanded_b == 0.9
 
-    # Leaving home releases the override and the hard-off wins.
-    gone = eng.handle(HomeChanged(False), at(1, 20, 4))
+    # Leaving home releases the override and the hard-off wins — once the house
+    # has read empty for the away debounce (D29); the latch stands until then.
+    eng.handle(PresenceChanged("kontor", False), at(1, 20, 4))
+    eng.handle(HomeChanged(False), at(1, 20, 4))
+    assert eng.state.rooms["kontor"].overridden
+    gone = eng.handle(ReviewTick(), at(1, 20, 4) + timedelta(seconds=eng.tun.away_debounce))
     assert not eng.state.rooms["kontor"].overridden
     assert "kontor_taklys" in offs(gone)
 
@@ -432,19 +446,19 @@ def test_away_resubmit_is_not_an_onset_edge() -> None:
     adapter re-resolves on every fallback entity change) is NOT an onset edge
     — it must not release a latch minted during away."""
     eng = _engine()
-    eng.handle(HomeChanged(False), at(1, 20, 0))  # onset: house goes dark
+    _depart(eng, at(1, 20, 0))  # onset: house goes dark
 
     # Someone the radar cannot see dials the gang wall to 50 %.
-    eng.handle(ForeignChange("gang_taklys", 0.5), at(1, 20, 1))
+    eng.handle(ForeignChange("gang_taklys", 0.5), at(1, 20, 11))
     assert eng.state.rooms["gang"].overridden
 
     # A re-submit of the standing away state: no edge, no release, no counter.
-    resub = eng.handle(HomeChanged(False), at(1, 20, 2))
+    resub = eng.handle(HomeChanged(False), at(1, 20, 12))
     assert eng.state.rooms["gang"].overridden
     assert "gang_taklys" not in sets(resub) and "gang_taklys" not in offs(resub)
 
     # Coming home keeps the (blind-room) latch too — manual control stands.
-    home = eng.handle(HomeChanged(True), at(1, 20, 3))
+    home = eng.handle(HomeChanged(True), at(1, 20, 13))
     assert eng.state.rooms["gang"].overridden
     assert "gang_taklys" not in sets(home) and "gang_taklys" not in offs(home)
 
@@ -754,12 +768,12 @@ def test_overridden_room_schedules_vacancy_release() -> None:
     """§9.2 (F2): a held override still schedules the vacancy-hold expiry, so an
     OFF-worthy room releases at hold end with no other events (not after 4 h)."""
     eng = _engine()
-    eng.handle(PresenceChanged("kontor", True), at(1, 20, 0))  # vacancy:off room, ACTIVE
-    eng.handle(ForeignChange("kontor_taklys", 0.9), at(1, 20, 1))
+    eng.handle(PresenceChanged("kontor", True), at(1, 18, 0))  # vacancy:off room, ACTIVE
+    eng.handle(ForeignChange("kontor_taklys", 0.9), at(1, 18, 1))
     assert eng.state.rooms["kontor"].overridden
-    out = eng.handle(PresenceChanged("kontor", False), at(1, 20, 2))  # vacate: 90 s hold
+    out = eng.handle(PresenceChanged("kontor", False), at(1, 18, 2))  # vacate: 90 s hold
     rev = review(out)
-    assert rev == at(1, 20, 3, 30)  # 90 s hold from 20:02, not the 4 h timeout
+    assert rev == at(1, 18, 3, 30)  # 90 s hold from 18:02, not the 4 h timeout
     eng.handle(ReviewTick(), rev)
     assert not eng.state.rooms["kontor"].overridden  # released at hold expiry
 
@@ -787,7 +801,7 @@ def test_boundary_instant_wake_enters_ramp() -> None:
     on_boundary = day.handle(ReviewTick(), at(1, 20, 0))  # E still 0.0 here
     assert review(on_boundary) == at(1, 20, 1)  # one minute into the ramp
     in_ramp = day.handle(ReviewTick(), at(1, 20, 1))  # now 0 < E < 1
-    assert review(in_ramp) == at(1, 20, 6)  # circadian_tick (300 s) cadence
+    assert review(in_ramp) == at(1, 20, 2)  # circadian_tick (60 s) cadence
 
     night = Engine(apartment(), InitialSnapshot(sleep=True))  # E_clock rules
     night.handle(ReviewTick(), at(1, 2, 0))  # boot (grace)
@@ -934,10 +948,11 @@ def test_response_mapping_end_to_end_benke() -> None:
     eng = Engine(_response_room(), None)
     eng.handle(SunElevationChanged(DAY_SUN), at(1, 18, 0))
     day = sets(eng.handle(PresenceChanged("respkj", True), at(1, 18, 1)))
-    # Primary at full (flux-space quantization lands it a hair under 1.0).
-    assert isclose(day["respkj_taklys"].level, 1.0, abs_tol=0.01)
-    # Benke reshaped to 0.3 — no longer blasting equal to the primary.
-    assert isclose(day["respkj_benke"].level, 0.3, abs_tol=1e-6)
+    # Primary at full (1.0 is always a §8.3 grid level).
+    assert day["respkj_taklys"].level == 1.0
+    # Benke reshaped to 0.3 — no longer blasting equal to the primary — rendered
+    # on the §8.3 grid within its bound max(0.01, 0.08·b).
+    assert abs(day["respkj_benke"].level - 0.3) <= 0.08 * 0.3
 
     # Evening (sun down): the boost band locks out, benke goes off.
     cmds = eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))
@@ -1031,7 +1046,7 @@ def test_occupational_balcony_does_not_defeat_away() -> None:
     eng = Engine(_balcony_apartment(), InitialSnapshot(sun_elevation=NIGHT_SUN))
     eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))
     eng.handle(OccupationalChanged("balkong", True), at(1, 22, 1))
-    gone = eng.handle(HomeChanged(False), at(1, 22, 2))
+    gone = _depart(eng, at(1, 22, 2))
     assert eng.state.rooms["stue"].role is Role.OFF
     assert "stue_taklys" in offs(gone)
 

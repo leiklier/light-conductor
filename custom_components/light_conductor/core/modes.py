@@ -46,9 +46,12 @@ class RoomResolution:
 def is_away(state: EngineState) -> bool:
     """Away/vacation predicate (rules 6.4, 6.6).
 
-    ``anyone_home is None`` fails safe as home (rule 6.4).
+    Reads the engine's DEBOUNCED away flag (D29), never the raw
+    ``anyone_home``: away engages only after ``away_debounce`` of an empty
+    house, and ``anyone_home is None`` fails safe as home (rule 6.4).
+    Vacation is not debounced.
     """
-    return state.vacation or state.anyone_home is False
+    return state.vacation or state.away
 
 
 def resolve(

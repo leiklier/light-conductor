@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import itertools
+
 from custom_components.light_conductor.core import targets
 from custom_components.light_conductor.core.model import Band, Profile, Role
 from custom_components.light_conductor.core.tunables import Tunables
@@ -45,12 +47,31 @@ def test_off_and_mode_roles_are_zero() -> None:
     )
 
 
-def test_evening_cap_clamps_high_e() -> None:
-    """§2.4: E >= threshold clamps normalized output to evening_output_cap."""
-    p = _profile()
+def test_evening_cap_is_continuous_in_w() -> None:
+    """§2.4/D33: cap(W) = 1 - W·(1 - evening_output_cap) — non-binding at W = 0,
+    the profile cap at W = 1, linear between; no step anywhere."""
+    p = _profile()  # evening_output_cap 0.3
     hot = {Band.PRIMARY: 0.8}
-    assert targets.apply_evening_cap(hot, 0.4, p, TUN) == {Band.PRIMARY: 0.8}  # below threshold
-    assert targets.apply_evening_cap(hot, 0.6, p, TUN) == {Band.PRIMARY: 0.3}  # capped
+    assert targets.apply_evening_cap(hot, 0.0, p, TUN) == {Band.PRIMARY: 0.8}
+    assert targets.apply_evening_cap(hot, 1.0, p, TUN) == {Band.PRIMARY: 0.3}
+    assert abs(targets.evening_cap(0.5, p) - 0.65) < 1e-12
+    caps = [targets.evening_cap(k / 100, p) for k in range(101)]
+    assert all(b <= a for a, b in itertools.pairwise(caps))
+    assert max(a - b for a, b in itertools.pairwise(caps)) <= 0.7 / 100 + 1e-12
+
+
+def test_cap_never_dims_an_interpolation_that_ends_at_or_below_it() -> None:
+    """D33: for evening tier <= cap (every live room) the ACTIVE interpolation
+    is always at or under cap(W) — the cap only trims what rides above it."""
+    p = Profile(
+        out_active_day={Band.PRIMARY: 1.0},
+        out_active_evening={Band.PRIMARY: 0.25},
+        evening_output_cap=0.25,
+    )
+    for k in range(101):
+        w = k / 100
+        tier = targets.role_outputs(p, Role.ACTIVE, w, TUN)[Band.PRIMARY]
+        assert tier <= targets.evening_cap(w, p) + 1e-12
 
 
 def test_peak_output() -> None:
@@ -65,49 +86,27 @@ def _boost_profile(value: float | None) -> Profile:
     return Profile(out_active_day={Band.BOOST: 0.6}, boost_evening_output=value)
 
 
-def test_boost_evening_output_drives_an_active_room_in_the_lockout() -> None:
-    """§4.5/D26: past boost_evening_max an ACTIVE room takes the explicit value
-    instead of the lockout (the bench strip the user turned on at 22:04)."""
-    outputs, unlocked = targets.apply_boost_evening_output(
-        {Band.PRIMARY: 0.3, Band.BOOST: 0.6}, 1.0, Role.ACTIVE, _boost_profile(0.35), TUN, 1.0
-    )
-    assert unlocked and outputs[Band.BOOST] == 0.35
-    assert outputs[Band.PRIMARY] == 0.3  # other bands untouched
+def test_boost_evening_value_is_active_only_opt_in_and_gain_scaled() -> None:
+    """§4.5/D26: only an ACTIVE room whose profile sets one gets an evening
+    value; it is scaled by the master gain (0 with the master off, §7.2)."""
+    assert targets.boost_evening_value(Role.ACTIVE, _boost_profile(0.35), 1.0) == 0.35
+    assert abs(targets.boost_evening_value(Role.ACTIVE, _boost_profile(0.35), 0.5) - 0.175) < 1e-9
+    assert targets.boost_evening_value(Role.ACTIVE, _boost_profile(0.35), 0.0) == 0.0
+    for role in (Role.ADJACENT, Role.BACKGROUND, Role.TV, Role.NIGHT_PATH):
+        assert targets.boost_evening_value(role, _boost_profile(0.35), 1.0) is None
+    assert targets.boost_evening_value(Role.ACTIVE, _boost_profile(None), 1.0) is None
 
 
-def test_boost_evening_output_is_scaled_by_master_gain() -> None:
-    """§4.5/§7.2 (D26): the value is exempt from the evening CAP but not from the
-    master gain — g is 0 with the master off, and no band may survive that."""
-    outputs, unlocked = targets.apply_boost_evening_output(
-        {Band.BOOST: 0.6}, 1.0, Role.ACTIVE, _boost_profile(0.35), TUN, 0.5
-    )
-    assert unlocked and abs(outputs[Band.BOOST] - 0.175) < 1e-9
-    dark, unlocked = targets.apply_boost_evening_output(
-        {Band.BOOST: 0.6}, 1.0, Role.ACTIVE, _boost_profile(0.35), TUN, 0.0
-    )
-    assert unlocked and dark[Band.BOOST] == 0.0  # master off ⇒ the strip goes out
-
-
-def test_boost_evening_output_only_inside_the_lockout_window() -> None:
-    """Below boost_evening_max the band is not locked out at all — nothing to do."""
-    outputs, unlocked = targets.apply_boost_evening_output(
-        {Band.BOOST: 0.6}, 0.4, Role.ACTIVE, _boost_profile(0.35), TUN, 1.0
-    )
-    assert not unlocked and outputs[Band.BOOST] == 0.6
-
-
-def test_boost_evening_output_is_active_only_and_opt_in() -> None:
-    """§4.5/D26: ADJACENT/BACKGROUND stay locked out, and an unset profile keeps
-    the plain lockout (D6/Q4 — the default does not change)."""
-    for role in (Role.ADJACENT, Role.BACKGROUND):
-        _out, unlocked = targets.apply_boost_evening_output(
-            {Band.BOOST: 0.6}, 1.0, role, _boost_profile(0.35), TUN, 1.0
-        )
-        assert not unlocked
-    _out, unlocked = targets.apply_boost_evening_output(
-        {Band.BOOST: 0.6}, 1.0, Role.ACTIVE, _boost_profile(None), TUN, 1.0
-    )
-    assert not unlocked
+def test_boost_weight_fades_across_a_window_ending_at_boost_evening_max() -> None:
+    """§4.5/D33: β is 1 below boost_evening_max - BOOST_FADE, 0 at and above
+    boost_evening_max (exactly beta.19's lockout there), linear between."""
+    top = TUN.boost_evening_max
+    lo = top - targets.BOOST_FADE
+    assert targets.boost_weight(0.0, TUN) == 1.0
+    assert targets.boost_weight(lo, TUN) == 1.0
+    assert abs(targets.boost_weight((lo + top) / 2, TUN) - 0.5) < 1e-12
+    assert targets.boost_weight(top, TUN) == 0.0
+    assert targets.boost_weight(1.0, TUN) == 0.0
 
 
 # --- §4.7 daylight-aware open-loop ---------------------------------------

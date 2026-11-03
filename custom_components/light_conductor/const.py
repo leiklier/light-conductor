@@ -89,6 +89,9 @@ CONF_TV_MODE = "tv_mode"
 #: Sleep onset does not release this room's override latch (§6.1/§9.2, D26).
 CONF_SLEEP_KEEPS_OVERRIDE = "sleep_keeps_override"
 CONF_HOLD_SECONDS = "hold_seconds"
+#: Per-room override of the §1.1 fallback confirmation time (D31); blank = the
+#: ``fallback_min_on`` tunable, 0 = every raw spell confirms (no provisional hold).
+CONF_FALLBACK_MIN_ON = "fallback_min_on"
 CONF_PROFILE = "profile"
 
 # --- per-channel option keys ------------------------------------------------
@@ -290,6 +293,9 @@ def build_engine_config(hass: HomeAssistant | None, options: Mapping[str, Any]) 
                 neighbours=tuple(room.get(CONF_NEIGHBOURS, ())),
                 living_group=bool(room.get(CONF_LIVING_GROUP, False)),
                 hold_seconds=room.get(CONF_HOLD_SECONDS),
+                fallback_min_on=float(room[CONF_FALLBACK_MIN_ON])
+                if room.get(CONF_FALLBACK_MIN_ON) not in (None, "")
+                else None,
                 night_path=room_id in night_path_rooms,
                 tv_mode=bool(room.get(CONF_TV_MODE, False)),
                 sleep_keeps_override=bool(room.get(CONF_SLEEP_KEEPS_OVERRIDE, False)),
@@ -337,9 +343,12 @@ EDITABLE_TUNABLES: tuple[str, ...] = (
     "trigger_hold",
     "door_close_hold",
     "presence_blind_hold",
+    "fallback_min_on",
+    "fallback_provisional_hold",
     "sun_high_deg",
     "sun_low_deg",
     "circadian_tick",
+    "dusk_ceiling",
     "evening_cap_threshold",
     "bootstrap_dispersion_max",
     "lux_stale",
@@ -351,8 +360,10 @@ EDITABLE_TUNABLES: tuple[str, ...] = (
     "calibration_dwell",
     "night_hold",
     "night_fade",
+    "night_presence_hold_max",
     "sleep_fade",
     "tv_pause_grace",
+    "away_debounce",
     "outdoor_on_threshold",
     "outdoor_on_lux",
     "outdoor_full_lux",
@@ -364,7 +375,8 @@ EDITABLE_TUNABLES: tuple[str, ...] = (
     "slew_interval",
     "slew_step_empty",
     "on_ramp_max",
-    "min_delta",
+    "quant_step",
+    "quant_rel",
     "min_write_interval",
     "max_inflight",
     "echo_window",

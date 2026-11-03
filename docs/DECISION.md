@@ -845,6 +845,386 @@ Decisions:
    bounds both adapter paths — the native transition and the software stepping
    ramp, whose step count derives from the same `ramp_seconds`.
 
+## D27. Quantize in command space on a grid dense at the dim end (beta.20)
+
+The evidence. Every dim tier in the house rendered as the 2 % dim floor:
+background 8 %, the night path's 2–5 %, TV 5/10 %, kjøkken ADJACENT ~12 %. The
+governor quantized on an absolute 0.03 **flux** grid and gated writes on a
+0.03 flux delta. On the default `b²` curve flux 0.03 is b ≈ 0.173, so every
+goal below b ≈ 0.122 rounded to flux 0 and clamped to the floor — and from a
+lamp at the floor the first level up (0.173) was a 0.0296 flux move, *under*
+the gate: a channel at 2 % could never leave it for any goal below ~25 %. A
+flux grid is coarsest exactly where the eye resolves the most (§4.3 is about
+*ramps* looking even; a *rendering* grid must look even, which flux spacing
+does not).
+
+Decision (§8.3):
+
+1. **Grid in command space**, per channel: `g_0 = dim_floor`, `g_{k+1} = g_k
+   + max(quant_step, quant_rel·g_k)`, last level 1.0. Absolute 0.01 steps
+   through the dim end (a relative step would drop below Plejd's 1/255 device
+   resolution there), 10 % relative steps — Weber-like — above 10 % output.
+   33 levels at the live `dim_floor` 0.02, ≤ 50 for any floor: write volume
+   stays bounded (a full sweep is ≤ 32 level changes). A last interior level
+   within half a step of 1.0 is absorbed into it (no 0.985 → 1.0 sliver for a
+   ramp to skip). Command space, not flux,
+   because the rendering bound is stated on the command (`|b_emitted − b_goal| ≤
+   max(0.01, 0.08·b_goal)`) and must hold on every curve: a relative flux grid
+   would halve the error on `b²` and double it on sofakrok's near-linear
+   calibrated dim end.
+2. **Sticky quantizer** (`QUANT_HOLD` 0.7): a lit channel at `c` is held while
+   the goal is within 0.7 of a local step of `c`; otherwise the goal renders to
+   its nearest level. The gate is then "emit iff the rendering is not the
+   current level" — by construction it can never strand a channel (outside the
+   band the nearest level is provably a different level) and never re-emits a
+   settled goal (the nearest level is provably inside the new band). Error ≤
+   `max(0.007, 0.07·b)`, and jitter below 0.4 step peak-to-peak — a drifting
+   own-sensor daylight factor — emits nothing. Holding on the *actual* ledger
+   value (not its grid snap) matters: seeded and adopted levels sit off the
+   grid, and a snapped hold would have let them sit up to 1.25 steps away.
+3. **Slew and ramps stay in flux space** (§8.2/§4.3) — only the rendering grid
+   moved. **CT reads the quantized level**: dim-to-warm (§5.3) and blend
+   anchoring (§5.2) are computed on the level the lamp will actually show.
+4. `min_delta` (absolute flux) is retired; `quant_step` / `quant_rel` replace
+   it in §12 and the options form. A stored `min_delta` override is ignored
+   (unknown tunable keys are skipped), which is the behaviour we want.
+
+Echo interplay. `ECHO_LEVEL_TOL` (0.03) now spans up to four adjacent dim
+levels. That is benign: every engine command records its own echo, so no match
+ever has to tell two dim levels apart, and a late or poll-repeated report of
+the *previous* dim level — the only report the overlap can confuse — is a
+stale own echo, which is correctly not latched. Residual (pre-existing): a dial
+moving a lamp by less than the tolerance is indistinguishable from an echo.
+
+Rejected: keeping the flux grid and only lowering `min_delta` (the floor
+cliff remains — at 0.01 flux the first level above 0.02 is still b = 0.1 — and
+the top end gets three times the writes); a log-flux grid (curve-dependent
+error, and the dim end collapses below device resolution); pure nearest
+rounding with no hold band (goal jitter on a level boundary re-commands every
+cycle, the D26 159-writes/h failure in a new place).
+
+## D28. The adopted level is the standing setpoint; recovery is observed, not just folded (beta.20)
+
+The evidence. (a) **The 4 h timeout never fired on a lit lamp.** Plejd's ~3 min
+true-state poll flips a lit lamp's brightness between integer and float (184
+→ 184.355, back to integer 5–80 s later). The adapter's no-op guard consumed a
+re-report only if it matched `_last_commanded` — set on the conductor's *own*
+writes — so after a user dial every flip was a fresh ForeignChange and
+`override.latch()` re-stamped `override_since` twice per poll. Diagnostics
+showed `override_since` equal to the lamp's `last_updated` in several rooms.
+(b) **Every restart latched someone anyway.** The snapshot is taken while the
+Plejd entities are unavailable, so the engine seeds every channel off and the
+ledger has no setpoint. D25's recovery fold absorbed the off → on(true level)
+report as a bare `ReviewTick` — no setpoint, no belief — and was one-shot, so
+the next poll flip latched (17:14:46 recovered → sofakrok latched 17:15:26;
+22:43:28 → kontor 22:43:33, sofakrok 22:43:54). The stale "off" belief also
+had the sofakrok estimator count its own lamp as daylight, and an open-loop
+room whose goal was 0 never turned off a lamp that came back lit. (c) A
+re-registration rewrite (`unavailable` → `unavailable`, 5 s into a restart)
+armed the recovery grace, so the real edge 23 s later fell inside the 60 s
+debounce and the off → on report landed just outside the 20 s window.
+
+Decisions (§8.4/§8.5/§9.1/§11.1):
+
+1. **The setpoint follows the adopted level.** A report classified foreign also
+   records its level as the channel's standing setpoint, so later no-op poll
+   flips are consumed. The transition-aware rule is unchanged: a dial *away*
+   from the adopted level (old = adopted, new ≠) still latches, and a dial
+   restoring a previous level (old ≠ setpoint) still latches. Wall events do
+   not move the setpoint (their adopted level may be a mid-fade HA state); the
+   engine guard below covers them.
+2. **Recovery is observed.** A recovery edge (first available report after
+   unavailable/unknown, or the first report of an unseeded channel) and the
+   one report the grace folds both set the setpoint and submit a new engine
+   event, `ObservedLevel`, which corrects the channel's belief without
+   latching. `unavailable` → `unavailable` is no longer an edge. The engine
+   re-bases `Â_filt`/`N̂` on the corrected belief at once and marks a lit
+   observation **reconcile**, so the next move converges with
+   `slew_step_empty` — the quiet reconcile §8.5/§11.1 already promised but the
+   governor never implemented (it used the room-role slew). Lit snapshot
+   seeds get the same flag.
+3. **Engine re-stamp guard.** On an already-latched room, a non-wall foreign
+   report that matches the adopted `commanded_b` (0.03) and CT (60 K) neither
+   re-stamps nor re-adopts. It is redundant with (1) on the poll path and
+   exists for the paths (1) cannot see: a wall event adopting a level the
+   setpoint does not know, a reload, a future integration. Disabled while a
+   §6.5b suspect zero is pending — the report that resolves a suspicion *is* a
+   re-statement of the preserved belief.
+
+Tolerance (review, 2026-11-03): the no-op consume used the absolute
+`ECHO_LEVEL_TOL` 0.03, which at the dim end D27 now renders is a third of the
+level — a hand nudging a 5 % TV level to 8 % was consumed and overwritten. It
+uses `min(0.03, max(2/255, 0.1·setpoint))` now; the 2/255 floor covers every
+live poll flip (max 0.754/255) and the 8-bit re-report of every grid level.
+The echo ledger and fade corridor keep 0.03 (in-flight reports, not re-reads).
+
+What did not change: the only `override.latch` call sites remain `_on_foreign`;
+a §6.5b suspect zero still never re-stamps; CT-only reports keep their beta.19
+handling (a CT change at the standing level is consumed by the adapter's
+level-only no-op guard, as before; at the engine a different CT is not a
+re-statement). The outdoor stale-zero resolution is unaffected: the poll
+re-reading the true lit level after a suspect zero is an off → on transition,
+which the no-op guard never consumes.
+
+Risk accepted: the observed transient "off" a Plejd link reports first on a
+mid-day reconnect is adopted as belief, so the engine may re-send a lit
+room's level a second before the true level arrives; the true report then
+matches that command's echo. Before, the transient was ignored and a lamp that
+genuinely came back off stayed off until something else moved.
+
+## D29. The away onset is debounced (beta.20)
+
+The evidence. presence-conductor's `anyone_home` reads off for 31–35 s after
+every HA restart — longer than the 30 s startup grace — and flaps off for
+2–7 min while the untracked second occupant is home alone (10-25
+19:58:44 → 20:01:46; 10-26 16:34:35 → 16:36:53 and 16:40:34 → 16:47:24). Each
+flap engaged away: the whole house went dark and every latch was released.
+D28 makes it worse on restarts: the engine now *knows* the lamps are lit after
+recovery, so a 35 s phantom departure would hard-off every one of them.
+
+Decision (§6.4): away mode, and with it the onset edge (hard-off + latch
+release) and the outdoor away lighting, engages only after the house has read
+empty for `away_debounce` (default 600 s, §12, options form): `anyone_home`
+False *and* no room's primary presence True. Primary presence during the
+window cancels it and the window restarts when the room empties — someone
+demonstrably in a room is someone home, whatever the phone-based aggregate
+says. The engine self-schedules the expiry; a boot with `anyone_home` False
+counts from the first event. Arrival stays instant; vacation is not debounced
+(it is a deliberate declaration, not a sensor reading). 600 s is above every
+observed flap (max 6 min 50 s) with margin, and well below any real absence
+worth lighting for.
+
+**Cancel signal, revised (review, 2026-11-03).** The first draft cancelled the
+window on primary presence only. But presence-conductor zeroes every room
+while its own `anyone_home` is off — its room occupancy was 0 during all 19
+recorded off-spells — so that clause never fired, while the raw kitchen
+sensor fired 13–26 times during the flaps with the untracked occupant home.
+The window is now also cancelled (and restarted when it ends) by **confirmed**
+fallback evidence: a raw spell that has persisted the room's
+`fallback_min_on` (D31's confirmation rule). Unconfirmed blips do not count —
+the raw kitchen sensor fired ~116 times with nobody home, and letting every
+blip cancel would keep an empty house "home" indefinitely. Replay through the
+real engine on the live options, all 19 recorded off-spells (10-25 → 11-03):
+the 10 flaps (0.2–7.9 min) are bridged by the debounce alone, with or without
+the new signal; 8 of the 9 absences ≥ 43 min engage at +10 min either way; one
+(10-27 07:12, a 9-min spisebord raw spell straddling the departure) engages
+at +18 min instead of +10; no absence is turned into "never". Residual: a
+person out of every raw sensor's view — or seen only in sub-15 s blips (10-25
+22:12: four sofakrok blips of 3.6–8.7 s in a 74-min spell) — for 10 minutes
+while presence-conductor reads the house empty still gets the house turned
+off around them; the next confirmed spell does not undo a standing away (only
+`anyone_home` does).
+
+Rejected: a longer startup grace (fixes restarts, not the daytime flaps);
+debouncing in the adapter (the window must be cancelled by room presence and
+self-scheduled, both engine facts); ignoring `anyone_home` entirely (away is
+the only thing that turns the balcony to presence simulation and darkens a
+house left with a light on).
+
+## D30. The override timeout never hands back an occupied room (beta.20)
+
+User decision (2026-11-02): manual overrides must not hand back while
+someone is still in the room. Until D28 the question barely arose, because the
+4 h timeout effectively never fired on a lit lamp (every poll flip re-stamped
+it); now that it counts from the last genuine touch, a 4 h evening on the sofa
+would end with the conductor dimming the user's chosen level to its 22:00 tier
+mid-film.
+
+Decision (§9.2): an elapsed `override_timeout` is deferred while the room is
+self-active (occupancy True, vacancy hold, trigger hold — the same
+`self_active` the FSM uses for ACTIVE) and releases at the first recompute in
+which it is not, re-entering normal control with slew ramps. No new timer:
+leaving is an occupancy event and the hold expiries are already scheduled
+(§1.3); `override_review` stops returning the elapsed deadline, which would
+otherwise have asked for an immediate review on every recompute. Blind rooms
+(no presence, no live triggers) keep the plain timeout, and every other release
+path is unchanged — the off-worthy vacancy release, the sleep/away/vacation
+onset edges (incl. `sleep_keeps_override`), the master cycle.
+
+The deferral also applies under a respected standing hard-off (a latch minted
+during sleep, still occupied at its timeout): the same rule — someone is in
+the room — and the hard-off follows the moment they leave. Rejected: a longer
+timeout (it would still fire on an occupant, just later) and resetting the
+timer on occupancy (a forgotten lamp in a busy room would never be handed
+back; deferral hands it back the first time the room empties).
+
+## D31. Raw fallback evidence lights at once; unconfirmed episodes get a provisional hold (beta.20)
+
+The evidence (recorder 10-25 → 11-03, replayed through the real `roles` code,
+80.5 h home+awake): the raw fallbacks are OR-ed with presence-conductor's room
+occupancy and dominate it — **every** replayed ACTIVE episode in kjøkken,
+spisebord, sofakrok and kontor *started* on a fallback edge; presence-conductor
+confirms 8–27 s later (median, from the last raw rise) or never (kjøkken: 85
+primary spells in nine days). The raw sensors also fire with the house empty —
+kjøkken 0.73/h, sofakrok 0.89/h (46 h of away time); kontor and spisebord never
+did — and each such blip held a room ACTIVE for the full 120 s (an EMPTY
+activity peak scales by 1.0), the kitchen bench strip included.
+
+**Correction.** The first beta.20 draft *gated* the fallback: it counted only
+after 15 s of persistence. That delayed every one of the 443 replayed
+fallback-led turn-ons by 15 s — all 83 in kontor, 53 of them into a dark room,
+where the raw sensors never blipped at all — to remove blips. The draft
+rejected the alternative below on a replay that scaled *every* EMPTY-peak hold
+by 0.3, primary-confirmed episodes included; that is not the alternative, and
+the comparison was wrong (independent review, 2026-11-03).
+
+Decision (§1.1): the fallback OR counts **at once** (beta.19). An ACTIVE
+episode that has seen no confirmed evidence gets a **provisional hold**
+`min(normal hold, fallback_provisional_hold)`, default 60 s. It is
+**confirmed** — normal holds for the rest of the episode — when the primary is
+seen True in it, or a fallback spell persists `fallback_min_on` (15 s; per-room
+override, 0 = always confirmed; dropouts ≤ `FALLBACK_BRIDGE` 2 s bridged; the
+spell is judged at its falling edge, before that edge's hold is set). The blind
+path is unchanged. One aggregate spell per room rather than per entity: three
+rooms have one fallback, and kontor's two (a mmWave with a ≥ 14 s minimum spell
+and a PIR with a ≥ 75 s pulse) agree.
+
+Replay (beta.19 → draft gate → this): turn-ons delayed 0 → 443 → **0**;
+ACTIVE dips ≤ 60 s 100 → 80 → **103**; time lit by blip episodes (no primary,
+no raw spell ≥ 15 s) 311 → 0 → **212 min**; kitchen dark-time episodes (each
+an on/off of the bench strip) 133 → 125 → 136. 60 s rather than 30 s: at 30 s
+the sofakrok short dips double (the hold then ends inside the gaps of a real
+occupant's chatter). The table is in the beta.20 PR.
+
+Not shipped: "≥ 2 rising edges within W" (rising-edge bursts within 3–20 s are
+statistically identical away and home — the onset of a blip cannot be told from
+an entry, which is exactly why the turn-on must not wait).
+
+## D32. Primary presence holds an open night-path episode (beta.20)
+
+The evidence: since the bedroom door sensor came back (10-31 22:43) the path
+opens on time, but `night_hold` — 600 s after the last trigger — ran out with
+people up: 11-02 the path faded 06:57:06 and the kitchen was lit by hand at
+06:57:37; 11-01 it went off 08:10:48 and sofakrok was lit by hand 08:19:15.
+
+Decision (§6.2): while an episode is open, primary occupancy True in any
+night-path room restarts `night_hold` (re-checked every recompute, and stamped
+at the instant such a room empties so the occupant always gets the full hold).
+Only presence-conductor's primary counts, never the raw fallbacks (the raw
+kitchen sensor was on ~91 min during one night's sleep); presence never opens
+an episode; levels stay `night_output`.
+
+Replay (the real `Engine` on the live options, 10-31 22:44 → 11-03 07:18; the
+beta.19 run reproduces the live NIGHT_PATH role spells to the second): the
+11-02 06:56:54 fade is held to sleep-off 07:05:57 (kitchen primary 06:48–06:49,
+sofakrok 06:57); the 11-01 08:10:48 fade to 09:26 (breakfast — kitchen and
+sofakrok presence throughout); 11-01 22:07 +12 min, 11-03 06:36 +10 min,
+11-02 05:57 +2 min, 10-31 23:12 +2 min. **No nocturnal (00:00–05:00) episode
+was extended** (03:46 and 04:07 unchanged). Bounded (review, 2026-11-03): presence can hold the
+episode at most `night_presence_hold_max` (120 min) past its last real night
+trigger — a stuck primary would otherwise keep the 20 % kitchen night level
+until sleep-off. Not fixed, by design: 11-01
+07:30:35 → kitchen lit by hand 07:57:19 — nobody was in a path room for the
+whole episode, and the return 20 minutes later opened no episode (no door
+edge). Holding on a confirmed (≥ 15 s) fallback spell instead (D31) changes the replay by
+seconds (+0.3 min on that episode) and is not worth the raw sensors' night
+noise.
+
+## D33. Darkness E and wind-down W are separate factors; the evening cap and boost hand-over are continuous (beta.20)
+
+User decision (2026-11-02): split "it is dark" from "it is late". One factor
+`E = max(E_sun, E_clock)` did both, and at 59° N they are hours apart: 2 Nov
+E ≥ 0.5 from ~16:09, 21 Dec from ~14:51, and E never reaches 0 at midday
+~25 Nov–17 Jan. The house went to its bedtime tier mid-afternoon — the
+kitchen at 25 % from 16:09 — because the evening cap switched on at E ≥ 0.5
+as a cliff (kitchen 0.625 → 0.25, the other rooms ~0.65 → 0.30, every room's
+`evening_output_cap` equals its `active_evening`), and the bench strip jumped
+6 % → 18 % at the same threshold when its `boost_evening_output` took over.
+
+Decision (§2.3/§2.4/§4.5):
+
+1. **E stays darkness; new `W = max(E_clock, min(E_sun, dusk_ceiling))`.**
+   The sun alone carries the wind-down only to `dusk_ceiling` (new tunable,
+   default 1.0 ⇒ W ≡ E, i.e. beta.19's *routing*; planned live value 0.4);
+   the clock carries it the rest of the way. **1.0 is not beta.19's output**
+   — see (3).
+2. **Every consumer, assigned** (grep of `circadian.`, `e >=`/`e <`,
+   `evening_factor`, `is_evening`, `last_e`, parameters named `e`):
+   - *W* — `targets.role_outputs`/`active_outputs` (ACTIVE interpolation, and
+     ADJACENT through §1.5; BACKGROUND is a fixed table): how bright a room
+     is *for the hour*. `estimator.target_lux` (closed-loop ACTIVE/ADJACENT/
+     BACKGROUND lux targets): same tier, measured. `targets.evening_cap` on
+     all three output paths: the cap is the wind-down's ceiling.
+     `targets.boost_weight` in `photometry.allocate` (open-loop tiers and mode
+     tables) and `estimator.channel_outputs_for_demand` (closed loop), plus
+     `boost_evening_output` via the same hand-over: the bench strip is task
+     light vs a cozy *late* evening, not vs darkness — cooking at 17:00 in
+     December is cooking.
+   - *E* — `ct_policy.ct_target` (§5): warm light belongs to the dark; at
+     17:00 the kitchen is bright *and* warm. `targets.outdoor_dusk_factor` and
+     `modes._outdoor` (the `outdoor_on_threshold` gate and the E = 1 plateau
+     backstop, §6.5/6.5a), `roles.step`'s occupational-presence gate (§1.10),
+     and the §6.5b arbitration through `_outdoor_dusk`: a balcony is lit
+     because it is dark outside. The engine's `evening` flag → the corridor
+     BACKGROUND gate (§1.7): a dark hallway beside a lit living room needs its
+     glow at 17:00, not from 20:00. `last_e` → the §7.3 morning drift: left on
+     E as asked; between ~25 Nov and ~17 Jan E never reaches 0 so that edge
+     does not fire, and the daily reset rests on the sleep-off edge (verified:
+     `SleepChanged(False)` calls `relax_to_neutral` in the fold).
+     `circadian.is_evening` (tests only) and `Engine.circadian_factor` stay E;
+     `Engine.wind_down_factor` and the `last_w` diagnostic are new.
+   - *Neither* — the night-path and TV PLAYING tables (§6.2/6.3) carry no
+     factor; they meet W only through the cap and boost hand-over the funnel
+     applies to every gain-scaled table.
+3. **Continuous cap** `cap(W) = (1 − W) + W·evening_output_cap` on every
+   path, the closed-loop *hold* included (a held level above the cap follows
+   it down a grid step at a time instead of waiting for a deadband
+   correction to land the whole difference). Linear because it is the same
+   line the interpolation draws from full output to the cap: a profile whose
+   evening tier is at or below its cap is never dimmed by the cap at all, and
+   the cap only trims what rides above it (master gain, closed-loop demand).
+   `evening_cap_threshold` now only gates the §1.7 corridor (it keeps its name
+   — stored options use it).
+   **Visible at any `dusk_ceiling`, 1.0 included** (independent review,
+   2026-11-03 — an earlier draft of this ADR said 1.0 kept beta.19). Every live
+   room has `evening_output_cap == active_evening`, so beta.19's cap step at
+   E = 0.5 was the evening tier arriving early, and the continuous cap removes
+   exactly that: at E = 0.5 the kitchen is 61 % instead of 25 %, sofakrok
+   (open loop) 64–67 % instead of 30 %; on 2 Nov the 25/30 % tier is reached at
+   ~17:08–17:11 (E = 1) instead of 16:09. That is the intended change — the
+   user asked for no cliffs and a brighter dusk — but it is a change. Second
+   consequence: with master gain above neutral the cap trims winter *daytime*
+   output (E never reaches 0 at midday ~25 Nov–17 Jan; 21 Dec noon E ≈
+   0.17–0.20 ⇒ cap ≈ 0.86–0.88 at `evening_output_cap` 0.25–0.3, where beta.19
+   left a ×2 boost at 100 %).
+4. **Continuous boost hand-over**: the boost band is `β·tier + (1 − β)·evening`
+   with β falling 1 → 0 across `W ∈ [boost_evening_max − 0.2,
+   boost_evening_max]`; at and above `boost_evening_max` the band is exactly
+   beta.19's (locked out, or `boost_evening_output`). The closed loop scales
+   the boost band's capacity by β.
+5. **Self-scheduling per term**: the engine ticks while `E_sun` or `E_clock`
+   is strictly inside its ramp — with the sun down E sits at 1 while W climbs
+   20:00 → 22:30, and the beta.19 test on E alone would have slept until
+   06:00. **`circadian_tick` 300 → 60 s**: with the D27 grid's 0.01 dim-end
+   steps a 5-min tick moved the bench strip two or three levels per tick on
+   the 90-min morning ramp. A property test sweeps W through the live
+   configuration (evening and morning ramps, ACTIVE/ADJACENT/BACKGROUND,
+   open-loop, plus sofakrok's closed-loop goal at gain 1 and 2) and asserts
+   ≤ 1 grid level per tick; at 300 s it fails, at 60 s it holds. Writes are
+   bounded by levels crossed (the governor emits only on a level change), not
+   by the tick. (Also fixed for the property: D27's grid had a 0.985 → 1.0
+   sliver level that a ramp skipped over; a last level within half a step of
+   1.0 is now absorbed into it — 33 levels.)
+
+Caveat for the closed loop: the deadband (§3.6) still decides *when* a
+correction lands, so a closed-loop room moves in deadband-sized corrections as
+before; what D33 guarantees is that the level it lands on (and the capped
+hold) is continuous in W.
+
+## D34. Corridor triggers ignore the closing edge (beta.20)
+
+`roles.ingest_trigger` shortened the hold to `door_close_hold` (15 s) on a
+closing edge for every room shape. Right for a door-shaped room (§1.9 — the
+bedroom door closing means you left, or shut yourself in), wrong for a
+corridor: the plan is to add the front-door contact as a gang trigger, and
+closing the front door behind you would darken the hallway 15 s later, while
+you take your shoes off. Decision (§1.7): a CORRIDOR's triggers pulse
+`trigger_hold` on opening only; the closing edge is ignored. DOOR rooms are
+unchanged; PRESENCE-shaped rooms with triggers keep the shortening (specified
+explicitly now — their presence sensing carries an occupant past the short
+hold, and a trigger there is a door into that room). Outdoor rooms never use
+triggers (§10).
+
 ## Open questions — RESOLVED (user, 2026-07-25)
 
 - **Q1 (D8):** master dimmer neutral at 50 % — confirmed (boost possible).

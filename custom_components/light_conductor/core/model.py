@@ -207,6 +207,10 @@ class RoomConfig:
     living_group: bool = False
     #: Per-room ACTIVE hold override (rule 1.3); None = tunable default.
     hold_seconds: float | None = None
+    #: Per-room override of ``fallback_min_on`` (§1.1, D31) — how long a raw
+    #: spell must persist to CONFIRM a raw-only episode (normal hold); None =
+    #: the tunable, 0 = every spell confirms (no provisional holds, beta.19).
+    fallback_min_on: float | None = None
     #: Membership in the night-path set (rule 6.2).
     night_path: bool = False
     #: Room participates in TV mode when a TV plays (rule 6.3).
@@ -270,6 +274,11 @@ class ChannelState:
     commanded_b: float = 0.0
     commanded_ct: int | None = None
     on: bool = False
+    #: The current level was not commanded by the engine but OBSERVED — seeded
+    #: lit at startup (§11.1) or reported at an availability recovery (§8.5,
+    #: D28). The next move converges with ``slew_step_empty`` ramps (the quiet
+    #: reconcile); any emitted command or adopted foreign level clears it.
+    reconcile: bool = False
 
 
 @dataclass(slots=True)
@@ -279,6 +288,16 @@ class RoomState:
     # Presence resolution (rule 1.1).
     primary: bool | None = None
     fallback: bool | None = None
+    #: Start of the fallback's current on-spell, with dropouts of at most
+    #: ``FALLBACK_BRIDGE`` bridged (rule 1.1 persistence, D31). ``None`` when
+    #: the fallback has not been on.
+    fallback_on_since: datetime | None = None
+    #: When the fallback last fell (bridging reference, rule 1.1, D31).
+    fallback_off_at: datetime | None = None
+    #: The current ACTIVE episode has confirmed evidence (rule 1.1, D31):
+    #: primary presence seen, or a raw spell persisted ``fallback_min_on``.
+    #: Unconfirmed raw-only episodes get the provisional hold.
+    episode_confirmed: bool = False
     #: When the primary went unavailable (None); drives presence_blind_hold.
     primary_blind_since: datetime | None = None
     #: Last definitive resolved occupancy (held while blind, rule 1.1/1.8).
@@ -327,7 +346,18 @@ class EngineState:
     sun_elevation: float | None = None
     # Modes (rule 6).
     sleep: bool = False
+    #: Raw home presence as last reported (rule 6.4). The engine acts on the
+    #: DEBOUNCED ``away`` below, never on this directly.
     anyone_home: bool | None = None
+    #: Away mode engaged (rule 6.4, D29): ``anyone_home`` has been False with no
+    #: room's primary presence True for ``away_debounce``. Cleared at once by
+    #: any non-False ``anyone_home`` (arrival is instant).
+    away: bool = False
+    #: Start of the running away-debounce window (rule 6.4, D29) — the later of
+    #: the ``anyone_home`` False edge (or boot) and the end of the last primary
+    #: presence. ``None`` when no window runs (home, already away, or a room is
+    #: occupied right now).
+    away_pending_since: datetime | None = None
     vacation: bool = False
     #: Outdoor presence-simulation while away (rule 6.4, §10 switch; default on).
     away_lighting: bool = True
@@ -339,6 +369,9 @@ class EngineState:
     tv_hold_until: datetime | None = None
     night_active: bool = False
     night_hold_until: datetime | None = None
+    #: The open episode's last REAL night trigger (§6.2, D32): presence may
+    #: hold the episode at most ``night_presence_hold_max`` past it.
+    night_trigger_at: datetime | None = None
     # Master gain (rule 7).
     master_on: bool = True
     master_pct: float = 50.0
@@ -346,6 +379,9 @@ class EngineState:
     #: edge-triggered on the E>0 -> E==0 morning transition, so booting at
     #: midday never clobbers a restored gain. ``None`` until the first review.
     last_e: float | None = None
+    #: Wind-down factor W at the previous recompute (rule 2.3, D33) —
+    #: diagnostics only (never a recorded attribute).
+    last_w: float | None = None
     started: bool = False
     start_at: datetime | None = None
     rooms: dict[str, RoomState] = field(default_factory=dict)
@@ -468,7 +504,7 @@ class EstimatorState:
     daylight_applied: float | None = None
     #: Latched §4.7 daylight factor held steady while a shadow observation
     #: settles: N̂-driven damping would otherwise nudge the open-loop output by
-    #: sub-min_delta amounts each tick, re-commanding and disrupting the
+    #: sub-step amounts each tick, re-commanding and disrupting the
     #: first-night bootstrap measurement. ``None`` until the first daylight scale.
     daylight_latch: float | None = None
 

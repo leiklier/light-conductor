@@ -16,10 +16,22 @@ What it does:
   sensor that actually sees the sky; each room sets the daylight level it calls
   "full".
 - **Circadian shaping** — targets and color temperature drift continuously
-  toward cozy warm evenings; no hard clock steps.
+  toward cozy warm evenings; no hard clock steps. "Dark" and "late" are
+  separate: color temperature follows the dark, brightness winds down with
+  the hour, and `dusk_ceiling` (Options → Tunables; 1.0 keeps them together)
+  sets how far sunset alone may dim the house — at 0.4 a November 17:00 is
+  warm but still bright, and the evening tier arrives on the 20:00–22:30
+  clock ramp. Since beta.20 the evening cap has no step: even at 1.0 the
+  house now eases down through dusk (e.g. the kitchen reaches its 25 %
+  evening level around 17:10 on 2 Nov instead of dropping to it at 16:09).
 - **Follow-me with room personalities** — living-area rooms make subtle
   adjustments and never go dark while the area is in use; utility rooms turn
-  fully off after vacancy.
+  fully off after vacancy. A room's raw fallback sensors (mmWave/PIR next to
+  presence-conductor) still light it the instant they fire, but a visit they
+  alone report — never confirmed by presence-conductor or by a sensor staying
+  on for `fallback_min_on` (15 s) — lets the room go after 60 s
+  (`fallback_provisional_hold`) instead of the full hold, so their stray
+  blips no longer keep rooms lit.
 - **Master gain dimmer** — one HomeKit dimmer scales the whole automation
   relative to what it would do on its own.
 - **Night path, TV mode, away-off, outdoor room** — built in. TV mode is
@@ -27,12 +39,17 @@ What it does:
   switched on) only *caps* it, and a pause grace means a rewind never walks the
   lights up and back down. A balcony can read a lux sensor (even one an indoor
   room already uses, e.g. at the window) and ease in as the light actually
-  goes, instead of at a sun-ramp threshold.
+  goes, instead of at a sun-ramp threshold. Away engages only after the house
+  has read empty — no one home *and* no room occupied — for `away_debounce`
+  (10 min by default, under Options → Tunables), so a presence flap or the
+  ~35 s after a restart never darkens an occupied home; coming home is instant.
 - **Calibrated photometry** — a one-button night sweep measures each lamp's
   lux gain and dimming curve at the room's sensor.
 - **Manual control is respected** — any wall rotary, HomeKit, or voice change
   latches a per-room override; the conductor backs off until observed vacancy,
-  a mode onset (sleep or away *engaging*), or a timeout. A change made while
+  a mode onset (sleep or away *engaging*), or a timeout (4 h after your last
+  touch — and never while someone is still in the room: it waits until the
+  room empties). A change made while
   sleep or away already stands — the 03:00 reading light — is respected
   outright until the timeout; modes win once, at their edge, and never fight
   the hand on the dial. A room may opt out of even that one edge for sleep

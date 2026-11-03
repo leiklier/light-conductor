@@ -29,6 +29,10 @@ DOC_ROWS: dict[str, tuple[tuple[str, ...], tuple[object, ...]]] = {
     "living_memory": (("living_memory",), (900.0,)),
     "trigger_hold / door_close_hold": (("trigger_hold", "door_close_hold"), (300.0, 15.0)),
     "presence_blind_hold": (("presence_blind_hold",), (120.0,)),
+    "fallback_min_on / fallback_provisional_hold": (
+        ("fallback_min_on", "fallback_provisional_hold"),
+        (15.0, 60.0),
+    ),
     "sun_high_deg / sun_low_deg": (("sun_high_deg", "sun_low_deg"), (10.0, -4.0)),
     "evening_start / evening_full": (
         ("evening_start_min", "evening_full_min"),
@@ -38,7 +42,8 @@ DOC_ROWS: dict[str, tuple[tuple[str, ...], tuple[object, ...]]] = {
         ("morning_start_min", "morning_full_min"),
         (6 * 60, 7 * 60 + 30),
     ),
-    "circadian_tick": (("circadian_tick",), (300.0,)),
+    "circadian_tick": (("circadian_tick",), (60.0,)),
+    "dusk_ceiling": (("dusk_ceiling",), (1.0,)),
     "evening_output_cap": (("evening_output_cap",), (0.3,)),
     "write_blank": (("write_blank",), (5.0,)),
     "tau_lux_up / tau_lux_down": (("tau_lux_up", "tau_lux_down"), (30.0, 60.0)),
@@ -79,6 +84,8 @@ DOC_ROWS: dict[str, tuple[tuple[str, ...], tuple[object, ...]]] = {
         (4.0, 600.0, 10.0),
     ),
     "tv_pause_grace": (("tv_pause_grace",), (120.0,)),
+    "night_presence_hold_max": (("night_presence_hold_max",), (7200.0,)),
+    "away_debounce": (("away_debounce",), (600.0,)),
     "outdoor_on_threshold": (("outdoor_on_threshold",), (0.7,)),
     "outdoor_on_lux / outdoor_full_lux": (("outdoor_on_lux", "outdoor_full_lux"), (15.0, 2.0)),
     "outdoor_presence_factor": (("outdoor_presence_factor",), (0.5,)),
@@ -89,9 +96,10 @@ DOC_ROWS: dict[str, tuple[tuple[str, ...], tuple[object, ...]]] = {
         (0.1, 1.0, 0.25),
     ),
     "on_ramp_max": (("on_ramp_max",), (3.0,)),
-    "min_delta / min_write_interval / max_inflight": (
-        ("min_delta", "min_write_interval", "max_inflight"),
-        (0.03, 1.0, 3),
+    "quant_step / quant_rel": (("quant_step", "quant_rel"), (0.01, 0.10)),
+    "min_write_interval / max_inflight": (
+        ("min_write_interval", "max_inflight"),
+        (1.0, 3),
     ),
     "echo_window": (("echo_window",), (10.0,)),
     "override_timeout": (("override_timeout",), (4 * 3600.0,)),
@@ -112,7 +120,7 @@ def test_every_field_is_documented() -> None:
     """No stray tunable exists that §12 does not describe (evening_cap_threshold
     is the one deliberate addition, tabled in the same PR)."""
     documented = {f for _, (fields, _d) in DOC_ROWS.items() for f in fields}
-    documented.add("evening_cap_threshold")  # §2.4 gap, added to the table
+    documented.add("evening_cap_threshold")  # §1.7 corridor gate, tabled separately
     assert set(Tunables().__dataclass_fields__) == documented
 
 

@@ -55,6 +55,7 @@ from .const import (
     CONF_DAYLIGHT_FULL,
     CONF_DAYLIGHT_REFERENCE,
     CONF_EVENING_CAP,
+    CONF_FALLBACK_MIN_ON,
     CONF_HOLD_SECONDS,
     CONF_LIVING_GROUP,
     CONF_LUX_ACTIVE_DAY,
@@ -113,9 +114,12 @@ _TUNABLE_UI: dict[str, tuple[float, float, float]] = {
     "trigger_hold": (10, 1800, 10),
     "door_close_hold": (0, 120, 1),
     "presence_blind_hold": (10, 600, 10),
+    "fallback_min_on": (0, 120, 1),
+    "fallback_provisional_hold": (0, 600, 5),
     "sun_high_deg": (-10, 30, 1),
     "sun_low_deg": (-20, 10, 1),
     "circadian_tick": (30, 900, 30),
+    "dusk_ceiling": (0, 1, 0.05),
     "evening_cap_threshold": (0, 1, 0.05),
     "bootstrap_dispersion_max": (1, 10, 0.5),
     "lux_stale": (30, 600, 10),
@@ -126,7 +130,9 @@ _TUNABLE_UI: dict[str, tuple[float, float, float]] = {
     "daylight_full": (20, 1000, 10),
     "night_hold": (60, 1800, 30),
     "tv_pause_grace": (0, 900, 10),
+    "away_debounce": (0, 3600, 30),
     "night_fade": (0, 60, 1),
+    "night_presence_hold_max": (0, 21600, 300),
     "sleep_fade": (0, 60, 1),
     "outdoor_on_threshold": (0, 1, 0.05),
     "outdoor_on_lux": (1, 200, 1),
@@ -138,7 +144,8 @@ _TUNABLE_UI: dict[str, tuple[float, float, float]] = {
     "slew_interval": (0.5, 5, 0.5),
     "slew_step_empty": (0.05, 1, 0.05),
     "on_ramp_max": (0, 30, 0.5),
-    "min_delta": (0.01, 0.2, 0.01),
+    "quant_step": (0.001, 0.2, 0.001),
+    "quant_rel": (0.01, 0.5, 0.01),
     "min_write_interval": (0.5, 5, 0.5),
     "max_inflight": (1, 8, 1),
     "echo_window": (2, 30, 1),
@@ -527,6 +534,12 @@ class LightConductorOptionsFlow(OptionsFlow):
                 updated[CONF_HOLD_SECONDS] = user_input[CONF_HOLD_SECONDS]
             else:
                 updated.pop(CONF_HOLD_SECONDS, None)  # blank clears the room override
+            # Fallback confirmation override (§1.1, D31): 0 is a real value
+            # (always confirmed) — only a blank clears it back to the tunable.
+            if user_input.get(CONF_FALLBACK_MIN_ON) not in (None, ""):
+                updated[CONF_FALLBACK_MIN_ON] = user_input[CONF_FALLBACK_MIN_ON]
+            else:
+                updated.pop(CONF_FALLBACK_MIN_ON, None)
             profile = dict(room.get(CONF_PROFILE, _default_profile()))
             for key in (
                 CONF_VACANCY,
@@ -580,6 +593,11 @@ class LightConductorOptionsFlow(OptionsFlow):
                 _opt(CONF_PRESENCE_PRIMARY, room): _entity("binary_sensor", "occupancy"),
                 _opt(CONF_ACTIVITY_SENSOR, room): _entity("sensor"),
                 _opt(CONF_OCCUPANCY_FALLBACK, room): _entities(["binary_sensor"]),
+                # §1.1 (D31): seconds a raw fallback spell must persist to
+                # confirm an episode; blank ⇒ the tunable, 0 ⇒ always confirmed.
+                _opt(CONF_FALLBACK_MIN_ON, room): NumberSelector(
+                    NumberSelectorConfig(min=0, max=120, step=1, mode=NumberSelectorMode.BOX)
+                ),
                 _opt(CONF_NEIGHBOURS, room): _select_multi(
                     [r for r in self._room_ids() if r != self._room_id]
                 ),

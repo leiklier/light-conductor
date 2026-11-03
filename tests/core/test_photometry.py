@@ -60,45 +60,53 @@ def _channels() -> tuple[ChannelConfig, ...]:
 
 def test_allocation_maps_bands_to_channels() -> None:
     """§4.6: each channel in a band takes that band's tier output."""
-    out = allocate(_channels(), {Band.ACCENT: 0.4, Band.PRIMARY: 0.5, Band.BOOST: 0.6}, 0.0, TUN)
+    out = allocate(_channels(), {Band.ACCENT: 0.4, Band.PRIMARY: 0.5, Band.BOOST: 0.6}, 1.0, TUN)
     assert out == {"acc": 0.4, "prim": 0.5, "boost": 0.6}
 
 
 def test_boost_band_evening_lockout() -> None:
-    """§4.5: boost is gated off once E >= boost_evening_max (benke evening off)."""
+    """§4.5/D33: boost_weight β = 0 (W >= boost_evening_max) locks the boost band
+    out; accent and primary are untouched."""
     bands = {Band.ACCENT: 0.4, Band.PRIMARY: 0.5, Band.BOOST: 0.6}
-    lit = allocate(_channels(), bands, 0.49, TUN)
-    assert lit["boost"] == 0.6  # just below the gate
-    off = allocate(_channels(), bands, 0.5, TUN)
+    lit = allocate(_channels(), bands, 1.0, TUN)
+    assert lit["boost"] == 0.6
+    off = allocate(_channels(), bands, 0.0, TUN)
     assert off["boost"] == 0.0  # gated; accent + primary survive
     assert off["acc"] == 0.4 and off["prim"] == 0.5
 
 
-def test_boost_unlocked_survives_the_evening_gate() -> None:
-    """§4.5/D26: with boost_unlocked the caller has already put an explicit
-    evening value in the band — the lockout must not re-zero it."""
-    bands = {Band.ACCENT: 0.4, Band.PRIMARY: 0.5, Band.BOOST: 0.35}
-    out = allocate(_channels(), bands, 0.8, TUN, boost_unlocked=True)
+def test_boost_hand_over_is_a_blend() -> None:
+    """§4.5/D33: between the two ends the band is β·tier + (1 - β)·evening."""
+    bands = {Band.BOOST: 0.6}
+    assert isclose(allocate(_channels(), bands, 0.25, TUN)["boost"], 0.15)  # lockout fade
+    out = allocate(_channels(), bands, 0.25, TUN, boost_evening=0.85)
+    assert isclose(out["boost"], 0.25 * 0.6 + 0.75 * 0.85)
+
+
+def test_boost_evening_value_survives_the_lockout() -> None:
+    """§4.5/D26: an explicit evening value is what the band takes at β = 0."""
+    bands = {Band.ACCENT: 0.4, Band.PRIMARY: 0.5, Band.BOOST: 0.6}
+    out = allocate(_channels(), bands, 0.0, TUN, boost_evening=0.35)
     assert out["boost"] == 0.35
     assert out["acc"] == 0.4 and out["prim"] == 0.5
     # The default is unchanged: locked out.
-    assert allocate(_channels(), bands, 0.8, TUN)["boost"] == 0.0
+    assert allocate(_channels(), bands, 0.0, TUN)["boost"] == 0.0
 
 
-def test_boost_unlocked_still_goes_through_the_response_mapping() -> None:
-    """§4.5/D26: the unlocked value is a BAND output — weight share and the
+def test_boost_evening_value_still_goes_through_the_response_mapping() -> None:
+    """§4.5/D26: the evening value is a BAND output — weight share and the
     affine response mapping still apply (the benke curve 0.8*out - 0.5)."""
     channels = (
         ChannelConfig("benke", band=Band.BOOST, response_slope=0.8, response_offset=-0.5),
         ChannelConfig("benke_half", band=Band.BOOST, weight=0.5),
     )
-    out = allocate(channels, {Band.BOOST: 1.0}, 0.8, TUN, boost_unlocked=True)
+    out = allocate(channels, {Band.BOOST: 0.2}, 0.0, TUN, boost_evening=1.0)
     assert isclose(out["benke"], 0.3)  # 0.8 * 1.0 - 0.5
     assert isclose(out["benke_half"], 0.5)  # half weight of the heaviest
 
 
 def test_allocation_clamps_to_unit() -> None:
-    out = allocate(_channels(), {Band.ACCENT: 1.5}, 0.0, TUN)
+    out = allocate(_channels(), {Band.ACCENT: 1.5}, 1.0, TUN)
     assert out["acc"] == 1.0
 
 
@@ -109,7 +117,7 @@ def test_within_band_weight_sharing() -> None:
         ChannelConfig("a", band=Band.ACCENT, weight=1.0, gain=50.0),  # huge gain, equal weight
         ChannelConfig("b", band=Band.ACCENT, weight=0.5, gain=1.0),
     )
-    out = allocate(channels, {Band.ACCENT: 0.6}, 0.0, TUN)
+    out = allocate(channels, {Band.ACCENT: 0.6}, 1.0, TUN)
     assert out["a"] == 0.6  # heaviest -> full band output (gain is ignored)
     assert out["b"] == 0.3  # half the weight -> half
 
@@ -118,10 +126,10 @@ def test_response_mapping_benke_like_channel() -> None:
     """§4.5: an affine response mapping (slope 0.8, offset -0.5) reshapes a lone
     boost channel - the normalized legacy benke curve 0.8*base - 0.5."""
     ch = (ChannelConfig("benke", band=Band.BOOST, response_slope=0.8, response_offset=-0.5),)
-    assert isclose(allocate(ch, {Band.BOOST: 1.0}, 0.0, TUN)["benke"], 0.3)
-    assert allocate(ch, {Band.BOOST: 0.6}, 0.0, TUN)["benke"] == 0.0  # 0.8*0.6-0.5<0 clamps
-    assert allocate(ch, {Band.BOOST: 0.45}, 0.0, TUN)["benke"] == 0.0
-    assert allocate(ch, {Band.BOOST: 0.0}, 0.0, TUN)["benke"] == 0.0  # zero stays zero
+    assert isclose(allocate(ch, {Band.BOOST: 1.0}, 1.0, TUN)["benke"], 0.3)
+    assert allocate(ch, {Band.BOOST: 0.6}, 1.0, TUN)["benke"] == 0.0  # 0.8*0.6-0.5<0 clamps
+    assert allocate(ch, {Band.BOOST: 0.45}, 1.0, TUN)["benke"] == 0.0
+    assert allocate(ch, {Band.BOOST: 0.0}, 1.0, TUN)["benke"] == 0.0  # zero stays zero
 
 
 def test_response_mapping_positive_offset_never_lights_off_band() -> None:
@@ -131,12 +139,12 @@ def test_response_mapping_positive_offset_never_lights_off_band() -> None:
     (slope 0.8, offset +0.2 gives the brief's 0.28 at band 0.1; slope 1 there
     would give 0.3 - the brief's "slope 1" label is an arithmetic slip.)"""
     ch = (ChannelConfig("c", band=Band.PRIMARY, response_slope=0.8, response_offset=0.2),)
-    assert allocate(ch, {Band.PRIMARY: 0.0}, 0.0, TUN)["c"] == 0.0  # zero stays zero
-    assert isclose(allocate(ch, {Band.PRIMARY: 0.1}, 0.0, TUN)["c"], 0.28)
-    assert isclose(allocate(ch, {Band.PRIMARY: 1.0}, 0.0, TUN)["c"], 1.0)  # 0.8+0.2
+    assert allocate(ch, {Band.PRIMARY: 0.0}, 1.0, TUN)["c"] == 0.0  # zero stays zero
+    assert isclose(allocate(ch, {Band.PRIMARY: 0.1}, 1.0, TUN)["c"], 0.28)
+    assert isclose(allocate(ch, {Band.PRIMARY: 1.0}, 1.0, TUN)["c"], 1.0)  # 0.8+0.2
     # An affine mapping that overshoots unit is clamped to 1.
     hot = (ChannelConfig("h", band=Band.PRIMARY, response_slope=1.0, response_offset=0.5),)
-    assert allocate(hot, {Band.PRIMARY: 0.8}, 0.0, TUN)["h"] == 1.0  # 1.3 clamps
+    assert allocate(hot, {Band.PRIMARY: 0.8}, 1.0, TUN)["h"] == 1.0  # 1.3 clamps
 
 
 def test_response_mapping_defaults_are_a_no_op() -> None:
@@ -154,14 +162,14 @@ def test_response_mapping_defaults_are_a_no_op() -> None:
         for c in plain
     )
     bands = {Band.ACCENT: 0.6, Band.PRIMARY: 0.5, Band.BOOST: 0.7}
-    assert allocate(plain, bands, 0.0, TUN) == allocate(explicit, bands, 0.0, TUN)
+    assert allocate(plain, bands, 1.0, TUN) == allocate(explicit, bands, 1.0, TUN)
 
 
 def test_response_mapping_after_evening_lockout() -> None:
     """§4.5: the evening lockout zeroes a boost channel BEFORE the mapping runs,
     so even a positive offset cannot resurrect it past boost_evening_max."""
     ch = (ChannelConfig("boost", band=Band.BOOST, response_slope=1.0, response_offset=0.5),)
-    lit = allocate(ch, {Band.BOOST: 0.6}, 0.0, TUN)
+    lit = allocate(ch, {Band.BOOST: 0.6}, 1.0, TUN)
     assert isclose(lit["boost"], 1.0)  # 0.6+0.5 clamps high while lit
-    off = allocate(ch, {Band.BOOST: 0.6}, TUN.boost_evening_max, TUN)
+    off = allocate(ch, {Band.BOOST: 0.6}, 0.0, TUN)  # β = 0: past boost_evening_max
     assert off["boost"] == 0.0  # locked out -> out=0 -> mapping skipped

@@ -1,10 +1,19 @@
-"""Circadian factor E (ENGINE_SPEC §2.3).
+"""Circadian factors E (darkness) and W (wind-down) (ENGINE_SPEC §2.3, D33).
 
-``E in [0, 1]`` (0 = full day, 1 = full evening) = ``max(E_sun, E_clock)``.
-Pure function of (sun elevation, local time-of-day) — both arrive through
-events, so this stays deterministic (rule 0). No hard steps: E is continuous
-and the engine evaluates it on the coarse ``circadian_tick`` schedule, so it
-never jumps on its own; the slew limiter (§8.2) bounds any residual step.
+``E in [0, 1]`` (0 = full day, 1 = full evening) = ``max(E_sun, E_clock)`` —
+"it is dark". ``W = max(E_clock, min(E_sun, dusk_ceiling))`` — "it is late":
+the sun alone can only carry the wind-down to ``dusk_ceiling``, the clock
+carries it the rest of the way. With ``dusk_ceiling`` 1.0 (default) W ≡ E —
+the same factor everywhere, though the now-continuous evening cap (§2.4)
+still makes dusk brighter than beta.19 (D33). In
+a Nordic winter the two are hours apart (2 Nov: E ≥ 0.5 from ~16:09; 21 Dec
+from ~14:51) and one factor doing both jobs dimmed the house to its bedtime
+tier mid-afternoon.
+
+Pure functions of (sun elevation, local time-of-day) — both arrive through
+events, so this stays deterministic (rule 0). No hard steps: both factors are
+continuous and the engine re-evaluates them every ``circadian_tick`` while
+either term is inside a ramp (:func:`ramping`).
 
 Feature-module discipline: imports only :mod:`tunables`.
 """
@@ -62,6 +71,29 @@ def factor(elevation_deg: float | None, now: datetime, tun: Tunables) -> float:
     return max(e_sun(elevation_deg, tun), e_clock(now, tun))
 
 
+def wind_down(elevation_deg: float | None, now: datetime, tun: Tunables) -> float:
+    """The wind-down factor W = max(E_clock, min(E_sun, dusk_ceiling)) (rule 2.3, D33).
+
+    W drives everything that means "it is late": the day<->evening tier
+    interpolation (ACTIVE/ADJACENT derivation, closed-loop lux targets), the
+    evening cap and the boost evening lockout. E keeps everything that means
+    "it is dark" (CT, outdoor gates, the corridor evening gate).
+    """
+    return max(e_clock(now, tun), min(e_sun(elevation_deg, tun), tun.dusk_ceiling))
+
+
+def ramping(elevation_deg: float | None, now: datetime, tun: Tunables) -> bool:
+    """Whether E or W is inside a ramp — the engine ticks while it is (rule 2.3).
+
+    Either term strictly between 0 and 1. Checked per TERM, not on E: with the
+    sun down E sits at 1 while W still climbs 20:00 -> 22:30 on the clock, and
+    a plateau test on E alone would sleep until 06:00 (D33).
+    """
+    c = e_clock(now, tun)
+    s = e_sun(elevation_deg, tun)
+    return 0.0 < c < 1.0 or 0.0 < s < 1.0
+
+
 def is_evening(elevation_deg: float | None, now: datetime, tun: Tunables) -> bool:
-    """Whether E has crossed the evening threshold (rules 1.7, 2.4)."""
+    """Whether E (darkness) has crossed ``evening_cap_threshold`` (rule 1.7)."""
     return factor(elevation_deg, now, tun) >= tun.evening_cap_threshold

@@ -203,23 +203,29 @@ def test_band_fill_orders_accent_primary_boost() -> None:
     )
     photo = _Photo({"acc": 100.0, "pri": 100.0, "bst": 100.0})
     # Low demand: only accent engages.
-    low = estimator.channel_outputs_for_demand(chans, 40.0, 0.0, photo, 1.0, TUN)
+    low = estimator.channel_outputs_for_demand(chans, 40.0, 1.0, photo, 1.0, TUN)
     assert low["acc"] > 0.0 and low["pri"] < 0.05 and low["bst"] == 0.0
     # High demand: all three engage.
-    high = estimator.channel_outputs_for_demand(chans, 270.0, 0.0, photo, 1.0, TUN)
+    high = estimator.channel_outputs_for_demand(chans, 270.0, 1.0, photo, 1.0, TUN)
     assert high["acc"] > 0.5 and high["pri"] > 0.5 and high["bst"] > 0.0
 
 
 def test_band_fill_boost_evening_lockout() -> None:
-    """§4.5: the boost band is gated off once E >= boost_evening_max."""
+    """§4.5/D33: the boost band's capacity fades with its hand-over weight β —
+    gone at β = 0 (W >= boost_evening_max), half at β = 0.5, and the demand
+    moves to the other bands continuously."""
     chans = (
         ChannelConfig("pri", band=Band.PRIMARY, fixed_ct=2700, gain=100.0),
         ChannelConfig("bst", band=Band.BOOST, fixed_ct=2700, gain=100.0),
     )
     photo = _Photo({"pri": 100.0, "bst": 100.0})
-    out = estimator.channel_outputs_for_demand(chans, 300.0, 0.9, photo, 1.0, TUN)
+    out = estimator.channel_outputs_for_demand(chans, 300.0, 0.0, photo, 1.0, TUN)
     assert out["bst"] == 0.0  # locked out in the evening
     assert out["pri"] > 0.9  # primary carries what it can
+    half = estimator.channel_outputs_for_demand(chans, 300.0, 0.5, photo, 1.0, TUN)
+    full = estimator.channel_outputs_for_demand(chans, 300.0, 1.0, photo, 1.0, TUN)
+    assert 0.0 < 100.0 * half["bst"] ** 2 <= 50.0 + 1e-9  # at most half its capacity
+    assert half["bst"] < full["bst"]
 
 
 def test_band_fill_within_band_by_weight_not_gain() -> None:
@@ -232,7 +238,7 @@ def test_band_fill_within_band_by_weight_not_gain() -> None:
         ChannelConfig("far", band=Band.PRIMARY, fixed_ct=2700, gain=20.0, weight=1.0),
     )
     photo = _Photo({"near": 200.0, "far": 20.0})
-    out = estimator.channel_outputs_for_demand(chans, 40.0, 0.0, photo, 1.0, TUN)
+    out = estimator.channel_outputs_for_demand(chans, 40.0, 1.0, photo, 1.0, TUN)
     # Each should produce ~20 lx; the near (high-gain) channel needs less command.
     assert out["near"] < out["far"]
     assert abs(200.0 * out["near"] ** 2 - 20.0 * out["far"] ** 2) < 1.0
@@ -510,5 +516,5 @@ def test_band_fill_zero_demand_is_all_off() -> None:
     """§4.5: zero demand (natural light already sufficient) leaves all bands 0."""
     chans = (ChannelConfig("c", band=Band.PRIMARY, fixed_ct=2700, gain=100.0),)
     photo = _Photo({"c": 100.0})
-    out = estimator.channel_outputs_for_demand(chans, 0.0, 0.0, photo, 1.0, TUN)
+    out = estimator.channel_outputs_for_demand(chans, 0.0, 1.0, photo, 1.0, TUN)
     assert out == {"c": 0.0}

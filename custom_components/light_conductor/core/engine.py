@@ -42,6 +42,7 @@ from .events import (
     MasterGainChanged,
     MasterPowerChanged,
     NightTriggerFired,
+    ObservedLevel,
     OccupationalChanged,
     PresenceChanged,
     ReviewTick,
@@ -82,9 +83,18 @@ SUSPECT_ZERO_TTL = 360.0
 #: is the poll re-reading our own level; beyond it, it is a user action.
 SUSPECT_LEVEL_TOL = 0.03
 
+#: A foreign report on an ALREADY-latched room that re-states the level the
+#: room adopted (within these tolerances — the adapter's ECHO_LEVEL_TOL /
+#: ECHO_CT_TOL vocabulary) is not new user intent and never re-stamps
+#: ``override_since`` (§9.1, D28): Plejd's ~3-min true-state poll flips a lit
+#: lamp between integer and float brightness, and every flip re-stamping the
+#: latch kept the 4 h override_timeout from ever firing while a lamp was lit.
+BELIEF_LEVEL_TOL = 0.03
+BELIEF_CT_TOL = 60
+
 #: Hysteresis on a REFERENCE-sourced §4.7 daylight factor (D26). N̂ moves
 #: continuously under drifting cloud, and the factor feeds the output directly,
-#: so every wobble crossed the §8.3 min_delta and re-commanded the room —
+#: so every wobble crossed the §8.3 write gate and re-commanded the room —
 #: ~159 writes/h per channel on a cloudy hour, against a mesh that manages ~7
 #: writes/s for the whole house. A new factor is adopted only once it differs
 #: from the one in force by this much (or reaches an endpoint, which must always
@@ -152,6 +162,9 @@ class Engine:
                     commanded_b=max(0.0, min(1.0, level)),
                     commanded_ct=ct,
                     on=level > 0.0,
+                    # A lit seed is observed, not commanded: its first move after
+                    # the startup grace is the quiet reconcile (rule 11.1).
+                    reconcile=level > 0.0,
                 )
             s.rooms[room.room_id] = rs
 
@@ -161,7 +174,12 @@ class Engine:
         return self.state.rooms[room_id]
 
     def circadian_factor(self, now: datetime) -> float:
+        """E — "it is dark" (rule 2.3)."""
         return circadian.factor(self.state.sun_elevation, now, self.tun)
+
+    def wind_down_factor(self, now: datetime) -> float:
+        """W — "it is late" (rule 2.3, D33)."""
+        return circadian.wind_down(self.state.sun_elevation, now, self.tun)
 
     # -- dispatch -----------------------------------------------------------
 
@@ -177,13 +195,26 @@ class Engine:
         match event:
             case PresenceChanged():
                 if (rs := s.rooms.get(event.room_id)) is not None:
-                    roles.ingest_presence(rs, event.primary, event.fallback, now)
+                    if rs.primary is True and event.primary is not True:
+                        # A night-path room just emptied: its occupant gets the
+                        # full night_hold from THIS instant (rule 6.2, D32).
+                        self._hold_night_for_presence(event.room_id, now)
+                    roles.ingest_presence(
+                        rs,
+                        event.primary,
+                        event.fallback,
+                        now,
+                        self.tun,
+                        self._min_on(event.room_id),
+                    )
             case ActivityChanged():
                 if (rs := s.rooms.get(event.room_id)) is not None:
                     roles.ingest_activity(rs, event.activity)
             case TriggerFired():
                 if (rs := s.rooms.get(event.room_id)) is not None:
-                    roles.ingest_trigger(rs, event.closing, now, self.tun)
+                    room = self.config.room(event.room_id)
+                    shape = room.shape if room is not None else RoomShape.DOOR
+                    roles.ingest_trigger(rs, event.closing, now, self.tun, shape)
             case DoorLightingChanged():
                 if (rs := s.rooms.get(event.room_id)) is not None:
                     if not event.on:
@@ -209,6 +240,8 @@ class Engine:
                     rs.door_lighting = event.on
             case ForeignChange():
                 self._on_foreign(event, now)
+            case ObservedLevel():
+                self._on_observed(event)
             case SunElevationChanged():
                 s.sun_elevation = event.elevation_deg
             case ReviewTick():
@@ -239,16 +272,15 @@ class Engine:
                 if not event.active:
                     s.night_active = False
                     s.night_hold_until = None
+                    s.night_trigger_at = None
                     gain.relax_to_neutral(s, self.tun)  # rule 7.3 (sleep-off edge)
             case HomeChanged():
-                if event.anyone_home is False and s.anyone_home is not False:
-                    # Away ONSET edge (rule 9.2) — None fails safe as home
-                    # (rule 6.4), so None -> False is a genuine departure. A
-                    # False re-submit (the adapter re-resolves on every
-                    # fallback entity change) is NOT an edge and must not
-                    # release a latch minted during away.
-                    for rs in s.rooms.values():
-                        override.release(rs)
+                # Raw input only: the away ONSET edge (latch release, rule 9.2)
+                # fires when the debounce in _advance_away engages away mode,
+                # not here (D29). None fails safe as home (rule 6.4), so
+                # None -> False starts a window like True -> False; a False
+                # re-submit (the adapter re-resolves on every fallback entity
+                # change) changes nothing.
                 s.anyone_home = event.anyone_home
             case VacationChanged():
                 if event.active and not s.vacation:
@@ -260,6 +292,7 @@ class Engine:
             case NightTriggerFired():
                 if s.sleep:
                     s.night_active = True
+                    s.night_trigger_at = now
                     s.night_hold_until = now + timedelta(seconds=self.tun.night_hold)
             case OccupationalChanged():
                 if (rs := s.rooms.get(event.room_id)) is not None:
@@ -290,6 +323,39 @@ class Engine:
                     self._cal_requests.append(event.room_id)
             case _:
                 pass
+
+    def _night_path_occupied(self) -> str | None:
+        """A night-path room whose PRIMARY presence is True, if any (rule 6.2, D32)."""
+        for room in self.config.rooms:
+            if room.night_path and self.state.rooms[room.room_id].primary is True:
+                return room.room_id
+        return None
+
+    def _hold_night_for_presence(self, room_id: str, now: datetime) -> None:
+        """Restart ``night_hold`` for primary presence in a path room (rule 6.2, D32).
+
+        Only an OPEN episode is extended — presence never opens one (the
+        configured night triggers do), and only presence-conductor's primary
+        occupancy counts: the raw kitchen fallback was on ~91 min during one
+        night's sleep. The hold never shrinks, and presence can carry it at
+        most ``night_presence_hold_max`` past the episode's last real night
+        trigger — a stuck sensor must not hold the path until sleep-off.
+        """
+        s = self.state
+        room = self.config.room(room_id)
+        if not s.night_active or room is None or not room.night_path:
+            return
+        until = now + timedelta(seconds=self.tun.night_hold)
+        if s.night_trigger_at is not None:
+            limit = s.night_trigger_at + timedelta(seconds=self.tun.night_presence_hold_max)
+            until = min(until, limit)
+        if s.night_hold_until is None or until > s.night_hold_until:
+            s.night_hold_until = until
+
+    def _min_on(self, room_id: str) -> float | None:
+        """A room's §1.1 fallback-confirmation override (D31); None = tunable."""
+        room = self.config.room(room_id)
+        return room.fallback_min_on if room is not None else None
 
     def _on_tv(self, tv: TvState, now: datetime) -> None:
         """Fold a tri-state TV transition, arming the pause grace (rules 6.3/6.3a).
@@ -338,11 +404,59 @@ class Engine:
             rs.est, event.lux, now, self.state.sun_elevation, a_now, self.tun, photo.calibrated
         )
 
+    def _on_observed(self, event: ObservedLevel) -> None:
+        """Fold an availability-recovery observation: belief only (§8.5, D28).
+
+        The channel's on/level/CT become what the lamp actually reports — no
+        latch, no ``override_since`` stamp, no release. A lit observation marks
+        the channel ``reconcile`` so the next move converges with
+        ``slew_step_empty`` (§8.5/§11.1); the recompute this event triggers then
+        steers it toward the room's goal like any other divergence (after the
+        startup grace — a room whose goal is 0 turns a lamp that came back lit
+        off). The estimator is re-based on the corrected belief at once.
+        """
+        room = self.config.channel_room(event.channel_id)
+        if room is None:
+            return
+        rs = self.state.rooms[room.room_id]
+        cs = rs.channels[event.channel_id]
+        photo = self._photo[room.room_id]
+        a_before = estimator.a_hat(rs, photo)
+        override.adopt(cs, event.level, event.ct)
+        cs.reconcile = cs.on
+        estimator.resync_belief(rs.est, a_before, estimator.a_hat(rs, photo))
+
+    def _restates_belief(self, rs: RoomState, event: ForeignChange) -> bool:
+        """Whether a foreign report merely re-states the adopted level (D28)."""
+        if event.wall_event or event.level is None or rs.suspect_zero_at is not None:
+            return False
+        cs = rs.channels[event.channel_id]
+        if event.level <= 0.0:
+            level_ok = not cs.on
+        else:
+            level_ok = cs.on and abs(event.level - cs.commanded_b) <= BELIEF_LEVEL_TOL
+        ct_ok = (
+            event.ct is None
+            or cs.commanded_ct is None
+            or abs(event.ct - cs.commanded_ct) <= BELIEF_CT_TOL
+        )
+        return level_ok and ct_ok
+
     def _on_foreign(self, event: ForeignChange, now: datetime) -> None:
         room = self.config.channel_room(event.channel_id)
         if room is None:
             return
         rs = self.state.rooms[room.room_id]
+        # Re-stamp guard (§9.1, D28 — belt and braces behind the adapter's
+        # standing setpoint): on a room that is ALREADY latched, a report that
+        # re-states the level it adopted — the Plejd poll's integer/float flip —
+        # is not new user intent. It must not restart the 4 h override_timeout
+        # (live: override_since == the lamp's last_updated in several rooms, so
+        # the timeout never fired while a lamp was lit). A §9.4 wall event is
+        # always intent and still re-stamps; a §6.5b suspicion is resolved by
+        # exactly such a report, so a pending one disables the guard.
+        if rs.overridden and self._restates_belief(rs, event):
+            return
         # A foreign change corrupts any in-flight gain observation (§3.4) and
         # aborts a running calibration sweep (§4.4); both are handled where
         # they live — here we just mark them.
@@ -643,12 +757,81 @@ class Engine:
             )
         return suspended
 
+    def _someone_detected(self, now: datetime) -> bool:
+        """Evidence that the house is not empty, for the away debounce (D29).
+
+        A room's primary presence, or CONFIRMED fallback evidence — a raw spell
+        that has persisted the room's ``fallback_min_on`` (§1.1, D31).
+        presence-conductor zeroes every room while its own ``anyone_home`` is
+        off, so during all 19 recorded off-spells the primary never fired; the
+        raw kitchen sensor did, 13-26 times, while the untracked occupant was
+        home. Unconfirmed blips do not count (the raw sensors also fire in an
+        empty house).
+        """
+        for room in self.config.rooms:
+            rs = self.state.rooms[room.room_id]
+            if rs.primary is True:
+                return True
+            if roles.fallback_persisted(rs, now, self.tun, room.fallback_min_on):
+                return True
+        return False
+
+    def _advance_away(self, now: datetime, plan: Plan) -> None:
+        """Debounce the away ONSET (rules 6.4/9.2, D29).
+
+        Away engages only once ``anyone_home`` has been False AND no room's
+        primary presence has been True for ``away_debounce`` — presence-
+        conductor reads the house empty for ~35 s after every HA restart and for
+        2-7 min while the untracked occupant is home alone, and each of those
+        used to turn the whole house off and release every latch. The window
+        starts at the False edge (or at boot), is cancelled by any primary
+        presence or confirmed fallback evidence (:meth:`_someone_detected`) and
+        restarts when it ends (every such moment is an event or a scheduled
+        confirmation review, so this recompute runs at that instant), and the
+        engine self-schedules its expiry. The onset edge — every latch released
+        — fires on engagement. Any non-False ``anyone_home`` clears away at
+        once: arrival is instant.
+        """
+        s = self.state
+        if s.anyone_home is not False:
+            s.away = False
+            s.away_pending_since = None
+            return
+        if s.away:
+            return
+        if self._someone_detected(now):
+            s.away_pending_since = None  # someone is demonstrably in: not empty yet
+            return
+        if s.away_pending_since is None:
+            s.away_pending_since = now
+        due = s.away_pending_since + timedelta(seconds=self.tun.away_debounce)
+        if now < due:
+            plan.review_at(due)
+            return
+        s.away = True
+        s.away_pending_since = None
+        for rs in s.rooms.values():  # away ONSET wins once (rule 9.2)
+            override.release(rs)
+
     def _recompute(self, now: datetime) -> list[Command]:
         s, tun = self.state, self.tun
         plan = Plan()
+        self._advance_away(now, plan)
+        # Two circadian factors (rule 2.3, D33): E = "it is dark" (CT, outdoor
+        # gates, the corridor evening gate, the morning gain drift), W = "it is
+        # late" (tier interpolation, closed-loop targets, the evening cap, the
+        # boost hand-over). dusk_ceiling 1.0 makes them identical.
         e = circadian.factor(s.sun_elevation, now, tun)
+        w = circadian.wind_down(s.sun_elevation, now, tun)
+        s.last_w = w
         evening = e >= tun.evening_cap_threshold
         g = gain.multiplier(s, tun)
+
+        # An occupied night-path room keeps an open episode alive (rule 6.2,
+        # D32) — checked BEFORE the expiry so a hold running out while someone
+        # is up restarts instead of fading the path out from under them.
+        if s.night_active and (held := self._night_path_occupied()) is not None:
+            self._hold_night_for_presence(held, now)
 
         # Night-path hold expiry (rule 6.2). Its rooms fade out over night_fade.
         night_expiring = False
@@ -688,6 +871,7 @@ class Engine:
                 room.hold_seconds,
                 e,
                 dusk.get(room.room_id),
+                room.fallback_min_on,
             )
         living = self._living_active(now)
 
@@ -706,6 +890,7 @@ class Engine:
                     room,
                     now,
                     e,
+                    w,
                     evening,
                     g,
                     living,
@@ -716,11 +901,24 @@ class Engine:
                 )
             )
 
+        # The quiet reconcile (rules 8.5/11.1, D28) is a one-time allowance: the
+        # first post-grace recompute either moved an observed channel (with
+        # slew_step_empty) or found it already where the room wants it. Either
+        # way it is now the engine's level — a held channel must not carry the
+        # flag into a move hours later, and neither must one a latch or a
+        # calibration sweep kept from moving.
+        if s.enabled and not self._in_grace(now):
+            for rs_ in s.rooms.values():
+                for cs_ in rs_.channels.values():
+                    cs_.reconcile = False
+
         # Circadian self-scheduling (rule 2.3): follow the ramp with a tick, and
         # from a plateau schedule the next clock-ramp boundary so the engine can
         # start the 20:00 / 06:00 ramps itself without waiting on sun events.
+        # "In a ramp" is judged per TERM (D33): with the sun down E sits at 1
+        # while W still climbs on the clock 20:00 -> 22:30.
         if s.enabled:
-            if 0.0 < e < 1.0:
+            if circadian.ramping(s.sun_elevation, now, tun):
                 plan.review_at(now + timedelta(seconds=tun.circadian_tick))
             else:
                 plan.review_at(self._next_clock_boundary(now))
@@ -753,6 +951,7 @@ class Engine:
         room: RoomConfig,
         now: datetime,
         e: float,
+        w: float,
         evening: bool,
         g: float,
         living: bool,
@@ -781,14 +980,21 @@ class Engine:
         # likewise governs only unlatched rooms (rule 6.2): its resolution is
         # not ``off``, so it falls to the hold branch below.
         if rs.overridden:
+            # The timeout hand-back waits while the room is occupied (rule 9.2,
+            # D30): self-active = occupancy True, inside its vacancy hold, or
+            # inside a trigger hold. Pass 1 has already stepped the FSM to now.
+            occupied = rs.self_active
             if res is not None and res.off and res.respect_override:
                 # A respected hard-off (sleep/away standing, rules 6.1/6.4,
                 # or the outdoor daylight-OFF while occupational, §6.5b):
                 # only the timeout releases. should_release's off_worthy path
                 # must not reach it — a presence-capable room would otherwise
                 # release-and-counter the press (review F4).
-                if not override.timed_out(rs, now, tun):
+                if not override.timeout_due(rs, now, tun, occupied):
                     plan.review_at(override.override_review(rs, now, tun))
+                    plan.review_at(
+                        roles.next_review(rs, now, tun, room.fallback_min_on)
+                    )  # deferred hand-back (D30)
                     return self._diag(room, rs, rs.role)
                 override.release(rs)
             elif res is not None and res.off:
@@ -796,7 +1002,7 @@ class Engine:
                 # declared occupant — the morning descent cleans up a stray
                 # dialed level (rule 6.5b).
                 override.release(rs)
-            elif override.should_release(rs, off_worthy, room.presence_capable, now, tun):
+            elif override.should_release(rs, off_worthy, room.presence_capable, now, tun, occupied):
                 override.release(rs)
             else:
                 # Still adjusting nothing, but keep both clocks alive: the
@@ -804,7 +1010,7 @@ class Engine:
                 # OFF-worthy and release the latch (F2 — otherwise release could
                 # wait up to override_timeout in a quiet house).
                 plan.review_at(override.override_review(rs, now, tun))
-                plan.review_at(roles.next_review(rs, now))
+                plan.review_at(roles.next_review(rs, now, tun, room.fallback_min_on))
                 return self._diag(room, rs, rs.role)
 
         # Resolve outputs (funnel order, rule 8.1). Three paths converge on a
@@ -851,17 +1057,19 @@ class Engine:
                 outputs = dict(res.band_outputs or {})
                 if not res.gain_exempt:  # night path / outdoor are unscaled (7.4/7.2)
                     outputs = gain.scale(outputs, g)
-                    outputs = targets.apply_evening_cap(outputs, e, room.profile, tun)
+                    outputs = targets.apply_evening_cap(outputs, w, room.profile, tun)
             ct_override, fade = res.ct_override, res.fade
-            channel_b = photometry.allocate(room.channels, outputs, e, tun)
+            channel_b = photometry.allocate(
+                room.channels, outputs, targets.boost_weight(w, tun), tun
+            )
         elif closed:
             role = base
             channel_b, correcting, target_lux = self._closed_loop(
-                room, rs, base, prev_role, e, g, now, photo, capacity, plan, tv_ceiling, ref_d
+                room, rs, base, prev_role, w, g, now, photo, capacity, plan, tv_ceiling, ref_d
             )
         else:
             role = base
-            outputs = targets.role_outputs(room.profile, role, e, tun)
+            outputs = targets.role_outputs(room.profile, role, w, tun)
             # Daylight-aware open-loop (§4.7): the tier outputs are scaled by the
             # daylight factor D, replicating the legacy 100 - 0.5·lux daytime
             # damping. A stale/absent source falls through unscaled (D → 1),
@@ -887,17 +1095,20 @@ class Engine:
                 rs.est.daylight_latch = d_factor
                 outputs = {b: v * d_factor for b, v in outputs.items()}
             outputs = gain.scale(outputs, g)
-            outputs = targets.apply_evening_cap(outputs, e, room.profile, tun)
-            # Evening boost output (§4.5, D26): LAST band-level word — an
-            # explicit per-room evening value for the boost band (the kitchen
-            # bench strip the user turned on at 22:04), unlocked for an ACTIVE
-            # room only. Exempt from the evening cap, but scaled by the master
-            # gain: g is 0 when the master is off, and no room may hold a band
-            # the master switch cannot extinguish (rule 7.2).
-            outputs, boost_unlocked = targets.apply_boost_evening_output(
-                outputs, e, role, room.profile, tun, g
+            outputs = targets.apply_evening_cap(outputs, w, room.profile, tun)
+            # Boost hand-over (§4.5, D26/D33): across a W window below
+            # boost_evening_max the boost band fades from its (capped) tier to
+            # its evening value — the explicit per-room boost_evening_output
+            # (the kitchen bench strip the user turned on at 22:04; ACTIVE
+            # only, exempt from the cap, scaled by the master gain: g is 0 when
+            # the master is off, rule 7.2) or 0, the lockout.
+            channel_b = photometry.allocate(
+                room.channels,
+                outputs,
+                targets.boost_weight(w, tun),
+                tun,
+                targets.boost_evening_value(role, room.profile, g),
             )
-            channel_b = photometry.allocate(room.channels, outputs, e, tun, boost_unlocked)
 
         # The TV ON ceiling is the LAST word on output (rule 6.3): applied to the
         # final per-channel values, after weight share, response mapping and the
@@ -918,7 +1129,14 @@ class Engine:
             # or any own step while learning in shadow (§3.5/4.4 bootstrap).
             arm = fresh and (correcting or shadow)
             a_before_unit = estimator.a_hat(rs, photo, 1.0) if arm else 0.0
-            ch_out = {ch: channel_b[ch.channel_id] for ch in room.channels}
+            # CT policy reads the QUANTIZED level each channel will actually be
+            # held at or rendered to (rules 5.2/5.3, D27) — dim-to-warm computed
+            # on the pre-rounding goal described a lamp that does not exist.
+            # ``quantize`` is pure, so plan_channel re-derives the same level.
+            ch_out = {
+                ch: governor.quantize(ch, rs.channels[ch.channel_id], channel_b[ch.channel_id], tun)
+                for ch in room.channels
+            }
             anchor = ct_policy.fixed_anchor(ch_out, tun)
             room_active = role is Role.ACTIVE
             for ch in room.channels:
@@ -926,7 +1144,7 @@ class Engine:
                 if ct_override is not None:
                     ct = ct_override if ch.ct_capable else None
                 else:
-                    ct = ct_policy.ct_target(ch, e, b, anchor, tun)
+                    ct = ct_policy.ct_target(ch, e, ch_out[ch], anchor, tun)
                 governor.plan_channel(
                     plan, ch, rs.channels[ch.channel_id], room_active, b, ct, photo, tun, fade
                 )
@@ -938,7 +1156,7 @@ class Engine:
                 base_delta = estimator.a_hat(rs, photo, 1.0) - a_before_unit
                 estimator.record_step(rs.est, rs.est.l_filt, base_delta, now, tun, shadow=shadow)
 
-        plan.review_at(roles.next_review(rs, now))
+        plan.review_at(roles.next_review(rs, now, tun, room.fallback_min_on))
         # Outdoor rooms follow the sun ramp, but at an E plateau (overnight, or a
         # winter afternoon before sunset) the global circadian scheduler goes
         # quiet — the next clock boundary is hours away — so an outdoor room that
@@ -1007,7 +1225,7 @@ class Engine:
         adopts its first value immediately.
 
         Hysteresis (``DAYLIGHT_MIN_STEP``): D feeds the output directly, so
-        every wobble of a drifting N̂ crossed the §8.3 min_delta and re-commanded
+        every wobble of a drifting N̂ crossed the §8.3 write gate and re-commanded
         the room — a cloudy hour measured ~159 writes/h per channel against a
         mesh that manages ~7 writes/s for the whole house. A new factor is
         adopted only once it differs from the one in force by a real step, or
@@ -1044,7 +1262,7 @@ class Engine:
         rs: RoomState,
         role: Role,
         prev_role: Role,
-        e: float,
+        w: float,
         g: float,
         now: datetime,
         photo: RoomPhotometry,
@@ -1072,7 +1290,7 @@ class Engine:
         broad daylight.
         """
         tun = self.tun
-        t_prime = estimator.target_lux(rs, role, room.profile, e, g, tun, capacity)
+        t_prime = estimator.target_lux(rs, role, room.profile, w, g, tun, capacity)
         if ref_d is not None:
             t_prime *= ref_d
         a_now = estimator.a_hat(rs, photo)
@@ -1109,17 +1327,35 @@ class Engine:
             rs.est.error_sustain_until = None
             correct, review = True, None
         plan.review_at(review)
+        # The evening cap is continuous in W (rule 2.4, D33) and binds on the
+        # HOLD as well as on a correction: as W climbs the cap comes down a grid
+        # step at a time over a held level, instead of waiting for the next
+        # deadband correction to land the whole difference at once.
+        cap = targets.evening_cap(w, room.profile)
         if not correct:
-            hold = {ch.channel_id: rs.channels[ch.channel_id].commanded_b for ch in room.channels}
+            hold = {
+                ch.channel_id: min(rs.channels[ch.channel_id].commanded_b, cap)
+                for ch in room.channels
+            }
             return hold, False, t_prime
-        demand = max(0.0, t_prime - n)
+        return self._closed_loop_goal(room, rs, t_prime, w, photo), True, t_prime
+
+    def _closed_loop_goal(
+        self, room: RoomConfig, rs: RoomState, t_prime: float, w: float, photo: RoomPhotometry
+    ) -> dict[str, float]:
+        """The feed-forward per-channel command for target ``t_prime`` (§3.6/§4.5).
+
+        Demand ``T' - N̂`` is band-filled (the boost band faded by its W
+        hand-over weight, D33) and inverted through the calibrated curves, then
+        clamped to the continuous evening cap ``cap(W)`` (rule 2.4).
+        """
+        tun = self.tun
+        demand = max(0.0, t_prime - rs.est.n_hat)
         channel_b = estimator.channel_outputs_for_demand(
-            room.channels, demand, e, photo, rs.est.gain_mult, tun
+            room.channels, demand, targets.boost_weight(w, tun), photo, rs.est.gain_mult, tun
         )
-        if e >= tun.evening_cap_threshold:  # evening cap on normalized output (2.4)
-            cap = room.profile.evening_output_cap
-            channel_b = {cid: min(b, cap) for cid, b in channel_b.items()}
-        return channel_b, True, t_prime
+        cap = targets.evening_cap(w, room.profile)
+        return {cid: min(b, cap) for cid, b in channel_b.items()}
 
     def _diag(
         self,
