@@ -42,6 +42,7 @@ from .events import (
     MasterGainChanged,
     MasterPowerChanged,
     NightTriggerFired,
+    ObservedLevel,
     OccupationalChanged,
     PresenceChanged,
     ReviewTick,
@@ -81,6 +82,15 @@ SUSPECT_ZERO_TTL = 360.0
 #: ECHO_LEVEL_TOL vocabulary: within this of the preserved belief the report
 #: is the poll re-reading our own level; beyond it, it is a user action.
 SUSPECT_LEVEL_TOL = 0.03
+
+#: A foreign report on an ALREADY-latched room that re-states the level the
+#: room adopted (within these tolerances — the adapter's ECHO_LEVEL_TOL /
+#: ECHO_CT_TOL vocabulary) is not new user intent and never re-stamps
+#: ``override_since`` (§9.1, D28): Plejd's ~3-min true-state poll flips a lit
+#: lamp between integer and float brightness, and every flip re-stamping the
+#: latch kept the 4 h override_timeout from ever firing while a lamp was lit.
+BELIEF_LEVEL_TOL = 0.03
+BELIEF_CT_TOL = 60
 
 #: Hysteresis on a REFERENCE-sourced §4.7 daylight factor (D26). N̂ moves
 #: continuously under drifting cloud, and the factor feeds the output directly,
@@ -152,6 +162,9 @@ class Engine:
                     commanded_b=max(0.0, min(1.0, level)),
                     commanded_ct=ct,
                     on=level > 0.0,
+                    # A lit seed is observed, not commanded: its first move after
+                    # the startup grace is the quiet reconcile (rule 11.1).
+                    reconcile=level > 0.0,
                 )
             s.rooms[room.room_id] = rs
 
@@ -209,6 +222,8 @@ class Engine:
                     rs.door_lighting = event.on
             case ForeignChange():
                 self._on_foreign(event, now)
+            case ObservedLevel():
+                self._on_observed(event)
             case SunElevationChanged():
                 s.sun_elevation = event.elevation_deg
             case ReviewTick():
@@ -338,11 +353,59 @@ class Engine:
             rs.est, event.lux, now, self.state.sun_elevation, a_now, self.tun, photo.calibrated
         )
 
+    def _on_observed(self, event: ObservedLevel) -> None:
+        """Fold an availability-recovery observation: belief only (§8.5, D28).
+
+        The channel's on/level/CT become what the lamp actually reports — no
+        latch, no ``override_since`` stamp, no release. A lit observation marks
+        the channel ``reconcile`` so the next move converges with
+        ``slew_step_empty`` (§8.5/§11.1); the recompute this event triggers then
+        steers it toward the room's goal like any other divergence (after the
+        startup grace — a room whose goal is 0 turns a lamp that came back lit
+        off). The estimator is re-based on the corrected belief at once.
+        """
+        room = self.config.channel_room(event.channel_id)
+        if room is None:
+            return
+        rs = self.state.rooms[room.room_id]
+        cs = rs.channels[event.channel_id]
+        photo = self._photo[room.room_id]
+        a_before = estimator.a_hat(rs, photo)
+        override.adopt(cs, event.level, event.ct)
+        cs.reconcile = cs.on
+        estimator.resync_belief(rs.est, a_before, estimator.a_hat(rs, photo))
+
+    def _restates_belief(self, rs: RoomState, event: ForeignChange) -> bool:
+        """Whether a foreign report merely re-states the adopted level (D28)."""
+        if event.wall_event or event.level is None or rs.suspect_zero_at is not None:
+            return False
+        cs = rs.channels[event.channel_id]
+        if event.level <= 0.0:
+            level_ok = not cs.on
+        else:
+            level_ok = cs.on and abs(event.level - cs.commanded_b) <= BELIEF_LEVEL_TOL
+        ct_ok = (
+            event.ct is None
+            or cs.commanded_ct is None
+            or abs(event.ct - cs.commanded_ct) <= BELIEF_CT_TOL
+        )
+        return level_ok and ct_ok
+
     def _on_foreign(self, event: ForeignChange, now: datetime) -> None:
         room = self.config.channel_room(event.channel_id)
         if room is None:
             return
         rs = self.state.rooms[room.room_id]
+        # Re-stamp guard (§9.1, D28 — belt and braces behind the adapter's
+        # standing setpoint): on a room that is ALREADY latched, a report that
+        # re-states the level it adopted — the Plejd poll's integer/float flip —
+        # is not new user intent. It must not restart the 4 h override_timeout
+        # (live: override_since == the lamp's last_updated in several rooms, so
+        # the timeout never fired while a lamp was lit). A §9.4 wall event is
+        # always intent and still re-stamps; a §6.5b suspicion is resolved by
+        # exactly such a report, so a pending one disables the guard.
+        if rs.overridden and self._restates_belief(rs, event):
+            return
         # A foreign change corrupts any in-flight gain observation (§3.4) and
         # aborts a running calibration sweep (§4.4); both are handled where
         # they live — here we just mark them.

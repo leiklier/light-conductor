@@ -87,6 +87,26 @@ class ForeignChange(Event):
     wall_event: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class ObservedLevel(Event):
+    """A channel's true level, observed at an availability recovery (§8.5, D28).
+
+    Updates the engine's BELIEF (on / commanded level / CT) without latching an
+    override: the adapter emits it for the first available report after an
+    unavailable/unknown edge (and for a channel that had no state when the
+    ledger was seeded), and for the one report the recovery grace folds. After
+    an HA restart the Plejd lights report their true levels while the engine,
+    seeded from a snapshot taken while they were unavailable, believes them
+    off — a belief that latched the next poll flip, kept a lamp the room wants
+    dark lit forever, and counted the lamp's own light as daylight.
+    ``level`` ``None``/0 means off.
+    """
+
+    channel_id: str
+    level: float | None
+    ct: int | None = None
+
+
 # --- environment (§2, §6) -----------------------------------------------
 
 

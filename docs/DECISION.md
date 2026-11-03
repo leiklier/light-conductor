@@ -901,6 +901,68 @@ error, and the dim end collapses below device resolution); pure nearest
 rounding with no hold band (goal jitter on a level boundary re-commands every
 cycle, the D26 159-writes/h failure in a new place).
 
+## D28. The adopted level is the standing setpoint; recovery is observed, not just folded (beta.20)
+
+The evidence. (a) **The 4 h timeout never fired on a lit lamp.** Plejd's ~3 min
+true-state poll flips a lit lamp's brightness between integer and float (184
+→ 184.355, back to integer 5–80 s later). The adapter's no-op guard consumed a
+re-report only if it matched `_last_commanded` — set on the conductor's *own*
+writes — so after a user dial every flip was a fresh ForeignChange and
+`override.latch()` re-stamped `override_since` twice per poll. Diagnostics
+showed `override_since` equal to the lamp's `last_updated` in several rooms.
+(b) **Every restart latched someone anyway.** The snapshot is taken while the
+Plejd entities are unavailable, so the engine seeds every channel off and the
+ledger has no setpoint. D25's recovery fold absorbed the off → on(true level)
+report as a bare `ReviewTick` — no setpoint, no belief — and was one-shot, so
+the next poll flip latched (17:14:46 recovered → sofakrok latched 17:15:26;
+22:43:28 → kontor 22:43:33, sofakrok 22:43:54). The stale "off" belief also
+had the sofakrok estimator count its own lamp as daylight, and an open-loop
+room whose goal was 0 never turned off a lamp that came back lit. (c) A
+re-registration rewrite (`unavailable` → `unavailable`, 5 s into a restart)
+armed the recovery grace, so the real edge 23 s later fell inside the 60 s
+debounce and the off → on report landed just outside the 20 s window.
+
+Decisions (§8.4/§8.5/§9.1/§11.1):
+
+1. **The setpoint follows the adopted level.** A report classified foreign also
+   records its level as the channel's standing setpoint, so later no-op poll
+   flips are consumed. The transition-aware rule is unchanged: a dial *away*
+   from the adopted level (old = adopted, new ≠) still latches, and a dial
+   restoring a previous level (old ≠ setpoint) still latches. Wall events do
+   not move the setpoint (their adopted level may be a mid-fade HA state); the
+   engine guard below covers them.
+2. **Recovery is observed.** A recovery edge (first available report after
+   unavailable/unknown, or the first report of an unseeded channel) and the
+   one report the grace folds both set the setpoint and submit a new engine
+   event, `ObservedLevel`, which corrects the channel's belief without
+   latching. `unavailable` → `unavailable` is no longer an edge. The engine
+   re-bases `Â_filt`/`N̂` on the corrected belief at once and marks a lit
+   observation **reconcile**, so the next move converges with
+   `slew_step_empty` — the quiet reconcile §8.5/§11.1 already promised but the
+   governor never implemented (it used the room-role slew). Lit snapshot
+   seeds get the same flag.
+3. **Engine re-stamp guard.** On an already-latched room, a non-wall foreign
+   report that matches the adopted `commanded_b` (0.03) and CT (60 K) neither
+   re-stamps nor re-adopts. It is redundant with (1) on the poll path and
+   exists for the paths (1) cannot see: a wall event adopting a level the
+   setpoint does not know, a reload, a future integration. Disabled while a
+   §6.5b suspect zero is pending — the report that resolves a suspicion *is* a
+   re-statement of the preserved belief.
+
+What did not change: the only `override.latch` call sites remain `_on_foreign`;
+a §6.5b suspect zero still never re-stamps; CT-only reports keep their beta.19
+handling (a CT change at the standing level is consumed by the adapter's
+level-only no-op guard, as before; at the engine a different CT is not a
+re-statement). The outdoor stale-zero resolution is unaffected: the poll
+re-reading the true lit level after a suspect zero is an off → on transition,
+which the no-op guard never consumes.
+
+Risk accepted: the observed transient "off" a Plejd link reports first on a
+mid-day reconnect is adopted as belief, so the engine may re-send a lit
+room's level a second before the true level arrives; the true report then
+matches that command's echo. Before, the transient was ignored and a lamp that
+genuinely came back off stayed off until something else moved.
+
 ## Open questions — RESOLVED (user, 2026-07-25)
 
 - **Q1 (D8):** master dimmer neutral at 50 % — confirmed (boost possible).

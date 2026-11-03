@@ -270,6 +270,11 @@ class ChannelState:
     commanded_b: float = 0.0
     commanded_ct: int | None = None
     on: bool = False
+    #: The current level was not commanded by the engine but OBSERVED — seeded
+    #: lit at startup (§11.1) or reported at an availability recovery (§8.5,
+    #: D28). The next move converges with ``slew_step_empty`` ramps (the quiet
+    #: reconcile); any emitted command or adopted foreign level clears it.
+    reconcile: bool = False
 
 
 @dataclass(slots=True)

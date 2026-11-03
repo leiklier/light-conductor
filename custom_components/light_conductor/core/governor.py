@@ -141,10 +141,14 @@ def plan_channel(
 
     ``room_active`` selects the slew rate: occupied eyes get ``slew_step``,
     empty rooms and demotions get the faster ``slew_step_empty`` (rule 8.2).
-    ``fade`` overrides the computed ramp for mode transitions (sleep/night).
+    A channel whose level was OBSERVED rather than commanded (``cs.reconcile``:
+    seeded lit at startup, or reported at an availability recovery) converges
+    with ``slew_step_empty`` on its next move — the quiet reconcile of rules
+    8.5/11.1 (D28). ``fade`` overrides the computed ramp for mode transitions
+    (sleep/night).
     """
     cid = channel.channel_id
-    slew = tun.slew_step if room_active else tun.slew_step_empty
+    slew = tun.slew_step if room_active and not cs.reconcile else tun.slew_step_empty
 
     # Off is off (rule 8.6): goal 0 -> turn_off after ramping down.
     if goal_b <= 0.0:
@@ -153,6 +157,7 @@ def plan_channel(
             plan.turn_off(cid, _ramp_seconds(cur, 0.0, slew, tun, fade))
             cs.on = False
             cs.commanded_b = 0.0
+            cs.reconcile = False
         return
 
     # Quantize on the command-space grid (rule 8.3, D27) — sticky for a lit
@@ -167,6 +172,7 @@ def plan_channel(
             plan.turn_off(cid, _ramp_seconds(cur, 0.0, slew, tun, fade))
             cs.on = False
             cs.commanded_b = 0.0
+            cs.reconcile = False
         return
 
     q_flux = flux.flux(cid, goal_b_q)
@@ -194,5 +200,6 @@ def plan_channel(
     )
     cs.on = True
     cs.commanded_b = goal_b_q
+    cs.reconcile = False
     if ct_cmd is not None:
         cs.commanded_ct = ct_cmd

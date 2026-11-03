@@ -114,6 +114,24 @@ def invalidate_pending(est: EstimatorState) -> None:
     est.pending_shadow = False
 
 
+def resync_belief(est: EstimatorState, a_before: float, a_after: float) -> None:
+    """Re-base ``Â_filt``/``N̂`` on a BELIEF correction (§3.2, §8.5, D28).
+
+    An :class:`~.events.ObservedLevel` changes what the engine believes a lamp
+    is doing, not what the lamp does: the sensor has been seeing the true light
+    all along, so ``L_filt`` is already right and only the own-light term was
+    wrong (after a restart the engine believed every lamp off, so sofakrok's
+    own lamp was being counted as daylight). Shift ``Â_filt`` by the belief
+    step and re-derive ``N̂`` from the unchanged ``L_filt`` at once — filtering
+    the step in would keep the error alive for minutes. Any pending gain
+    observation straddles the correction and is dropped.
+    """
+    invalidate_pending(est)
+    est.a_filt = max(0.0, est.a_filt + (a_after - a_before))
+    if est.l_filt is not None:
+        est.n_hat = max(0.0, est.l_filt - est.a_filt)
+
+
 def record_step(
     est: EstimatorState,
     l_before: float | None,

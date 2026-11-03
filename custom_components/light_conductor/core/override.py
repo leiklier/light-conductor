@@ -46,6 +46,7 @@ def adopt(cs: ChannelState, level: float | None, ct: int | None) -> None:
         cs.commanded_b = max(0.0, min(1.0, level))
     if ct is not None:
         cs.commanded_ct = ct
+    cs.reconcile = False  # a level the user set is not a reconcile target
 
 
 def timed_out(rs: RoomState, now: datetime, tun: Tunables) -> bool:

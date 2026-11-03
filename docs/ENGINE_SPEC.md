@@ -786,10 +786,17 @@ overlap can confuse — is a stale own echo that is correctly not latched. The
 accepted residual is the pre-existing one: a hand dial that moves a lamp by
 less than the tolerance is indistinguishable from an echo and is not latched.
 In addition to the
-time-boxed echoes, the adapter keeps a **standing setpoint** per channel (the
-last commanded normalized level) so an integration's periodic true-state poll
-(Plejd re-reports every ~3 min, as a `uint16/256` float) that re-confirms our
-own value long after the echo TTL is not misread as a foreign change.
+time-boxed echoes, the adapter keeps a **standing setpoint** per channel so an
+integration's periodic true-state poll (Plejd re-reports every ~3 min, as a
+`uint16/256` float, flipping a lit lamp between integer and float brightness —
+184 → 184.355 → 184) that re-confirms the lamp's level long after the echo TTL
+is not misread as a foreign change. The setpoint is the level the channel is
+*supposed* to be at: the last command the engine sent **or the level the
+engine last adopted** — from a foreign change (§9.1, D28) or an availability
+recovery (below). With only own commands recorded, every poll flip of a
+user-set level re-latched and re-stamped `override_since`, so the 4 h
+`override_timeout` never fired while the lamp was lit (live: `override_since`
+equal to the lamp's `last_updated` in several rooms).
 
 **Ledger seeding across startup/reload.** On controller start — a fresh setup
 *and* an options reload — the standing setpoint of every configured channel is
@@ -837,13 +844,23 @@ test exists. After the deadline only the final-value echo (± tolerance) and the
 standing-setpoint no-op guard match, so the first post-deadline report at a
 foreign value latches.
 
-**Availability recovery never latches (D25).** Per light entity the adapter
-remembers the monotonic instant of its last `unavailable`/`unknown` →
-available edge — and, for a channel that had no state at ledger-seed time, the
-instant of its first available report (its integration may still have been
-loading). The FIRST report inside `RECOVERY_GRACE` (20 s) of that instant that
-would otherwise be classified foreign is folded as a `ReviewTick` instead: no
-latch, no writer interrupt, and §8.5 reconciles any divergence quietly. After
+**Availability recovery never latches (D25) and is observed (D28).** Per
+light entity the adapter treats its first AVAILABLE report after an
+`unavailable`/`unknown` state — and, for a channel that had no state at
+ledger-seed time, its first report at all (its integration may still have been
+loading) — as a **recovery edge**: the reported level is the lamp's true
+state, so it becomes the standing setpoint and is submitted to the engine as an
+`ObservedLevel` (belief only — `on`, commanded level and CT — never a latch).
+An `unavailable` → `unavailable` attribute rewrite (the Plejd entities
+re-register a few seconds into a restart) is not an edge. The edge also arms a
+one-shot grace: the FIRST report inside `RECOVERY_GRACE` (20 s) of it that
+would otherwise be classified foreign is **folded** — adopted as setpoint and
+`ObservedLevel` likewise, with no latch and no writer interrupt — and §8.5
+reconciles any divergence quietly. (Before D28 the fold was a bare
+`ReviewTick`: the engine, seeded while the lights were unavailable, kept
+believing every channel off, the setpoint stayed unset, and the first poll
+flip after the one-shot fold latched — 17:14:46 recovered → sofakrok latched
+17:15:26.) After
 an HA restart the Plejd entities go unavailable → off → on(true level) ~29 s
 in, and that off→on report latched **every** Plejd room. The grace is
 **one-shot** (that sequence is exactly one fold) and an edge arriving within
@@ -872,9 +889,16 @@ as its own echo.
 
 8.5 **Availability.** A channel (or the whole Plejd gateway) unavailable ⇒
 skip its writes this cycle and re-reconcile on recovery — never queue against
-a dead link; never mark the room failed. State divergence found at recovery
-(the integration reconciles true state every ~3 min) is corrected quietly
-with `slew_step_empty` ramps.
+a dead link; never mark the room failed. At recovery the engine learns the
+lamp's true level through `ObservedLevel` (§8.4, D28): the channel's belief is
+corrected without latching, the estimator re-bases `Â_filt`/`N̂` on the
+corrected belief at once (otherwise a lamp believed off is counted as
+daylight), and a lit observed channel is marked **reconcile** — its next move
+converges with `slew_step_empty` ramps whatever the room's role (the quiet
+reconcile), after which the normal slew applies. A divergence in either
+direction is corrected: a room whose goal is 0 turns off a lamp that came back
+lit, a room whose goal is lit relights a lamp that came back off. Writes still
+wait out the startup grace (§11.1).
 
 8.6 **Off is off.** Goal 0 ⇒ `turn_off` (never brightness 0), after ramping
 down to the dim floor when the room was lit.
@@ -884,7 +908,14 @@ down to the dim floor when the room was lit.
 9.1 **Foreign changes latch an override.** A non-echo state change on a
 channel (wall rotary, HomeKit direct, voice) sets the *room* to
 `OVERRIDDEN`: the engine adopts the observed levels as the room's goal and
-stops adjusting it entirely. Mode hard-offs win at their **onset edge only**
+stops adjusting it entirely. `override_since` is the moment of the last
+**genuine** touch: on a room that is already latched, a foreign report that
+merely re-states the adopted level (within 0.03 and, when both are known,
+60 K — the adapter's echo vocabulary) is not new intent and does **not**
+re-stamp it (D28, belt and braces behind the adapter's adopted setpoint). A
+§9.4 wall event always re-stamps, a different level or CT re-stamps, and while
+a §6.5b suspect zero is pending the guard is off (the resolving report *is* a
+re-statement of the preserved belief). Mode hard-offs win at their **onset edge only**
 (9.2); a standing mode — sleep, away, vacation, the night path — respects a
 latch minted while it stands (6.1/6.2/6.4). The one exception is the outdoor
 daylight-OFF with no declared occupant, which still releases-and-cleans-up a
@@ -956,7 +987,11 @@ from it; the recovery edge and an identical-timestamp republish are ignored
 levels are adopted as ledger baselines (no startup flash, mirroring
 grow-conductor's restore-before-enforce), roles evaluate from live presence,
 and rooms whose lights differ grossly from the computed goal converge with
-`slew_step_empty` ramps only after `startup_grace` (30 s). The adapter's
+`slew_step_empty` ramps only after `startup_grace` (30 s) — every channel
+seeded lit is marked **reconcile** (§8.5), so its first move after the grace
+uses `slew_step_empty` whatever the room's role. A channel that is unavailable
+when the snapshot is taken is seeded off; its recovery report corrects the
+belief (§8.4/§8.5, D28). The adapter's
 standing-setpoint consume (a report matching the last commanded level is a
 poll re-confirmation, not a foreign change) applies only to NO-OP re-reports:
 if the previous state differed materially from the setpoint, the light
