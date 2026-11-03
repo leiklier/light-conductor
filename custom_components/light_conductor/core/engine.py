@@ -84,7 +84,7 @@ SUSPECT_LEVEL_TOL = 0.03
 
 #: Hysteresis on a REFERENCE-sourced §4.7 daylight factor (D26). N̂ moves
 #: continuously under drifting cloud, and the factor feeds the output directly,
-#: so every wobble crossed the §8.3 min_delta and re-commanded the room —
+#: so every wobble crossed the §8.3 write gate and re-commanded the room —
 #: ~159 writes/h per channel on a cloudy hour, against a mesh that manages ~7
 #: writes/s for the whole house. A new factor is adopted only once it differs
 #: from the one in force by this much (or reaches an endpoint, which must always
@@ -918,7 +918,14 @@ class Engine:
             # or any own step while learning in shadow (§3.5/4.4 bootstrap).
             arm = fresh and (correcting or shadow)
             a_before_unit = estimator.a_hat(rs, photo, 1.0) if arm else 0.0
-            ch_out = {ch: channel_b[ch.channel_id] for ch in room.channels}
+            # CT policy reads the QUANTIZED level each channel will actually be
+            # held at or rendered to (rules 5.2/5.3, D27) — dim-to-warm computed
+            # on the pre-rounding goal described a lamp that does not exist.
+            # ``quantize`` is pure, so plan_channel re-derives the same level.
+            ch_out = {
+                ch: governor.quantize(ch, rs.channels[ch.channel_id], channel_b[ch.channel_id], tun)
+                for ch in room.channels
+            }
             anchor = ct_policy.fixed_anchor(ch_out, tun)
             room_active = role is Role.ACTIVE
             for ch in room.channels:
@@ -926,7 +933,7 @@ class Engine:
                 if ct_override is not None:
                     ct = ct_override if ch.ct_capable else None
                 else:
-                    ct = ct_policy.ct_target(ch, e, b, anchor, tun)
+                    ct = ct_policy.ct_target(ch, e, ch_out[ch], anchor, tun)
                 governor.plan_channel(
                     plan, ch, rs.channels[ch.channel_id], room_active, b, ct, photo, tun, fade
                 )
@@ -1007,7 +1014,7 @@ class Engine:
         adopts its first value immediately.
 
         Hysteresis (``DAYLIGHT_MIN_STEP``): D feeds the output directly, so
-        every wobble of a drifting N̂ crossed the §8.3 min_delta and re-commanded
+        every wobble of a drifting N̂ crossed the §8.3 write gate and re-commanded
         the room — a cloudy hour measured ~159 writes/h per channel against a
         mesh that manages ~7 writes/s for the whole house. A new factor is
         adopted only once it differs from the one in force by a real step, or

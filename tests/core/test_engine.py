@@ -934,10 +934,11 @@ def test_response_mapping_end_to_end_benke() -> None:
     eng = Engine(_response_room(), None)
     eng.handle(SunElevationChanged(DAY_SUN), at(1, 18, 0))
     day = sets(eng.handle(PresenceChanged("respkj", True), at(1, 18, 1)))
-    # Primary at full (flux-space quantization lands it a hair under 1.0).
-    assert isclose(day["respkj_taklys"].level, 1.0, abs_tol=0.01)
-    # Benke reshaped to 0.3 — no longer blasting equal to the primary.
-    assert isclose(day["respkj_benke"].level, 0.3, abs_tol=1e-6)
+    # Primary at full (1.0 is always a §8.3 grid level).
+    assert day["respkj_taklys"].level == 1.0
+    # Benke reshaped to 0.3 — no longer blasting equal to the primary — rendered
+    # on the §8.3 grid within its bound max(0.01, 0.08·b).
+    assert abs(day["respkj_benke"].level - 0.3) <= 0.08 * 0.3
 
     # Evening (sun down): the boost band locks out, benke goes off.
     cmds = eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))

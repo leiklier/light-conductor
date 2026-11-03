@@ -162,7 +162,13 @@ class Tunables:
     #: protect, and the full-range ~9.6 s fade reads as a slow integration
     #: rather than as care. Dimming and turn-off ramps are unaffected.
     on_ramp_max: float = 3.0  # 8.2
-    min_delta: float = 0.03  # 8.3
+    #: Command-space quantization grid (§8.3, D27): levels start at the
+    #: channel's dim floor and advance by ``max(quant_step, quant_rel·b)`` up to
+    #: 1.0 — absolute 0.01 steps through the dim end (where the old 0.03 FLUX
+    #: grid rendered every goal below ~12 % as the 2 % floor), 10 % relative
+    #: steps above 10 % output. 34 levels for the default dim floor 0.02.
+    quant_step: float = 0.01  # 8.3
+    quant_rel: float = 0.10  # 8.3
     min_write_interval: float = 1.0  # 8.3
     max_inflight: int = 3  # 8.3
     echo_window: float = 10.0  # 8.4
@@ -172,9 +178,15 @@ class Tunables:
     startup_grace: float = 30.0  # 11.1
 
     def __post_init__(self) -> None:
-        for name in ("slew_step", "slew_interval", "slew_step_empty", "min_delta"):
+        for name in ("slew_step", "slew_interval", "slew_step_empty"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be > 0")
+        # A degenerate grid would either explode the level count (write volume,
+        # §8.3) or be too coarse to render dim goals; bound both knobs.
+        if not 0.001 <= self.quant_step <= 0.2:
+            raise ValueError("quant_step must be in [0.001, 0.2]")
+        if not 0.01 <= self.quant_rel <= 0.5:
+            raise ValueError("quant_rel must be in [0.01, 0.5]")
         if not self.sun_low_deg < self.sun_high_deg:
             raise ValueError("sun_low_deg must be below sun_high_deg")
         if not self.morning_start_min < self.morning_full_min < self.evening_start_min:

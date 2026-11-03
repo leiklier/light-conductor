@@ -468,7 +468,7 @@ class EstimatorState:
     daylight_applied: float | None = None
     #: Latched §4.7 daylight factor held steady while a shadow observation
     #: settles: N̂-driven damping would otherwise nudge the open-loop output by
-    #: sub-min_delta amounts each tick, re-commanding and disrupting the
+    #: sub-step amounts each tick, re-commanding and disrupting the
     #: first-night bootstrap measurement. ``None`` until the first daylight scale.
     daylight_latch: float | None = None
 

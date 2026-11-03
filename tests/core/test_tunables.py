@@ -89,9 +89,10 @@ DOC_ROWS: dict[str, tuple[tuple[str, ...], tuple[object, ...]]] = {
         (0.1, 1.0, 0.25),
     ),
     "on_ramp_max": (("on_ramp_max",), (3.0,)),
-    "min_delta / min_write_interval / max_inflight": (
-        ("min_delta", "min_write_interval", "max_inflight"),
-        (0.03, 1.0, 3),
+    "quant_step / quant_rel": (("quant_step", "quant_rel"), (0.01, 0.10)),
+    "min_write_interval / max_inflight": (
+        ("min_write_interval", "max_inflight"),
+        (1.0, 3),
     ),
     "echo_window": (("echo_window",), (10.0,)),
     "override_timeout": (("override_timeout",), (4 * 3600.0,)),

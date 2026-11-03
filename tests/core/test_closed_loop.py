@@ -14,7 +14,6 @@ from datetime import datetime, timedelta
 from custom_components.light_conductor.core.events import ReviewTick, TvChanged
 from custom_components.light_conductor.core.model import Band, EngineConfig, TvState
 from custom_components.light_conductor.core.plan import SetChannel
-from custom_components.light_conductor.core.tunables import Tunables
 
 from .plant import Channel, Plant, booted_engine, closed_config
 
@@ -392,10 +391,10 @@ def test_tv_on_ceiling_clamps_the_closed_loop_and_settles() -> None:
     capped_start = settled + timedelta(seconds=2)
     _run(plant, capped_start, 60)
     b = eng.state.rooms["lab"].channels["c"].commanded_b
-    # Down at the ceiling, to within the §8.3 min-delta flux grid (the governor
-    # stops writing once the remaining move is below one flux quantum).
+    # Down at the ceiling, to within the §8.3 rendering bound (the sticky grid
+    # renders any goal within max(0.01, 0.08·b) of where it was asked to be).
     assert b < 0.3
-    assert b * b - 0.2 * 0.2 <= Tunables().min_delta
+    assert abs(b - 0.2) <= max(0.01, 0.08 * 0.2)
 
     # And it stays parked: no further corrections once at the ceiling.
     tail = _run(plant, capped_start + timedelta(seconds=120), 60)

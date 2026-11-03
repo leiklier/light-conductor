@@ -845,6 +845,62 @@ Decisions:
    bounds both adapter paths — the native transition and the software stepping
    ramp, whose step count derives from the same `ramp_seconds`.
 
+## D27. Quantize in command space on a grid dense at the dim end (beta.20)
+
+The evidence. Every dim tier in the house rendered as the 2 % dim floor:
+background 8 %, the night path's 2–5 %, TV 5/10 %, kjøkken ADJACENT ~12 %. The
+governor quantized on an absolute 0.03 **flux** grid and gated writes on a
+0.03 flux delta. On the default `b²` curve flux 0.03 is b ≈ 0.173, so every
+goal below b ≈ 0.122 rounded to flux 0 and clamped to the floor — and from a
+lamp at the floor the first level up (0.173) was a 0.0296 flux move, *under*
+the gate: a channel at 2 % could never leave it for any goal below ~25 %. A
+flux grid is coarsest exactly where the eye resolves the most (§4.3 is about
+*ramps* looking even; a *rendering* grid must look even, which flux spacing
+does not).
+
+Decision (§8.3):
+
+1. **Grid in command space**, per channel: `g_0 = dim_floor`, `g_{k+1} = g_k
+   + max(quant_step, quant_rel·g_k)`, last level 1.0. Absolute 0.01 steps
+   through the dim end (a relative step would drop below Plejd's 1/255 device
+   resolution there), 10 % relative steps — Weber-like — above 10 % output.
+   34 levels at the live `dim_floor` 0.02, ≤ 50 for any floor: write volume
+   stays bounded (a full sweep is ≤ 33 level changes). Command space, not flux,
+   because the rendering bound is stated on the command (`|b_emitted − b_goal| ≤
+   max(0.01, 0.08·b_goal)`) and must hold on every curve: a relative flux grid
+   would halve the error on `b²` and double it on sofakrok's near-linear
+   calibrated dim end.
+2. **Sticky quantizer** (`QUANT_HOLD` 0.7): a lit channel at `c` is held while
+   the goal is within 0.7 of a local step of `c`; otherwise the goal renders to
+   its nearest level. The gate is then "emit iff the rendering is not the
+   current level" — by construction it can never strand a channel (outside the
+   band the nearest level is provably a different level) and never re-emits a
+   settled goal (the nearest level is provably inside the new band). Error ≤
+   `max(0.007, 0.07·b)`, and jitter below 0.4 step peak-to-peak — a drifting
+   own-sensor daylight factor — emits nothing. Holding on the *actual* ledger
+   value (not its grid snap) matters: seeded and adopted levels sit off the
+   grid, and a snapped hold would have let them sit up to 1.25 steps away.
+3. **Slew and ramps stay in flux space** (§8.2/§4.3) — only the rendering grid
+   moved. **CT reads the quantized level**: dim-to-warm (§5.3) and blend
+   anchoring (§5.2) are computed on the level the lamp will actually show.
+4. `min_delta` (absolute flux) is retired; `quant_step` / `quant_rel` replace
+   it in §12 and the options form. A stored `min_delta` override is ignored
+   (unknown tunable keys are skipped), which is the behaviour we want.
+
+Echo interplay. `ECHO_LEVEL_TOL` (0.03) now spans up to four adjacent dim
+levels. That is benign: every engine command records its own echo, so no match
+ever has to tell two dim levels apart, and a late or poll-repeated report of
+the *previous* dim level — the only report the overlap can confuse — is a
+stale own echo, which is correctly not latched. Residual (pre-existing): a dial
+moving a lamp by less than the tolerance is indistinguishable from an echo.
+
+Rejected: keeping the flux grid and only lowering `min_delta` (the floor
+cliff remains — at 0.01 flux the first level above 0.02 is still b = 0.1 — and
+the top end gets three times the writes); a log-flux grid (curve-dependent
+error, and the dim end collapses below device resolution); pure nearest
+rounding with no hold band (goal jitter on a level boundary re-commands every
+cycle, the D26 159-writes/h failure in a new place).
+
 ## Open questions — RESOLVED (user, 2026-07-25)
 
 - **Q1 (D8):** master dimmer neutral at 50 % — confirmed (boost possible).

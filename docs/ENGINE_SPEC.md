@@ -290,7 +290,9 @@ output. Each channel has a piecewise-linear curve mapping normalized command
 calibrated. Calibration (§4.4) replaces the default with measured points.
 
 4.3 **Perceptual steps.** All ramps and slew limits operate in flux-relative
-space so a "small step" looks small at any level.
+space so a "small step" looks small at any level. Quantization (§8.3) is the
+one exception: it is defined in command space, on a grid dense at the dim end,
+because a flux grid is coarsest exactly where the eye resolves the most.
 
 4.4 **Room calibration routine** (`RecordLightResponse` button per room with a
 lux sensor): only runs when sun elevation < `night_prior_deg` and the room's
@@ -441,7 +443,7 @@ room's `LuxReport`s are events.
 serve both. Blank/0 ⇒ the tunable.
 
 **Reference hysteresis (D26).** `N̂` drifts continuously under moving cloud and
-`D` feeds the output directly, so every wobble crossed `min_delta` (§8.3) and
+`D` feeds the output directly, so every wobble crossed the §8.3 write gate and
 re-commanded the room — measured at ~159 writes/h per channel over a cloudy
 hour, against a mesh that manages ~7 writes/s for the whole house. A
 reference-sourced factor is therefore **adopted with hysteresis**: recomputed
@@ -733,19 +735,57 @@ paths: the native transition is handed the capped `ramp_seconds`, and the
 software stepping fallback derives its step count from the same value, so a
 no-transition light lights in the same 3 s instead of ~10 one-second steps.
 
-8.3 **Write economy.** A channel is commanded only when the quantized goal
-differs from the ledger's last commanded value by ≥ `min_delta` (flux-relative
-0.03) or crosses on/off. Quantization is two-stage: the engine quantizes on
-the `min_delta` flux grid (~33 perceptual levels), and the adapter owns the
-final device-resolution quantization (e.g. Plejd's 255-step brightness) when
-it renders the command. Rate limit ≥ `min_write_interval` (1.0 s) per
-channel, latest-value-wins coalescing. Site-wide concurrent command cap
-`max_inflight` (default 3) respects the single-gateway BLE bottleneck.
+8.3 **Quantization & write economy (D27).** Quantization is two-stage: the
+engine renders every goal onto a per-channel **command-space level grid**, and
+the adapter owns the final device-resolution quantization (e.g. Plejd's
+255-step brightness) when it renders the command. The grid is dense where the
+eye is sensitive and sparse where it is not:
+
+    g_0 = dim_floor,   g_{k+1} = g_k + max(quant_step, quant_rel · g_k),   last level = 1.0
+
+i.e. absolute `quant_step` (0.01) steps through the dim end — a relative step
+there would fall below the device's 1/255 resolution — and relative
+`quant_rel` (10 %) steps above `quant_step / quant_rel` (10 % output). The
+dim floor and full output are always levels. With the default `dim_floor`
+0.02 the grid has **34 levels** (≤ 50 for any `dim_floor` ≥ 0), which bounds
+write volume: a channel sweeping its whole range issues at most 33 level
+changes. The quantizer is **sticky**: a lit channel at level `c` (its ledger
+value — on the grid, or off it after a seed or an adopted dial) is HELD while
+the goal lies within `QUANT_HOLD · max(quant_step, quant_rel · min(goal, c))`
+of `c` (`QUANT_HOLD` = 0.7, an engineering constant); outside that band the
+goal renders to its **nearest** level. Goal jitter below 0.4 of a step
+peak-to-peak therefore never re-commands a channel. Rendering bound: every
+goal `b ∈ [dim_floor, 1]` is held or emitted within `max(0.007, 0.07·b)` of
+itself, inside the normative `max(0.01, 0.08·b)`.
+
+A channel is commanded exactly when its quantized goal differs from its
+current quantized level, when it crosses on/off, or when a CT rewrite is due
+(§5.4) — the gate can never **strand** a channel: any goal whose rendering is a
+different level emits. (The beta.19 governor quantized on an absolute 0.03
+FLUX grid and gated on a 0.03 flux delta: on the `b²` curve every goal below
+b ≈ 0.12 rounded to flux 0 and clamped to the 2 % floor, and from the floor the
+first grid level, b ≈ 0.173, was a 0.0296 flux move — below the gate, so a lamp
+at the floor could never leave it. Background 8 %, night path 2–5 %, TV 5/10 %
+and kjøkken ADJACENT ~12 % all rendered as 2 %.) Grid and gate live in command
+space; slew and ramp sizing (§8.2) stay in flux space. Dim-to-warm CT (§5.3)
+and blend anchoring (§5.2) read the quantized level, not the pre-rounding
+goal. Rate limit ≥ `min_write_interval` (1.0 s) per channel,
+latest-value-wins coalescing. Site-wide concurrent command cap `max_inflight`
+(default 3) respects the single-gateway BLE bottleneck.
 
 8.4 **Echo ledger.** Every command is recorded (channel, value, timestamp).
 Incoming state reports matching a recent command (± `echo_tolerance`, within
 `echo_window` 10 s) are consumed as echoes; everything else is a *foreign
-change* (§9). Mirrors sonos-conductor's controller ledger. In addition to the
+change* (§9). Mirrors sonos-conductor's controller ledger. **Grid vs. tolerance (D27).**
+`echo_tolerance` (`ECHO_LEVEL_TOL` 0.03 in command space) is wider than the
+§8.3 grid's low-end step (0.01), so up to four adjacent dim levels (0.02-0.05)
+sit inside one tolerance. That is benign by construction: every engine command
+records its own echo, so matching never needs to tell two levels apart, and a
+late or poll-repeated report of the *previous* dim level — the only report the
+overlap can confuse — is a stale own echo that is correctly not latched. The
+accepted residual is the pre-existing one: a hand dial that moves a lamp by
+less than the tolerance is indistinguishable from an echo and is not latched.
+In addition to the
 time-boxed echoes, the adapter keeps a **standing setpoint** per channel (the
 last commanded normalized level) so an integration's periodic true-state poll
 (Plejd re-reports every ~3 min, as a `uint16/256` float) that re-confirms our
@@ -982,7 +1022,8 @@ fresh install and a missed restore get).
 | gain_range_stops / gain_reset | 1.0 / on | 7.1, 7.3 |
 | slew_step / slew_interval / slew_step_empty | 0.1 / 1.0 s / 0.25 | 8.2 |
 | on_ramp_max | 3 s | 8.2 |
-| min_delta / min_write_interval / max_inflight | 0.03 / 1.0 s / 3 | 8.3 |
+| quant_step / quant_rel | 0.01 / 0.10 | 8.3 |
+| min_write_interval / max_inflight | 1.0 s / 3 | 8.3 |
 | echo_window | 10 s | 8.4 |
 | override_timeout | 4 h | 9.2 |
 | startup_grace | 30 s | 11.1 |
