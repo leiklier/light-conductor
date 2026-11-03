@@ -951,6 +951,13 @@ Decisions (§8.4/§8.5/§9.1/§11.1):
    §6.5b suspect zero is pending — the report that resolves a suspicion *is* a
    re-statement of the preserved belief.
 
+Tolerance (review, 2026-11-03): the no-op consume used the absolute
+`ECHO_LEVEL_TOL` 0.03, which at the dim end D27 now renders is a third of the
+level — a hand nudging a 5 % TV level to 8 % was consumed and overwritten. It
+uses `min(0.03, max(2/255, 0.1·setpoint))` now; the 2/255 floor covers every
+live poll flip (max 0.754/255) and the 8-bit re-report of every grid level.
+The echo ledger and fade corridor keep 0.03 (in-flight reports, not re-reads).
+
 What did not change: the only `override.latch` call sites remain `_on_foreign`;
 a §6.5b suspect zero still never re-stamps; CT-only reports keep their beta.19
 handling (a CT change at the standing level is consumed by the adapter's

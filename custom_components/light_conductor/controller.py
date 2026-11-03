@@ -112,6 +112,27 @@ SUN_ENTITY = "sun.sun"
 ECHO_LEVEL_TOL = 0.03
 ECHO_CT_TOL = 60
 
+#: Absolute floor of the STANDING-SETPOINT tolerance (§8.4): two 8-bit steps.
+#: Plejd's true-state poll re-reports a level as uint16/256 — 184 -> 184.355,
+#: 204 -> 204.754 (the largest flip in a live poll log, 0.754/255) — so 2/255
+#: absorbs every poll flip with margin.
+SETPOINT_TOL_FLOOR = 2.0 / 255.0
+
+
+def _setpoint_tol(setpoint: float) -> float:
+    """Tolerance of the standing-setpoint no-op consume (§8.4, D28).
+
+    ``min(ECHO_LEVEL_TOL, max(2/255, 0.1·setpoint))``: relative at the dim end
+    — where the D27 grid now really renders 2-8 % tiers, and an absolute 0.03
+    swallowed a hand nudging TV 5 % to 8 % (diff 0.027) as a poll re-report,
+    so the next write overwrote it — and capped at the echo tolerance above.
+    Only this consume is tightened; the time-boxed echo ledger and the fade
+    corridor keep ``ECHO_LEVEL_TOL`` (their reports are in flight, not
+    re-reads).
+    """
+    return min(ECHO_LEVEL_TOL, max(SETPOINT_TOL_FLOOR, 0.1 * setpoint))
+
+
 #: Media-player states that resolve the tri-state TV input (rule 6.3).
 #: PLAYING wins over ON; everything unlisted (off / standby / unavailable /
 #: unknown) is OFF. ``idle`` is the Apple TV sitting on its home screen and
@@ -1300,12 +1321,10 @@ class Controller:
         # change / recovery (D28), so a user-set level's poll flips are consumed
         # too.
         last = self._last_commanded.get(entity_id)
-        if (
-            last is not None
-            and abs(level - last) <= ECHO_LEVEL_TOL
-            and (old_level is None or abs(old_level - last) <= ECHO_LEVEL_TOL)
-        ):
-            return
+        if last is not None:
+            tol = _setpoint_tol(last)
+            if abs(level - last) <= tol and (old_level is None or abs(old_level - last) <= tol):
+                return
         # Availability-recovery grace (§8.4/§8.5, D25): fold, never latch. The
         # folded report is the lamp's true level: it becomes the setpoint and
         # the engine's belief (D28), and §8.5 reconciles any divergence quietly.

@@ -902,7 +902,9 @@ records its own echo, so matching never needs to tell two levels apart, and a
 late or poll-repeated report of the *previous* dim level — the only report the
 overlap can confuse — is a stale own echo that is correctly not latched. The
 accepted residual is the pre-existing one: a hand dial that moves a lamp by
-less than the tolerance is indistinguishable from an echo and is not latched.
+less than the tolerance is indistinguishable from an echo and is not latched
+— for the standing-setpoint consume that tolerance is now relative at the dim
+end (below), so it is at most 2/255 or 10 % of the level there.
 In addition to the
 time-boxed echoes, the adapter keeps a **standing setpoint** per channel so an
 integration's periodic true-state poll (Plejd re-reports every ~3 min, as a
@@ -914,7 +916,15 @@ engine last adopted** — from a foreign change (§9.1, D28) or an availability
 recovery (below). With only own commands recorded, every poll flip of a
 user-set level re-latched and re-stamped `override_since`, so the 4 h
 `override_timeout` never fired while the lamp was lit (live: `override_since`
-equal to the lamp's `last_updated` in several rooms).
+equal to the lamp's `last_updated` in several rooms). The no-op consume uses
+its own, tighter tolerance `min(echo_tolerance, max(2/255, 0.1·setpoint))`:
+relative at the dim end, where the §8.3 grid now really renders 2–8 % tiers
+and the absolute 0.03 swallowed a hand nudging a 5 % TV level to 8 % (a 0.027
+move) as a re-report — the next write then overwrote it. The 2/255 floor
+covers every poll flip seen live (largest 0.754/255) and every own write's
+re-report at every grid level (the setpoint is recorded at the adapter's
+8-bit rendering). The time-boxed echoes and the fade corridor keep
+`echo_tolerance`.
 
 **Ledger seeding across startup/reload.** On controller start — a fresh setup
 *and* an options reload — the standing setpoint of every configured channel is

@@ -10,6 +10,7 @@ sofakrok latched 17:15:26; 22:43:28 -> kontor 22:43:33, sofakrok 22:43:54).
 
 from __future__ import annotations
 
+import pytest
 from homeassistant.const import ATTR_ENTITY_ID, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import async_mock_service
@@ -160,3 +161,70 @@ async def test_outdoor_stale_zero_resolution_still_reaches_the_engine(hass, monk
     await hass.async_block_till_done()
     foreign = [ev for ev in submitted if isinstance(ev, ForeignChange)]
     assert [round(ev.level * 255) for ev in foreign] == [0, 128]
+
+
+# --- standing-setpoint tolerance (§8.4, review fix 3) -------------------------
+
+#: Every integer -> float flip in a live 8-minute poll log (2026-11-02,
+#: /api/states every 4 s): the largest is 0.754/255.
+LIVE_POLL_FLIPS = [
+    (184, 184.35546875),
+    (5, 5.01953125),
+    (62, 62.2421875),
+    (41, 41.16015625),
+    (204, 204.75390625),
+    (145, 145.56640625),
+]
+
+
+def test_setpoint_tolerance_is_relative_at_the_dim_end() -> None:
+    tol = lc_controller._setpoint_tol
+    assert tol(0.9) == lc_controller.ECHO_LEVEL_TOL  # capped
+    assert abs(tol(0.2) - 0.02) < 1e-12  # relative
+    assert tol(0.02) == lc_controller.SETPOINT_TOL_FLOOR  # floored at 2/255
+
+
+def test_own_write_re_reports_are_consumed_at_every_grid_level() -> None:
+    """D27 x §8.4: whatever level the governor emits, the adapter renders it
+    to 8 bits and records that as the setpoint; the poll's re-report of it (up
+    to 0.76/255 off, both ways) stays inside the setpoint tolerance."""
+    from custom_components.light_conductor.core.governor import level_grid
+
+    for q in level_grid(0.02, 0.01, 0.10):
+        b = lc_controller._level_to_brightness(q)
+        setpoint = b / 255.0
+        for frac in (0.0, 0.76, -0.76):
+            assert abs((b + frac) / 255.0 - setpoint) <= lc_controller._setpoint_tol(setpoint), q
+
+
+@pytest.mark.parametrize(("integer", "flip"), LIVE_POLL_FLIPS)
+async def test_live_poll_flips_are_consumed(hass, monkeypatch, integer, flip) -> None:
+    """§8.4: every flip the live poll produced is a no-op re-report."""
+    set_light(hass, "light.a", "on", brightness=integer, transition=True)
+    hass.states.async_set("binary_sensor.pa", "on")
+    entry = await setup_entry(
+        hass, options([room("a", ["light.a"], presence="binary_sensor.pa")]), enabled=False
+    )
+    controller = hass.data[DOMAIN][entry.entry_id]
+    set_light(hass, "light.a", "on", brightness=flip, transition=True)
+    await hass.async_block_till_done()
+    set_light(hass, "light.a", "on", brightness=integer, transition=True)
+    await hass.async_block_till_done()
+    assert not controller.engine.room_state("a").overridden
+
+
+async def test_a_dim_end_nudge_is_not_swallowed(hass) -> None:
+    """§8.4 (review fix 3): TV 5 % renders as 13/255; a hand nudging it to 8 %
+    (20/255, a 0.027 move) is a foreign change — the absolute 0.03 tolerance
+    consumed it as a poll re-report and the next write overwrote it."""
+    set_light(hass, "light.a", "on", brightness=13, transition=True)
+    hass.states.async_set("binary_sensor.pa", "on")
+    entry = await setup_entry(
+        hass, options([room("a", ["light.a"], presence="binary_sensor.pa")]), enabled=False
+    )
+    controller = hass.data[DOMAIN][entry.entry_id]
+    set_light(hass, "light.a", "on", brightness=20, transition=True)
+    await hass.async_block_till_done()
+    rs = controller.engine.room_state("a")
+    assert rs.overridden
+    assert abs(rs.channels["light.a"].commanded_b - 20 / 255) < 1e-9
