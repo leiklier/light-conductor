@@ -207,6 +207,11 @@ class RoomConfig:
     living_group: bool = False
     #: Per-room ACTIVE hold override (rule 1.3); None = tunable default.
     hold_seconds: float | None = None
+    #: Per-room override of the §1.1 fallback persistence (D31); None = the
+    #: ``fallback_min_on`` tunable, 0 = the raw OR (no persistence). The raw
+    #: sensors differ: kjøkken/sofakrok fire while nobody is home, kontor and
+    #: spisebord never did.
+    fallback_min_on: float | None = None
     #: Membership in the night-path set (rule 6.2).
     night_path: bool = False
     #: Room participates in TV mode when a TV plays (rule 6.3).
@@ -284,6 +289,12 @@ class RoomState:
     # Presence resolution (rule 1.1).
     primary: bool | None = None
     fallback: bool | None = None
+    #: Start of the fallback's current on-spell, with dropouts of at most
+    #: ``FALLBACK_BRIDGE`` bridged (rule 1.1 persistence, D31). ``None`` when
+    #: the fallback has not been on.
+    fallback_on_since: datetime | None = None
+    #: When the fallback last fell (bridging reference, rule 1.1, D31).
+    fallback_off_at: datetime | None = None
     #: When the primary went unavailable (None); drives presence_blind_hold.
     primary_blind_since: datetime | None = None
     #: Last definitive resolved occupancy (held while blind, rule 1.1/1.8).

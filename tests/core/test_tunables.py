@@ -29,6 +29,7 @@ DOC_ROWS: dict[str, tuple[tuple[str, ...], tuple[object, ...]]] = {
     "living_memory": (("living_memory",), (900.0,)),
     "trigger_hold / door_close_hold": (("trigger_hold", "door_close_hold"), (300.0, 15.0)),
     "presence_blind_hold": (("presence_blind_hold",), (120.0,)),
+    "fallback_min_on": (("fallback_min_on",), (15.0,)),
     "sun_high_deg / sun_low_deg": (("sun_high_deg", "sun_low_deg"), (10.0, -4.0)),
     "evening_start / evening_full": (
         ("evening_start_min", "evening_full_min"),

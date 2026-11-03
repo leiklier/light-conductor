@@ -190,7 +190,14 @@ class Engine:
         match event:
             case PresenceChanged():
                 if (rs := s.rooms.get(event.room_id)) is not None:
-                    roles.ingest_presence(rs, event.primary, event.fallback, now)
+                    roles.ingest_presence(
+                        rs,
+                        event.primary,
+                        event.fallback,
+                        now,
+                        self.tun,
+                        self._min_on(event.room_id),
+                    )
             case ActivityChanged():
                 if (rs := s.rooms.get(event.room_id)) is not None:
                     roles.ingest_activity(rs, event.activity)
@@ -214,7 +221,10 @@ class Engine:
                         # way: the toggle gates ingestion, it is not a release
                         # condition (rule 9.2).
                         rs.trigger_hold_until = None
-                        if roles.occupancy(rs, now, self.tun) is not True:
+                        if (
+                            roles.occupancy(rs, now, self.tun, self._min_on(event.room_id))
+                            is not True
+                        ):
                             rs.vacancy_hold_until = None
                             if rs.self_active:
                                 rs.self_active = False
@@ -303,6 +313,11 @@ class Engine:
                     self._cal_requests.append(event.room_id)
             case _:
                 pass
+
+    def _min_on(self, room_id: str) -> float | None:
+        """A room's §1.1 fallback-persistence override (D31); None = tunable."""
+        room = self.config.room(room_id)
+        return room.fallback_min_on if room is not None else None
 
     def _on_tv(self, tv: TvState, now: datetime) -> None:
         """Fold a tri-state TV transition, arming the pause grace (rules 6.3/6.3a).
@@ -785,6 +800,7 @@ class Engine:
                 room.hold_seconds,
                 e,
                 dusk.get(room.room_id),
+                room.fallback_min_on,
             )
         living = self._living_active(now)
 
@@ -890,7 +906,9 @@ class Engine:
                 # release-and-counter the press (review F4).
                 if not override.timeout_due(rs, now, tun, occupied):
                     plan.review_at(override.override_review(rs, now, tun))
-                    plan.review_at(roles.next_review(rs, now))  # deferred hand-back (D30)
+                    plan.review_at(
+                        roles.next_review(rs, now, tun, room.fallback_min_on)
+                    )  # deferred hand-back (D30)
                     return self._diag(room, rs, rs.role)
                 override.release(rs)
             elif res is not None and res.off:
@@ -906,7 +924,7 @@ class Engine:
                 # OFF-worthy and release the latch (F2 — otherwise release could
                 # wait up to override_timeout in a quiet house).
                 plan.review_at(override.override_review(rs, now, tun))
-                plan.review_at(roles.next_review(rs, now))
+                plan.review_at(roles.next_review(rs, now, tun, room.fallback_min_on))
                 return self._diag(room, rs, rs.role)
 
         # Resolve outputs (funnel order, rule 8.1). Three paths converge on a
@@ -1047,7 +1065,7 @@ class Engine:
                 base_delta = estimator.a_hat(rs, photo, 1.0) - a_before_unit
                 estimator.record_step(rs.est, rs.est.l_filt, base_delta, now, tun, shadow=shadow)
 
-        plan.review_at(roles.next_review(rs, now))
+        plan.review_at(roles.next_review(rs, now, tun, room.fallback_min_on))
         # Outdoor rooms follow the sun ramp, but at an E plateau (overnight, or a
         # winter afternoon before sunset) the global circadian scheduler goes
         # quiet — the next clock boundary is hours away — so an outdoor room that

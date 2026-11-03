@@ -346,6 +346,49 @@ async def test_options_room_detail_daylight_reference_round_trip(hass: HomeAssis
     assert CONF_DAYLIGHT_FULL not in gang
 
 
+def test_build_engine_config_fallback_min_on_override() -> None:
+    """§1.1/D31: a room's fallback_min_on override is carried (0 is a real
+    value — the raw OR), and absent means "use the tunable" (None)."""
+    from custom_components.light_conductor.const import CONF_FALLBACK_MIN_ON, build_engine_config
+
+    raw = room("kontor", ["light.k"])
+    raw[CONF_FALLBACK_MIN_ON] = 0
+    slow = room("kjokken", ["light.j"])
+    slow[CONF_FALLBACK_MIN_ON] = 20
+    plain = room("spisebord", ["light.s"])
+    cfg = build_engine_config(None, options([raw, slow, plain]))
+    assert cfg.room("kontor").fallback_min_on == 0.0
+    assert cfg.room("kjokken").fallback_min_on == 20.0
+    assert cfg.room("spisebord").fallback_min_on is None
+
+
+async def test_options_room_detail_fallback_min_on_round_trip(hass: HomeAssistant) -> None:
+    """D31: the room step stores the override (including 0) and a blank clears it."""
+    from custom_components.light_conductor.const import CONF_FALLBACK_MIN_ON
+
+    entry = await setup_entry(hass, options([room("kontor", ["light.k"])]))
+
+    async def configure(flow_id: str, data: dict) -> dict:
+        return await hass.config_entries.options.async_configure(flow_id, data)
+
+    async def edit(data: dict) -> None:
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await configure(result["flow_id"], {"next_step_id": "rooms"})
+        result = await configure(result["flow_id"], {"next_step_id": "edit_room"})
+        result = await configure(result["flow_id"], {"room_id": "kontor"})
+        assert result["step_id"] == "room_detail"
+        base = {"name": "Kontor", "shape": "presence", "channels": ["light.k"]}
+        result = await configure(result["flow_id"], {**base, **data})
+        result = await configure(result["flow_id"], {"next_step_id": "init"})
+        result = await configure(result["flow_id"], {"next_step_id": "finish"})
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    await edit({CONF_FALLBACK_MIN_ON: 0})
+    assert entry.options[CONF_ROOMS][0][CONF_FALLBACK_MIN_ON] == 0
+    await edit({})
+    assert CONF_FALLBACK_MIN_ON not in entry.options[CONF_ROOMS][0]
+
+
 async def test_room_detail_opens_with_a_dangling_daylight_reference(hass: HomeAssistant) -> None:
     """A reference whose room lost its lux sensor must not brick the editor: the
     stored value is prefilled as a suggested_value, so it has to stay in the

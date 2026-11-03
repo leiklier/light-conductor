@@ -1024,6 +1024,48 @@ timeout (it would still fire on an occupant, just later) and resetting the
 timer on occupancy (a forgotten lamp in a busy room would never be handed
 back; deferral hands it back the first time the room empties).
 
+## D31. Fallback occupancy must persist before it counts (beta.20)
+
+The evidence (recorder 10-25 → 11-03, replayed through the real `roles` code,
+80.5 h home+awake): the raw fallbacks are OR-ed with presence-conductor's
+room occupancy and dominate it — every one of the 566 replayed ACTIVE
+episodes in kjøkken, spisebord, sofakrok and kontor *started* on a fallback
+edge; presence-conductor confirms 8–27 s later (median, from the last raw
+rise) or never (kjøkken: 85 primary spells in nine days). The raw sensors also
+fire with the house empty — kjøkken 0.73/h, sofakrok 0.89/h (46 h of away
+time); kontor and spisebord never did — and each blip minted a full ACTIVE
+episode with a 120 s hold (an EMPTY activity peak scales by 1.0), the kitchen
+bench strip included.
+
+Decision (§1.1): while the primary is available, the fallback OR counts only
+once it has been on for `fallback_min_on` (default 15 s, per-room override,
+0 = raw OR), dropouts ≤ `FALLBACK_BRIDGE` (2 s) bridged, the boundary
+self-scheduled; the blind path is unchanged. One aggregate per room rather
+than per entity: three rooms have one fallback, and kontor's two (a mmWave
+with a ≥ 14 s minimum spell and a PIR with a ≥ 75 s pulse) both pass any
+threshold ≤ 14 s and agree beyond it.
+
+Why 15 s. The raw onset of a false blip is statistically identical to a real
+entry (rising-edge bursts within 3–20 s: same fractions away and home), so no
+rule can be both instant and selective; the threshold trades blip removal
+against entry latency. At 15 s: sofakrok's empty-house blips are 88 % shorter
+(10 s: 80 %), kjøkken's 47 % (10 s: 32 %); sofakrok raw-only episodes
+121 → 66 and short dips 146 → 100, kjøkken dips 143 → 124, spisebord 92 → 82;
+no long sit loses coverage (the longest lost piece is 7.4 min, sofakrok —
+blip-started holds). The cost: **every turn-on the primary has not confirmed
+first is 15 s later** — in this replay, all of them. The per-room override
+exists because the sensors differ: kontor's and spisebord's fallbacks never
+fired with the house empty, so for them the filter is pure latency; the
+recommended live setting is 0 there (a configuration change, not shipped
+here). The replay table is in the beta.20 PR.
+
+Considered and not shipped: "on ≥ N s OR ≥ 2 rising edges within W" (edge
+bursts do not discriminate, above); a short provisional hold for unconfirmed
+fallback episodes instead of a gate (= scaling EMPTY-peak holds by
+`hold_passing_scale`; out of scope here, and the replay makes it worse: dips
+kjøkken 143 → 187, sofakrok 146 → 253 — the room flickers instead of
+lingering).
+
 ## Open questions — RESOLVED (user, 2026-07-25)
 
 - **Q1 (D8):** master dimmer neutral at 50 % — confirmed (boost possible).

@@ -84,6 +84,7 @@
           "presence_primary": "Primær tilstedeværelse",
           "activity_sensor": "Aktivitetssensor",
           "occupancy_fallback": "Reserve for tilstedeværelse",
+          "fallback_min_on": "Reservesensor-varighet (s, tomt = global, 0 = av)",
           "neighbours": "Naborom",
           "wall_event_entities": "Veggbrytere",
           "trigger_entities": "Utløsere (dør / passering)",

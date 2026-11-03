@@ -43,6 +43,25 @@ optional activity sensor (presence-conductor `room_activity`:
 empty/passing/active/settled), optional trigger entities (momentary, e.g. a
 door sensor), and the adjacency list (other room ids configured as neighbours).
 
+**Fallback persistence (D31).** While the primary is available, the OR of the
+room's fallback entities counts toward occupancy only once it has been on for
+`fallback_min_on` (default 15 s; a room may override it, 0 = the raw OR).
+Dropouts of at most `FALLBACK_BRIDGE` (2 s, an engineering constant) continue
+the spell — the raw mmWave sensors re-trigger through near-instant off→on
+toggles (half of all kjøkken/sofakrok gaps are < 50 ms), so an unbridged
+"continuously on" would never accumulate on a person sitting still. The
+engine self-schedules the persistence boundary (`on + fallback_min_on`). The
+primary itself is never delayed, and with the primary **unavailable** the
+fallback stands alone, raw, exactly as before (the blind path has nothing
+better to read). The filter targets the raw sensors' isolated blips — kjøkken
+and sofakrok fire ~0.7–0.9 times an hour with the house empty, and each blip
+minted a full ACTIVE episode — while keeping the long stationary spells
+presence-conductor misses (they persist, then hold the room as before). Its
+cost is latency: presence-conductor lags the raw sensors (median 8–27 s after
+the last raw rise), so a room the primary has not yet confirmed lights
+`fallback_min_on` after the first raw detection. A PIR fallback (the kontor
+PIR: on-pulses ≥ 75 s, its hold time) is delayed, never filtered out.
+
 1.2 **Roles.** Each room is in exactly one role:
 
 | role | meaning |
@@ -1052,6 +1071,7 @@ fresh install and a missed restore get).
 | living_memory | 900 s | 1.6 |
 | trigger_hold / door_close_hold | 300 s / 15 s | 1.7, 1.9 |
 | presence_blind_hold | 120 s | 1.1, 1.8 |
+| fallback_min_on | 15 s | 1.1 |
 | sun_high_deg / sun_low_deg | +10° / −4° | 2.3 |
 | evening_start / evening_full | 20:00 / 22:30 | 2.3 |
 | morning_start / morning_full | 06:00 / 07:30 | 2.3 |

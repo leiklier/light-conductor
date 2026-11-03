@@ -19,7 +19,11 @@ What it does:
   toward cozy warm evenings; no hard clock steps.
 - **Follow-me with room personalities** — living-area rooms make subtle
   adjustments and never go dark while the area is in use; utility rooms turn
-  fully off after vacancy.
+  fully off after vacancy. A room's fallback occupancy sensors (raw mmWave/PIR
+  next to presence-conductor) count only once they have stayed on for
+  `fallback_min_on` (15 s; per room, 0 = immediately), so their stray blips no
+  longer light a room — at the price of that much latency when
+  presence-conductor has not confirmed the room yet.
 - **Master gain dimmer** — one HomeKit dimmer scales the whole automation
   relative to what it would do on its own.
 - **Night path, TV mode, away-off, outdoor room** — built in. TV mode is

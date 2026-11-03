@@ -55,6 +55,7 @@ from .const import (
     CONF_DAYLIGHT_FULL,
     CONF_DAYLIGHT_REFERENCE,
     CONF_EVENING_CAP,
+    CONF_FALLBACK_MIN_ON,
     CONF_HOLD_SECONDS,
     CONF_LIVING_GROUP,
     CONF_LUX_ACTIVE_DAY,
@@ -113,6 +114,7 @@ _TUNABLE_UI: dict[str, tuple[float, float, float]] = {
     "trigger_hold": (10, 1800, 10),
     "door_close_hold": (0, 120, 1),
     "presence_blind_hold": (10, 600, 10),
+    "fallback_min_on": (0, 120, 1),
     "sun_high_deg": (-10, 30, 1),
     "sun_low_deg": (-20, 10, 1),
     "circadian_tick": (30, 900, 30),
@@ -529,6 +531,12 @@ class LightConductorOptionsFlow(OptionsFlow):
                 updated[CONF_HOLD_SECONDS] = user_input[CONF_HOLD_SECONDS]
             else:
                 updated.pop(CONF_HOLD_SECONDS, None)  # blank clears the room override
+            # Fallback persistence override (§1.1, D31): 0 is a real value (the
+            # raw OR) — only a blank submission clears it back to the tunable.
+            if user_input.get(CONF_FALLBACK_MIN_ON) not in (None, ""):
+                updated[CONF_FALLBACK_MIN_ON] = user_input[CONF_FALLBACK_MIN_ON]
+            else:
+                updated.pop(CONF_FALLBACK_MIN_ON, None)
             profile = dict(room.get(CONF_PROFILE, _default_profile()))
             for key in (
                 CONF_VACANCY,
@@ -582,6 +590,11 @@ class LightConductorOptionsFlow(OptionsFlow):
                 _opt(CONF_PRESENCE_PRIMARY, room): _entity("binary_sensor", "occupancy"),
                 _opt(CONF_ACTIVITY_SENSOR, room): _entity("sensor"),
                 _opt(CONF_OCCUPANCY_FALLBACK, room): _entities(["binary_sensor"]),
+                # §1.1 (D31): seconds a fallback must stay on before it counts
+                # next to a live primary; blank ⇒ the tunable, 0 ⇒ raw OR.
+                _opt(CONF_FALLBACK_MIN_ON, room): NumberSelector(
+                    NumberSelectorConfig(min=0, max=120, step=1, mode=NumberSelectorMode.BOX)
+                ),
                 _opt(CONF_NEIGHBOURS, room): _select_multi(
                     [r for r in self._room_ids() if r != self._room_id]
                 ),
