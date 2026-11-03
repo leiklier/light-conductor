@@ -1110,8 +1110,9 @@ Decision (§2.3/§2.4/§4.5):
 
 1. **E stays darkness; new `W = max(E_clock, min(E_sun, dusk_ceiling))`.**
    The sun alone carries the wind-down only to `dusk_ceiling` (new tunable,
-   default 1.0 ⇒ W ≡ E, i.e. beta.19 routing; planned live value 0.4); the
-   clock carries it the rest of the way.
+   default 1.0 ⇒ W ≡ E, i.e. beta.19's *routing*; planned live value 0.4);
+   the clock carries it the rest of the way. **1.0 is not beta.19's output**
+   — see (3).
 2. **Every consumer, assigned** (grep of `circadian.`, `e >=`/`e <`,
    `evening_factor`, `is_evening`, `last_e`, parameters named `e`):
    - *W* — `targets.role_outputs`/`active_outputs` (ACTIVE interpolation, and
@@ -1149,6 +1150,18 @@ Decision (§2.3/§2.4/§4.5):
    the cap only trims what rides above it (master gain, closed-loop demand).
    `evening_cap_threshold` now only gates the §1.7 corridor (it keeps its name
    — stored options use it).
+   **Visible at any `dusk_ceiling`, 1.0 included** (independent review,
+   2026-11-03 — an earlier draft of this ADR said 1.0 kept beta.19). Every live
+   room has `evening_output_cap == active_evening`, so beta.19's cap step at
+   E = 0.5 was the evening tier arriving early, and the continuous cap removes
+   exactly that: at E = 0.5 the kitchen is 61 % instead of 25 %, sofakrok
+   (open loop) 64–67 % instead of 30 %; on 2 Nov the 25/30 % tier is reached at
+   ~17:08–17:11 (E = 1) instead of 16:09. That is the intended change — the
+   user asked for no cliffs and a brighter dusk — but it is a change. Second
+   consequence: with master gain above neutral the cap trims winter *daytime*
+   output (E never reaches 0 at midday ~25 Nov–17 Jan; 21 Dec noon E ≈
+   0.17–0.20 ⇒ cap ≈ 0.86–0.88 at `evening_output_cap` 0.25–0.3, where beta.19
+   left a ×2 boost at 100 %).
 4. **Continuous boost hand-over**: the boost band is `β·tier + (1 − β)·evening`
    with β falling 1 → 0 across `W ∈ [boost_evening_max − 0.2,
    boost_evening_max]`; at and above `boost_evening_max` the band is exactly

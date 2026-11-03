@@ -21,7 +21,9 @@ What it does:
   the hour, and `dusk_ceiling` (Options → Tunables; 1.0 keeps them together)
   sets how far sunset alone may dim the house — at 0.4 a November 17:00 is
   warm but still bright, and the evening tier arrives on the 20:00–22:30
-  clock ramp.
+  clock ramp. Since beta.20 the evening cap has no step: even at 1.0 the
+  house now eases down through dusk (e.g. the kitchen reaches its 25 %
+  evening level around 17:10 on 2 Nov instead of dropping to it at 16:09).
 - **Follow-me with room personalities** — living-area rooms make subtle
   adjustments and never go dark while the area is in use; utility rooms turn
   fully off after vacancy. A room's raw fallback sensors (mmWave/PIR next to

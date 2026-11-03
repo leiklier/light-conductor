@@ -3,7 +3,9 @@
 ``E in [0, 1]`` (0 = full day, 1 = full evening) = ``max(E_sun, E_clock)`` —
 "it is dark". ``W = max(E_clock, min(E_sun, dusk_ceiling))`` — "it is late":
 the sun alone can only carry the wind-down to ``dusk_ceiling``, the clock
-carries it the rest of the way. With ``dusk_ceiling`` 1.0 (default) W ≡ E. In
+carries it the rest of the way. With ``dusk_ceiling`` 1.0 (default) W ≡ E —
+the same factor everywhere, though the now-continuous evening cap (§2.4)
+still makes dusk brighter than beta.19 (D33). In
 a Nordic winter the two are hours apart (2 Nov: E ≥ 0.5 from ~16:09; 21 Dec
 from ~14:51) and one factor doing both jobs dimmed the house to its bedtime
 tier mid-afternoon.

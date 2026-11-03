@@ -68,7 +68,9 @@ class Tunables:
     #: — the governor only emits on a level change — not by the tick.
     circadian_tick: float = 60.0  # 2.3
     #: How far the SUN alone carries the wind-down factor W (§2.3, D33):
-    #: W = max(E_clock, min(E_sun, dusk_ceiling)). 1.0 ⇒ W ≡ E (beta.19).
+    #: W = max(E_clock, min(E_sun, dusk_ceiling)). 1.0 ⇒ W ≡ E: beta.19's
+    #: ROUTING, but not beta.19's output — the evening cap is continuous now
+    #: (§2.4), so dusk is brighter than beta.19 even at 1.0 (D33).
     dusk_ceiling: float = 1.0  # 2.3
     evening_output_cap: float = 0.3  # 2.4 (profile default: 0.3 living)
     #: E (darkness) at/above which a corridor counts as "evening" for its

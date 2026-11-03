@@ -182,7 +182,10 @@ between `evening_start` (default 20:00) and `evening_full` (default 22:30)
 local time, and back to 0 at `morning_start` (default 06:00) → `morning_full`
 (07:30). **`W = max(E_clock, min(E_sun, dusk_ceiling))`** — "it is late": the
 sun alone can carry the wind-down only up to `dusk_ceiling`, the clock carries
-it the rest of the way. `dusk_ceiling` 1.0 (default) makes W ≡ E. In a Nordic
+it the rest of the way. `dusk_ceiling` 1.0 (default) makes W ≡ E — every
+consumer reads the same factor it read in beta.19 — but that is **not**
+beta.19's output: the evening cap is continuous now (§2.4), which by itself
+brightens every dusk (numbers there). In a Nordic
 winter the two are hours apart — 2 Nov E ≥ 0.5 from ~16:09, 21 Dec from
 ~14:51, and E never reaches 0 at midday ~25 Nov–17 Jan at 59° N — and one
 factor doing both jobs put the house on its bedtime tier mid-afternoon.
@@ -225,7 +228,20 @@ non-binding at W = 0, `evening_output_cap` at W = 1. It is the straight line
 the ACTIVE interpolation draws from full output to the cap, so a profile whose
 evening tier is at or below its cap (every live room) is never dimmed *by*
 the cap — the interpolation does it — and the cap only trims what rides above
-(master gain > 1, closed-loop demand, a TV table). It applies in the §8 funnel
+(master gain > 1, closed-loop demand, a TV table).
+
+**This is a visible change even at `dusk_ceiling` 1.0.** Every live room has
+`evening_output_cap == active_evening`, so beta.19's step at E = 0.5 *was*
+their evening tier arriving early: on 2 Nov E reaches 0.5 at 16:09, and the
+kitchen went 67 % → 25 % (sofakrok/spisebord/gang open-loop 69 % → 30 %) in
+one write, then sat there. Now the room follows the interpolation down to the
+tier as E completes its ramp: kitchen 61 % at 16:10, 50 % at 16:30, 38 % at
+16:50, 25 % at ~17:10 (E = 1); sofakrok/spisebord 64/53/42 → 30 %. The
+evening tier is reached ~1 h later than in beta.19 at dusk, and the clock ramp
+(20:00–22:30) is unchanged. With master gain above neutral the cap now also
+trims *daytime* output in winter, when E (= W at 1.0) never falls to 0: at
+21 Dec noon E ≈ 0.17–0.20 gives cap ≈ 0.86–0.88 against a boosted output
+that beta.19 left at 100 %. It applies in the §8 funnel
 on every path: the open-loop tiers, the mode tables that are gain-scaled, the
 closed-loop correction **and the closed-loop hold** (a held level above
 `cap(W)` comes down with it, a grid step at a time, instead of the whole
