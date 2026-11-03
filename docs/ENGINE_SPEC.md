@@ -101,14 +101,21 @@ room with `vacancy: off` (kontor) demotes straight to OFF after its hold.
 ADJACENT when any neighbour is ACTIVE, BACKGROUND per 1.6 during evening
 (darkness `E ≥ evening_cap_threshold`, §2.3 — a dark corridor next to a lit
 living area, not a late one), else OFF. Trigger entities (1.1) pulse a corridor to ACTIVE for
-`trigger_hold` seconds.
+`trigger_hold` seconds on their **opening** edge only; a corridor ignores the
+closing edge (D34) — its triggers are pass-through contacts (the front door on
+gang), and closing the front door behind you must not darken the hallway
+`door_close_hold` later. The closing-edge shortening of §1.9 is for DOOR-shaped
+rooms; a PRESENCE-shaped room with trigger entities keeps it too (its presence
+sensing carries an occupant past the short hold, and a trigger there is a
+door into that room).
 
 1.8 **Unknown presence.** Primary and fallbacks all unavailable ⇒ the room
 freezes its current role for `presence_blind_hold`, then demotes one step per
 `presence_blind_hold` interval (never straight to OFF from ACTIVE).
 
 1.9 **Door-triggered rooms** (soverom): trigger entity opening ⇒ ACTIVE for
-`trigger_hold` (restartable); closing edge ⇒ shortened hold `door_close_hold`.
+`trigger_hold` (restartable); closing edge ⇒ shortened hold `door_close_hold`
+(door- and presence-shaped rooms only; corridors ignore it, §1.7).
 Sleep mode overrides per §6.1. A per-room **door-lighting** switch (§10,
 restorable, default on) gates trigger *ingestion* in the engine: while it is
 off, no pulse — opening or closing — mints a hold, so the room simply has no

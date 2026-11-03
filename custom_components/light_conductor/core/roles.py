@@ -115,14 +115,31 @@ def ingest_activity(rs: RoomState, activity: Activity | None) -> None:
         rs.episode_peak = max_activity(rs.episode_peak, activity)
 
 
-def ingest_trigger(rs: RoomState, closing: bool, now: datetime, tun: Tunables) -> None:
+def ingest_trigger(
+    rs: RoomState,
+    closing: bool,
+    now: datetime,
+    tun: Tunables,
+    shape: RoomShape = RoomShape.DOOR,
+) -> None:
     """Fold a corridor/door trigger (rules 1.7, 1.9).
 
     The door-lighting toggle gates INGESTION (rule 1.9): with it off no pulse —
     opening or closing — mints a hold, so the room simply has no trigger input
     while the occupant has switched the behaviour away.
+
+    The closing edge depends on the room's shape (D34). A DOOR-shaped room
+    (soverom) shortens to ``door_close_hold``: the door closing behind you
+    means you left — or shut yourself in, and the dial is yours. A CORRIDOR
+    ignores it: its triggers are pass-through contacts (the front door on
+    gang), and closing the front door behind you must not darken the hallway
+    15 s later — only the opening edge pulses ``trigger_hold``. A PRESENCE
+    room with triggers keeps the door behaviour (its presence sensing carries
+    the occupant past the short hold anyway).
     """
     if not rs.door_lighting:
+        return
+    if closing and shape is RoomShape.CORRIDOR:
         return
     hold = tun.door_close_hold if closing else tun.trigger_hold
     rs.trigger_hold_until = now + timedelta(seconds=hold)

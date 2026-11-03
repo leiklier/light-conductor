@@ -212,7 +212,9 @@ class Engine:
                     roles.ingest_activity(rs, event.activity)
             case TriggerFired():
                 if (rs := s.rooms.get(event.room_id)) is not None:
-                    roles.ingest_trigger(rs, event.closing, now, self.tun)
+                    room = self.config.room(event.room_id)
+                    shape = room.shape if room is not None else RoomShape.DOOR
+                    roles.ingest_trigger(rs, event.closing, now, self.tun, shape)
             case DoorLightingChanged():
                 if (rs := s.rooms.get(event.room_id)) is not None:
                     if not event.on:

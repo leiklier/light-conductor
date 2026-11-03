@@ -1173,6 +1173,20 @@ correction lands, so a closed-loop room moves in deadband-sized corrections as
 before; what D33 guarantees is that the level it lands on (and the capped
 hold) is continuous in W.
 
+## D34. Corridor triggers ignore the closing edge (beta.20)
+
+`roles.ingest_trigger` shortened the hold to `door_close_hold` (15 s) on a
+closing edge for every room shape. Right for a door-shaped room (§1.9 — the
+bedroom door closing means you left, or shut yourself in), wrong for a
+corridor: the plan is to add the front-door contact as a gang trigger, and
+closing the front door behind you would darken the hallway 15 s later, while
+you take your shoes off. Decision (§1.7): a CORRIDOR's triggers pulse
+`trigger_hold` on opening only; the closing edge is ignored. DOOR rooms are
+unchanged; PRESENCE-shaped rooms with triggers keep the shortening (specified
+explicitly now — their presence sensing carries an occupant past the short
+hold, and a trigger there is a door into that room). Outdoor rooms never use
+triggers (§10).
+
 ## Open questions — RESOLVED (user, 2026-07-25)
 
 - **Q1 (D8):** master dimmer neutral at 50 % — confirmed (boost possible).
