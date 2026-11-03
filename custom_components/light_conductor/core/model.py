@@ -369,6 +369,9 @@ class EngineState:
     tv_hold_until: datetime | None = None
     night_active: bool = False
     night_hold_until: datetime | None = None
+    #: The open episode's last REAL night trigger (§6.2, D32): presence may
+    #: hold the episode at most ``night_presence_hold_max`` past it.
+    night_trigger_at: datetime | None = None
     # Master gain (rule 7).
     master_on: bool = True
     master_pct: float = 50.0

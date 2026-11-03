@@ -96,3 +96,26 @@ def test_presence_ending_inside_the_hold_still_extends_from_its_end() -> None:
     left = t + timedelta(minutes=9)
     eng.handle(PresenceChanged("sofakrok", False), left)
     assert eng.state.night_hold_until == left + HOLD
+
+
+def test_presence_holds_at_most_night_presence_hold_max_past_the_last_trigger() -> None:
+    """D32 (review): a stuck primary must not hold the 20 % kitchen night level
+    until sleep-off — presence carries the episode at most
+    night_presence_hold_max past its last real trigger; a new trigger re-bases."""
+    eng, t = _episode()
+    cap = timedelta(seconds=eng.tun.night_presence_hold_max)
+    eng.handle(PresenceChanged("kjokken", True), t + timedelta(minutes=1))
+    k = 1
+    while t + timedelta(minutes=10 * k) < t + cap:  # reviews while still occupied
+        eng.handle(ReviewTick(), t + timedelta(minutes=10 * k))
+        assert eng.state.night_active
+        k += 1
+    assert eng.state.night_hold_until == t + cap
+    eng.handle(ReviewTick(), t + cap)
+    assert not eng.state.night_active  # fades although the kitchen still reads occupied
+
+    # A real trigger opens a new episode and re-bases the bound.
+    t2 = t + cap + timedelta(minutes=5)
+    eng.handle(NightTriggerFired(), t2)
+    eng.handle(ReviewTick(), t2 + HOLD + timedelta(minutes=30))
+    assert eng.state.night_active

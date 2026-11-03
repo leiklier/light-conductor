@@ -360,6 +360,7 @@ EDITABLE_TUNABLES: tuple[str, ...] = (
     "calibration_dwell",
     "night_hold",
     "night_fade",
+    "night_presence_hold_max",
     "sleep_fade",
     "tv_pause_grace",
     "away_debounce",

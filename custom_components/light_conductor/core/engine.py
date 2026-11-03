@@ -272,6 +272,7 @@ class Engine:
                 if not event.active:
                     s.night_active = False
                     s.night_hold_until = None
+                    s.night_trigger_at = None
                     gain.relax_to_neutral(s, self.tun)  # rule 7.3 (sleep-off edge)
             case HomeChanged():
                 # Raw input only: the away ONSET edge (latch release, rule 9.2)
@@ -291,6 +292,7 @@ class Engine:
             case NightTriggerFired():
                 if s.sleep:
                     s.night_active = True
+                    s.night_trigger_at = now
                     s.night_hold_until = now + timedelta(seconds=self.tun.night_hold)
             case OccupationalChanged():
                 if (rs := s.rooms.get(event.room_id)) is not None:
@@ -335,13 +337,18 @@ class Engine:
         Only an OPEN episode is extended — presence never opens one (the
         configured night triggers do), and only presence-conductor's primary
         occupancy counts: the raw kitchen fallback was on ~91 min during one
-        night's sleep. The hold never shrinks.
+        night's sleep. The hold never shrinks, and presence can carry it at
+        most ``night_presence_hold_max`` past the episode's last real night
+        trigger — a stuck sensor must not hold the path until sleep-off.
         """
         s = self.state
         room = self.config.room(room_id)
         if not s.night_active or room is None or not room.night_path:
             return
         until = now + timedelta(seconds=self.tun.night_hold)
+        if s.night_trigger_at is not None:
+            limit = s.night_trigger_at + timedelta(seconds=self.tun.night_presence_hold_max)
+            until = min(until, limit)
         if s.night_hold_until is None or until > s.night_hold_until:
             s.night_hold_until = until
 

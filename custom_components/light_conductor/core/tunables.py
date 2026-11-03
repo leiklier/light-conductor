@@ -148,6 +148,11 @@ class Tunables:
     sleep_fade: float = 4.0  # 6.1
     night_hold: float = 600.0  # 6.2
     night_fade: float = 10.0  # 6.2
+    #: Upper bound on how long PRIMARY presence may hold an open night-path
+    #: episode past its last real night trigger (§6.2, D32): a stuck presence
+    #: sensor must not hold the 20 % kitchen night level until sleep-off (the
+    #: longest real hold, 11-01's breakfast with sleep still on, was 85 min).
+    night_presence_hold_max: float = 7200.0  # 6.2
     #: Pause grace (§6.3a): how long the PLAYING resolution is held after the
     #: TV leaves PLAYING for ON, so a rewind or a short pause does not walk the
     #: room lights up and back down. Cleared instantly by resume or TV-off.
@@ -230,6 +235,8 @@ class Tunables:
             raise ValueError("dusk_ceiling must be in [0, 1]")
         if self.circadian_tick <= 0.0:
             raise ValueError("circadian_tick must be > 0")
+        if self.night_presence_hold_max < 0.0:
+            raise ValueError("night_presence_hold_max must be >= 0")
         if self.fallback_min_on < 0.0:
             raise ValueError("fallback_min_on must be >= 0")
         if self.fallback_provisional_hold < 0.0:

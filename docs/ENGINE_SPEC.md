@@ -617,8 +617,11 @@ an episode is active, presence-conductor's *primary* occupancy True in any
 `night_path` room restarts `night_hold` — the path stays lit (at
 `night_output`) for as long as someone is up in it, and for `night_hold` after
 the last such room empties (stamped at that instant). Presence never *opens*
-an episode (only the configured night triggers do), and the raw fallbacks
-(§1.1) never hold one — the raw kitchen sensor was on ~91 min during one
+an episode (only the configured night triggers do), it can hold one at most
+`night_presence_hold_max` (120 min) past the episode's last real night trigger
+(a stuck sensor must not keep the path at `night_output` until sleep-off; the
+longest real hold, a breakfast with sleep still on, was 85 min), and the raw
+fallbacks (§1.1) never hold one — the raw kitchen sensor was on ~91 min during one
 night's sleep. (Live: the path faded at 06:57:06 with someone in the kitchen,
 who lit it by hand 31 s later; 11-01 08:10:48 → sofakrok lit by hand 08:19:15.)
 Master gain does not scale night path (§7.4).
@@ -1198,6 +1201,7 @@ fresh install and a missed restore get).
 | ct_min_delta | 100 K | 5.4 |
 | sleep_fade / night_hold / night_fade | 4 s / 600 s / 10 s | 6.1, 6.2 |
 | tv_pause_grace | 120 s | 6.3a |
+| night_presence_hold_max | 120 min | 6.2 |
 | away_debounce | 600 s | 6.4 |
 | outdoor_on_threshold | 0.7 | 6.5 |
 | outdoor_on_lux / outdoor_full_lux | 15 lx / 2 lx | 6.5a |
