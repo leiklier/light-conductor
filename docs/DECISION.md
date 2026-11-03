@@ -1003,10 +1003,17 @@ The window is now also cancelled (and restarted when it ends) by **confirmed**
 fallback evidence: a raw spell that has persisted the room's
 `fallback_min_on` (D31's confirmation rule). Unconfirmed blips do not count —
 the raw kitchen sensor fired ~116 times with nobody home, and letting every
-blip cancel would keep an empty house "home" indefinitely. Residual: a
-person sitting still out of every raw sensor's view for 10 minutes while
-presence-conductor reads the house empty still gets the house turned off
-around them.
+blip cancel would keep an empty house "home" indefinitely. Replay through the
+real engine on the live options, all 19 recorded off-spells (10-25 → 11-03):
+the 10 flaps (0.2–7.9 min) are bridged by the debounce alone, with or without
+the new signal; 8 of the 9 absences ≥ 43 min engage at +10 min either way; one
+(10-27 07:12, a 9-min spisebord raw spell straddling the departure) engages
+at +18 min instead of +10; no absence is turned into "never". Residual: a
+person out of every raw sensor's view — or seen only in sub-15 s blips (10-25
+22:12: four sofakrok blips of 3.6–8.7 s in a 74-min spell) — for 10 minutes
+while presence-conductor reads the house empty still gets the house turned
+off around them; the next confirmed spell does not undo a standing away (only
+`anyone_home` does).
 
 Rejected: a longer startup grace (fixes restarts, not the daytime flaps);
 debouncing in the adapter (the window must be cancelled by room presence and
