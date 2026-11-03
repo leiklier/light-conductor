@@ -163,3 +163,47 @@ def test_vacation_is_not_debounced() -> None:
     cmds = eng.handle(VacationChanged(True), t)
     assert not eng.state.rooms["kjokken"].overridden
     assert "kjokken_taklys" in offs(cmds) and "sofakrok_taklys" in offs(cmds)
+
+
+# --- review fix 4: confirmed fallback evidence also cancels -----------------
+
+
+def _empty_house() -> tuple[Engine, object]:
+    eng, t = _lit_evening()
+    eng.handle(PresenceChanged("sofakrok", False, False), t)
+    eng.handle(PresenceChanged("kjokken", False, False), t)
+    eng.handle(HomeChanged(False), t)
+    return eng, t
+
+
+def test_a_confirmed_raw_spell_cancels_and_restarts_the_window() -> None:
+    """D29/D31: presence-conductor zeroes every room while its anyone_home is
+    off, so during the real flaps only the raw sensors saw the untracked
+    occupant. A raw spell persisting fallback_min_on is someone home: the
+    window is cancelled and restarts when the spell ends."""
+    eng, t = _empty_house()
+    on = t + timedelta(minutes=5)
+    cmds = eng.handle(PresenceChanged("kjokken", False, True), on)
+    assert eng.state.away_pending_since == t  # not yet confirmed
+    confirm = on + timedelta(seconds=eng.tun.fallback_min_on)
+    assert review(cmds) <= confirm  # the confirmation instant is self-scheduled
+    eng.handle(ReviewTick(), confirm)
+    assert eng.state.away_pending_since is None
+    off = on + timedelta(minutes=3)
+    eng.handle(PresenceChanged("kjokken", False, False), off)
+    assert eng.state.away_pending_since == off
+    eng.handle(ReviewTick(), t + timedelta(seconds=DEBOUNCE))  # the original expiry
+    assert not eng.state.away
+    eng.handle(ReviewTick(), off + timedelta(seconds=DEBOUNCE))
+    assert eng.state.away
+
+
+def test_an_unconfirmed_blip_does_not_cancel_the_window() -> None:
+    """D29: the raw sensors also blip in an empty house; a blip shorter than
+    fallback_min_on is no evidence and the departure engages on time."""
+    eng, t = _empty_house()
+    eng.handle(PresenceChanged("kjokken", False, True), t + timedelta(minutes=5))
+    eng.handle(PresenceChanged("kjokken", False, False), t + timedelta(minutes=5, seconds=8))
+    assert eng.state.away_pending_since == t
+    eng.handle(ReviewTick(), t + timedelta(seconds=DEBOUNCE))
+    assert eng.state.away

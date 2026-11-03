@@ -994,11 +994,19 @@ counts from the first event. Arrival stays instant; vacation is not debounced
 observed flap (max 6 min 50 s) with margin, and well below any real absence
 worth lighting for.
 
-Why primary presence and not the raw fallbacks: the raw kitchen sensor was on
-~116 times while nobody was home (D31 data); letting it cancel the window
-would keep an empty house "home" indefinitely. presence-conductor's room
-occupancy is the calibrated estimator, and is what its own `anyone_home`
-should have agreed with in the first place.
+**Cancel signal, revised (review, 2026-11-03).** The first draft cancelled the
+window on primary presence only. But presence-conductor zeroes every room
+while its own `anyone_home` is off — its room occupancy was 0 during all 19
+recorded off-spells — so that clause never fired, while the raw kitchen
+sensor fired 13–26 times during the flaps with the untracked occupant home.
+The window is now also cancelled (and restarted when it ends) by **confirmed**
+fallback evidence: a raw spell that has persisted the room's
+`fallback_min_on` (D31's confirmation rule). Unconfirmed blips do not count —
+the raw kitchen sensor fired ~116 times with nobody home, and letting every
+blip cancel would keep an empty house "home" indefinitely. Residual: a
+person sitting still out of every raw sensor's view for 10 minutes while
+presence-conductor reads the house empty still gets the house turned off
+around them.
 
 Rejected: a longer startup grace (fixes restarts, not the daytime flaps);
 debouncing in the adapter (the window must be cancelled by room presence and

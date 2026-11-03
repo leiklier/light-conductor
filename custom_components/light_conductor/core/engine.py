@@ -750,6 +750,25 @@ class Engine:
             )
         return suspended
 
+    def _someone_detected(self, now: datetime) -> bool:
+        """Evidence that the house is not empty, for the away debounce (D29).
+
+        A room's primary presence, or CONFIRMED fallback evidence — a raw spell
+        that has persisted the room's ``fallback_min_on`` (§1.1, D31).
+        presence-conductor zeroes every room while its own ``anyone_home`` is
+        off, so during all 19 recorded off-spells the primary never fired; the
+        raw kitchen sensor did, 13-26 times, while the untracked occupant was
+        home. Unconfirmed blips do not count (the raw sensors also fire in an
+        empty house).
+        """
+        for room in self.config.rooms:
+            rs = self.state.rooms[room.room_id]
+            if rs.primary is True:
+                return True
+            if roles.fallback_persisted(rs, now, self.tun, room.fallback_min_on):
+                return True
+        return False
+
     def _advance_away(self, now: datetime, plan: Plan) -> None:
         """Debounce the away ONSET (rules 6.4/9.2, D29).
 
@@ -759,10 +778,12 @@ class Engine:
         2-7 min while the untracked occupant is home alone, and each of those
         used to turn the whole house off and release every latch. The window
         starts at the False edge (or at boot), is cancelled by any primary
-        presence and restarts when it ends (every such moment is an event, so
-        this recompute runs at that instant), and the engine self-schedules its
-        expiry. The onset edge — every latch released — fires on engagement.
-        Any non-False ``anyone_home`` clears away at once: arrival is instant.
+        presence or confirmed fallback evidence (:meth:`_someone_detected`) and
+        restarts when it ends (every such moment is an event or a scheduled
+        confirmation review, so this recompute runs at that instant), and the
+        engine self-schedules its expiry. The onset edge — every latch released
+        — fires on engagement. Any non-False ``anyone_home`` clears away at
+        once: arrival is instant.
         """
         s = self.state
         if s.anyone_home is not False:
@@ -771,7 +792,7 @@ class Engine:
             return
         if s.away:
             return
-        if any(rs.primary is True for rs in s.rooms.values()):
+        if self._someone_detected(now):
             s.away_pending_since = None  # someone is demonstrably in: not empty yet
             return
         if s.away_pending_since is None:

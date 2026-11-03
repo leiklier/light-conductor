@@ -398,12 +398,7 @@ def next_review(
     """
     pending = None
     need = _min_on(tun, min_on)
-    if (
-        need > 0.0
-        and rs.primary is not None
-        and rs.fallback is True
-        and rs.fallback_on_since is not None
-    ):
+    if need > 0.0 and rs.fallback is True and rs.fallback_on_since is not None:
         pending = rs.fallback_on_since + timedelta(seconds=need)
     candidates = [
         t

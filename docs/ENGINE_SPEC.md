@@ -681,11 +681,15 @@ sonos-conductor 1.8).
 
 **Onset debounce (D29).** Away mode engages only once the house has read
 empty for `away_debounce` (600 s): `anyone_home` continuously False **and** no
-room's *primary* presence (§1.1, presence-conductor — not the raw fallbacks)
-True. The window starts at the False edge (or at boot, when `anyone_home` is
-False from the first event), is cancelled by any primary presence True and
-restarts when that presence ends, and its expiry is self-scheduled by the
-engine. presence-conductor's `anyone_home` reads off for 31–35 s after every
+evidence of anyone in a room — no room's *primary* presence (§1.1) True and no
+**confirmed** fallback evidence (a raw spell that has persisted the room's
+`fallback_min_on`, §1.1/D31; unconfirmed blips do not count — the raw sensors
+also fire in an empty house). The window starts at the False edge (or at
+boot, when `anyone_home` is False from the first event), is cancelled by any
+such evidence and restarts when it ends, and its expiry — like each spell's
+confirmation instant — is self-scheduled by the engine. presence-conductor
+zeroes every room while its own `anyone_home` is off, so in the recorded
+off-spells only the raw sensors ever saw the untracked occupant. presence-conductor's `anyone_home` reads off for 31–35 s after every
 HA restart and for 2–7 min while the untracked occupant is home alone; each of
 those used to turn the whole house off and release every latch. During the
 window the house behaves exactly as home. **Arrival is instant**: any
