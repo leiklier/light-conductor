@@ -1066,6 +1066,33 @@ fallback episodes instead of a gate (= scaling EMPTY-peak holds by
 kjøkken 143 → 187, sofakrok 146 → 253 — the room flickers instead of
 lingering).
 
+## D32. Primary presence holds an open night-path episode (beta.20)
+
+The evidence: since the bedroom door sensor came back (10-31 22:43) the path
+opens on time, but `night_hold` — 600 s after the last trigger — ran out with
+people up: 11-02 the path faded 06:57:06 and the kitchen was lit by hand at
+06:57:37; 11-01 it went off 08:10:48 and sofakrok was lit by hand 08:19:15.
+
+Decision (§6.2): while an episode is open, primary occupancy True in any
+night-path room restarts `night_hold` (re-checked every recompute, and stamped
+at the instant such a room empties so the occupant always gets the full hold).
+Only presence-conductor's primary counts, never the raw fallbacks (the raw
+kitchen sensor was on ~91 min during one night's sleep); presence never opens
+an episode; levels stay `night_output`.
+
+Replay (the real `Engine` on the live options, 10-31 22:44 → 11-03 07:18; the
+beta.19 run reproduces the live NIGHT_PATH role spells to the second): the
+11-02 06:56:54 fade is held to sleep-off 07:05:57 (kitchen primary 06:48–06:49,
+sofakrok 06:57); the 11-01 08:10:48 fade to 09:26 (breakfast — kitchen and
+sofakrok presence throughout); 11-01 22:07 +12 min, 11-03 06:36 +10 min,
+11-02 05:57 +2 min, 10-31 23:12 +2 min. **No nocturnal (00:00–05:00) episode
+was extended** (03:46 and 04:07 unchanged). Not fixed, by design: 11-01
+07:30:35 → kitchen lit by hand 07:57:19 — nobody was in a path room for the
+whole episode, and the return 20 minutes later opened no episode (no door
+edge). Holding on the persisted fallback instead (D31) changes the replay by
+seconds (+0.3 min on that episode) and is not worth the raw sensors' night
+noise.
+
 ## Open questions — RESOLVED (user, 2026-07-25)
 
 - **Q1 (D8):** master dimmer neutral at 50 % — confirmed (boost possible).

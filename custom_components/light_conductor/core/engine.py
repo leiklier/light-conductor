@@ -190,6 +190,10 @@ class Engine:
         match event:
             case PresenceChanged():
                 if (rs := s.rooms.get(event.room_id)) is not None:
+                    if rs.primary is True and event.primary is not True:
+                        # A night-path room just emptied: its occupant gets the
+                        # full night_hold from THIS instant (rule 6.2, D32).
+                        self._hold_night_for_presence(event.room_id, now)
                     roles.ingest_presence(
                         rs,
                         event.primary,
@@ -313,6 +317,29 @@ class Engine:
                     self._cal_requests.append(event.room_id)
             case _:
                 pass
+
+    def _night_path_occupied(self) -> str | None:
+        """A night-path room whose PRIMARY presence is True, if any (rule 6.2, D32)."""
+        for room in self.config.rooms:
+            if room.night_path and self.state.rooms[room.room_id].primary is True:
+                return room.room_id
+        return None
+
+    def _hold_night_for_presence(self, room_id: str, now: datetime) -> None:
+        """Restart ``night_hold`` for primary presence in a path room (rule 6.2, D32).
+
+        Only an OPEN episode is extended — presence never opens one (the
+        configured night triggers do), and only presence-conductor's primary
+        occupancy counts: the raw kitchen fallback was on ~91 min during one
+        night's sleep. The hold never shrinks.
+        """
+        s = self.state
+        room = self.config.room(room_id)
+        if not s.night_active or room is None or not room.night_path:
+            return
+        until = now + timedelta(seconds=self.tun.night_hold)
+        if s.night_hold_until is None or until > s.night_hold_until:
+            s.night_hold_until = until
 
     def _min_on(self, room_id: str) -> float | None:
         """A room's §1.1 fallback-persistence override (D31); None = tunable."""
@@ -761,6 +788,12 @@ class Engine:
         e = circadian.factor(s.sun_elevation, now, tun)
         evening = e >= tun.evening_cap_threshold
         g = gain.multiplier(s, tun)
+
+        # An occupied night-path room keeps an open episode alive (rule 6.2,
+        # D32) — checked BEFORE the expiry so a hold running out while someone
+        # is up restarts instead of fading the path out from under them.
+        if s.night_active and (held := self._night_path_occupied()) is not None:
+            self._hold_night_for_presence(held, now)
 
         # Night-path hold expiry (rule 6.2). Its rooms fade out over night_fade.
         night_expiring = False

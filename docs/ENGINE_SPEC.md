@@ -543,7 +543,16 @@ room) opens a NIGHT_PATH episode: all rooms in the configured `night_path`
 set light at their profile's `night_output` (fixed dim warm values, CT forced
 to `ct_min_evening`), everything else stays OFF. The episode holds for
 `night_hold` (default 600 s) after the last trigger, restartable, then fades
-out over `night_fade` (10 s). Master gain does not scale night path (§7.4).
+out over `night_fade` (10 s). **Presence holds an open episode (D32):** while
+an episode is active, presence-conductor's *primary* occupancy True in any
+`night_path` room restarts `night_hold` — the path stays lit (at
+`night_output`) for as long as someone is up in it, and for `night_hold` after
+the last such room empties (stamped at that instant). Presence never *opens*
+an episode (only the configured night triggers do), and the raw fallbacks
+(§1.1) never hold one — the raw kitchen sensor was on ~91 min during one
+night's sleep. (Live: the path faded at 06:57:06 with someone in the kitchen,
+who lit it by hand 31 s later; 11-01 08:10:48 → sofakrok lit by hand 08:19:15.)
+Master gain does not scale night path (§7.4).
 The path governs only **unlatched** rooms: a foreign change in a path room
 during the episode latches per 9.1 and wins — the path guides movement, it
 must not fight the hand on the dial. (Sleep's onset already released
