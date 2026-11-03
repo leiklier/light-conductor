@@ -1030,7 +1030,10 @@ corrected without latching, the estimator re-bases `Â_filt`/`N̂` on the
 corrected belief at once (otherwise a lamp believed off is counted as
 daylight), and a lit observed channel is marked **reconcile** — its next move
 converges with `slew_step_empty` ramps whatever the room's role (the quiet
-reconcile), after which the normal slew applies. A divergence in either
+reconcile), after which the normal slew applies. The mark lasts exactly one
+post-grace recompute: a channel that is held there (already where its room
+wants it, latched, or mid-calibration) loses it too, so a move hours later
+never inherits the fast slew. A divergence in either
 direction is corrected: a room whose goal is 0 turns off a lamp that came back
 lit, a room whose goal is lit relights a lamp that came back off. Writes still
 wait out the startup grace (§11.1).

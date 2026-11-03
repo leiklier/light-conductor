@@ -901,6 +901,17 @@ class Engine:
                 )
             )
 
+        # The quiet reconcile (rules 8.5/11.1, D28) is a one-time allowance: the
+        # first post-grace recompute either moved an observed channel (with
+        # slew_step_empty) or found it already where the room wants it. Either
+        # way it is now the engine's level — a held channel must not carry the
+        # flag into a move hours later, and neither must one a latch or a
+        # calibration sweep kept from moving.
+        if s.enabled and not self._in_grace(now):
+            for rs_ in s.rooms.values():
+                for cs_ in rs_.channels.values():
+                    cs_.reconcile = False
+
         # Circadian self-scheduling (rule 2.3): follow the ramp with a tick, and
         # from a plateau schedule the next clock-ramp boundary so the engine can
         # start the 20:00 / 06:00 ramps itself without waiting on sun events.

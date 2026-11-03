@@ -218,3 +218,24 @@ def test_estimator_stops_counting_the_own_lamp_as_daylight() -> None:
     eng.handle(ObservedLevel("sofakrok_taklys", level), t + timedelta(seconds=1))
     assert abs(est.n_hat - natural) < 0.3
     assert est.pending_valid is False
+
+
+def test_the_reconcile_mark_lasts_one_post_grace_recompute() -> None:
+    """§8.5/§11.1 (review fix 6): a lit seed that is already where its room
+    wants it is held at the first post-grace recompute — and loses the mark
+    there, so a real move hours later uses the occupied slew, not
+    slew_step_empty."""
+    snap = InitialSnapshot(
+        sun_elevation=DAY_SUN, occupancy={"kontor": True}, channels={"kontor_taklys": (0.6, None)}
+    )
+    eng = Engine(apartment(), snap)
+    t0 = at(1, 12, 0)
+    eng.handle(SunElevationChanged(DAY_SUN), t0)
+    cs = eng.state.rooms["kontor"].channels["kontor_taklys"]
+    assert cs.reconcile
+    held = eng.handle(ReviewTick(), t0 + timedelta(seconds=31))
+    assert "kontor_taklys" not in sets(held)  # 0.6 is the day tier: nothing to do
+    assert not cs.reconcile
+    later = eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 30))
+    cmd = sets(later)["kontor_taklys"]
+    assert abs(cmd.ramp_seconds - (0.36 - cmd.level**2) / eng.tun.slew_step) < 1e-9
