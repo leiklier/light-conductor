@@ -232,10 +232,7 @@ class Engine:
                         # way: the toggle gates ingestion, it is not a release
                         # condition (rule 9.2).
                         rs.trigger_hold_until = None
-                        if (
-                            roles.occupancy(rs, now, self.tun, self._min_on(event.room_id))
-                            is not True
-                        ):
+                        if roles.occupancy(rs, now, self.tun) is not True:
                             rs.vacancy_hold_until = None
                             if rs.self_active:
                                 rs.self_active = False
@@ -349,7 +346,7 @@ class Engine:
             s.night_hold_until = until
 
     def _min_on(self, room_id: str) -> float | None:
-        """A room's §1.1 fallback-persistence override (D31); None = tunable."""
+        """A room's §1.1 fallback-confirmation override (D31); None = tunable."""
         room = self.config.room(room_id)
         return room.fallback_min_on if room is not None else None
 

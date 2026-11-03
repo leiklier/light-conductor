@@ -76,12 +76,11 @@ def test_passing_scales_hold_down() -> None:
 
 
 def test_fallback_used_only_when_primary_blind() -> None:
-    """§1.1: fallback is OR-ed (once it has persisted, D31), and stands alone —
-    raw — once the primary is blind."""
+    """§1.1: fallback is OR-ed (at once — D31 limits the hold, not the turn-on),
+    and stands alone once the primary is blind."""
     rs = RoomState()
     roles.ingest_presence(rs, False, True, at(1, 12, 0), TUN)
-    assert roles.occupancy(rs, at(1, 12, 0), TUN) is False  # not yet persisted
-    assert roles.occupancy(rs, at(1, 12, 0, 15), TUN) is True  # OR-ed after fallback_min_on
+    assert roles.occupancy(rs, at(1, 12, 0), TUN) is True  # OR-ed
 
 
 def test_blind_holds_last_definitive_then_falls_back() -> None:

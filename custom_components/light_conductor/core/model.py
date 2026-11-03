@@ -207,10 +207,9 @@ class RoomConfig:
     living_group: bool = False
     #: Per-room ACTIVE hold override (rule 1.3); None = tunable default.
     hold_seconds: float | None = None
-    #: Per-room override of the §1.1 fallback persistence (D31); None = the
-    #: ``fallback_min_on`` tunable, 0 = the raw OR (no persistence). The raw
-    #: sensors differ: kjøkken/sofakrok fire while nobody is home, kontor and
-    #: spisebord never did.
+    #: Per-room override of ``fallback_min_on`` (§1.1, D31) — how long a raw
+    #: spell must persist to CONFIRM a raw-only episode (normal hold); None =
+    #: the tunable, 0 = every spell confirms (no provisional holds, beta.19).
     fallback_min_on: float | None = None
     #: Membership in the night-path set (rule 6.2).
     night_path: bool = False
@@ -295,6 +294,10 @@ class RoomState:
     fallback_on_since: datetime | None = None
     #: When the fallback last fell (bridging reference, rule 1.1, D31).
     fallback_off_at: datetime | None = None
+    #: The current ACTIVE episode has confirmed evidence (rule 1.1, D31):
+    #: primary presence seen, or a raw spell persisted ``fallback_min_on``.
+    #: Unconfirmed raw-only episodes get the provisional hold.
+    episode_confirmed: bool = False
     #: When the primary went unavailable (None); drives presence_blind_hold.
     primary_blind_since: datetime | None = None
     #: Last definitive resolved occupancy (held while blind, rule 1.1/1.8).

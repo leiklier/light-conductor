@@ -49,6 +49,7 @@ async def async_get_config_entry_diagnostics(
             "activity": _plain(rs.activity),
             "episode_peak": _plain(rs.episode_peak),
             "self_active": rs.self_active,
+            "episode_confirmed": rs.episode_confirmed,
             "vacancy_hold_until": _plain(rs.vacancy_hold_until),
             "trigger_hold_until": _plain(rs.trigger_hold_until),
             "door_lighting": rs.door_lighting,

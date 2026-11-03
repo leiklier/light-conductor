@@ -89,8 +89,8 @@ CONF_TV_MODE = "tv_mode"
 #: Sleep onset does not release this room's override latch (§6.1/§9.2, D26).
 CONF_SLEEP_KEEPS_OVERRIDE = "sleep_keeps_override"
 CONF_HOLD_SECONDS = "hold_seconds"
-#: Per-room override of the §1.1 fallback persistence (D31); blank = the
-#: ``fallback_min_on`` tunable, 0 = the raw OR.
+#: Per-room override of the §1.1 fallback confirmation time (D31); blank = the
+#: ``fallback_min_on`` tunable, 0 = every raw spell confirms (no provisional hold).
 CONF_FALLBACK_MIN_ON = "fallback_min_on"
 CONF_PROFILE = "profile"
 
@@ -344,6 +344,7 @@ EDITABLE_TUNABLES: tuple[str, ...] = (
     "door_close_hold",
     "presence_blind_hold",
     "fallback_min_on",
+    "fallback_provisional_hold",
     "sun_high_deg",
     "sun_low_deg",
     "circadian_tick",

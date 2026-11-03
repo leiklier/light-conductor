@@ -115,6 +115,7 @@ _TUNABLE_UI: dict[str, tuple[float, float, float]] = {
     "door_close_hold": (0, 120, 1),
     "presence_blind_hold": (10, 600, 10),
     "fallback_min_on": (0, 120, 1),
+    "fallback_provisional_hold": (0, 600, 5),
     "sun_high_deg": (-10, 30, 1),
     "sun_low_deg": (-20, 10, 1),
     "circadian_tick": (30, 900, 30),
@@ -532,8 +533,8 @@ class LightConductorOptionsFlow(OptionsFlow):
                 updated[CONF_HOLD_SECONDS] = user_input[CONF_HOLD_SECONDS]
             else:
                 updated.pop(CONF_HOLD_SECONDS, None)  # blank clears the room override
-            # Fallback persistence override (§1.1, D31): 0 is a real value (the
-            # raw OR) — only a blank submission clears it back to the tunable.
+            # Fallback confirmation override (§1.1, D31): 0 is a real value
+            # (always confirmed) — only a blank clears it back to the tunable.
             if user_input.get(CONF_FALLBACK_MIN_ON) not in (None, ""):
                 updated[CONF_FALLBACK_MIN_ON] = user_input[CONF_FALLBACK_MIN_ON]
             else:
@@ -591,8 +592,8 @@ class LightConductorOptionsFlow(OptionsFlow):
                 _opt(CONF_PRESENCE_PRIMARY, room): _entity("binary_sensor", "occupancy"),
                 _opt(CONF_ACTIVITY_SENSOR, room): _entity("sensor"),
                 _opt(CONF_OCCUPANCY_FALLBACK, room): _entities(["binary_sensor"]),
-                # §1.1 (D31): seconds a fallback must stay on before it counts
-                # next to a live primary; blank ⇒ the tunable, 0 ⇒ raw OR.
+                # §1.1 (D31): seconds a raw fallback spell must persist to
+                # confirm an episode; blank ⇒ the tunable, 0 ⇒ always confirmed.
                 _opt(CONF_FALLBACK_MIN_ON, room): NumberSelector(
                     NumberSelectorConfig(min=0, max=120, step=1, mode=NumberSelectorMode.BOX)
                 ),

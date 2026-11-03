@@ -1026,47 +1026,47 @@ timeout (it would still fire on an occupant, just later) and resetting the
 timer on occupancy (a forgotten lamp in a busy room would never be handed
 back; deferral hands it back the first time the room empties).
 
-## D31. Fallback occupancy must persist before it counts (beta.20)
+## D31. Raw fallback evidence lights at once; unconfirmed episodes get a provisional hold (beta.20)
 
 The evidence (recorder 10-25 → 11-03, replayed through the real `roles` code,
-80.5 h home+awake): the raw fallbacks are OR-ed with presence-conductor's
-room occupancy and dominate it — every one of the 566 replayed ACTIVE
-episodes in kjøkken, spisebord, sofakrok and kontor *started* on a fallback
-edge; presence-conductor confirms 8–27 s later (median, from the last raw
-rise) or never (kjøkken: 85 primary spells in nine days). The raw sensors also
-fire with the house empty — kjøkken 0.73/h, sofakrok 0.89/h (46 h of away
-time); kontor and spisebord never did — and each blip minted a full ACTIVE
-episode with a 120 s hold (an EMPTY activity peak scales by 1.0), the kitchen
-bench strip included.
+80.5 h home+awake): the raw fallbacks are OR-ed with presence-conductor's room
+occupancy and dominate it — **every** replayed ACTIVE episode in kjøkken,
+spisebord, sofakrok and kontor *started* on a fallback edge; presence-conductor
+confirms 8–27 s later (median, from the last raw rise) or never (kjøkken: 85
+primary spells in nine days). The raw sensors also fire with the house empty —
+kjøkken 0.73/h, sofakrok 0.89/h (46 h of away time); kontor and spisebord never
+did — and each such blip held a room ACTIVE for the full 120 s (an EMPTY
+activity peak scales by 1.0), the kitchen bench strip included.
 
-Decision (§1.1): while the primary is available, the fallback OR counts only
-once it has been on for `fallback_min_on` (default 15 s, per-room override,
-0 = raw OR), dropouts ≤ `FALLBACK_BRIDGE` (2 s) bridged, the boundary
-self-scheduled; the blind path is unchanged. One aggregate per room rather
-than per entity: three rooms have one fallback, and kontor's two (a mmWave
-with a ≥ 14 s minimum spell and a PIR with a ≥ 75 s pulse) both pass any
-threshold ≤ 14 s and agree beyond it.
+**Correction.** The first beta.20 draft *gated* the fallback: it counted only
+after 15 s of persistence. That delayed every one of the 443 replayed
+fallback-led turn-ons by 15 s — all 83 in kontor, 53 of them into a dark room,
+where the raw sensors never blipped at all — to remove blips. The draft
+rejected the alternative below on a replay that scaled *every* EMPTY-peak hold
+by 0.3, primary-confirmed episodes included; that is not the alternative, and
+the comparison was wrong (independent review, 2026-11-03).
 
-Why 15 s. The raw onset of a false blip is statistically identical to a real
-entry (rising-edge bursts within 3–20 s: same fractions away and home), so no
-rule can be both instant and selective; the threshold trades blip removal
-against entry latency. At 15 s: sofakrok's empty-house blips are 88 % shorter
-(10 s: 80 %), kjøkken's 47 % (10 s: 32 %); sofakrok raw-only episodes
-121 → 66 and short dips 146 → 100, kjøkken dips 143 → 124, spisebord 92 → 82;
-no long sit loses coverage (the longest lost piece is 7.4 min, sofakrok —
-blip-started holds). The cost: **every turn-on the primary has not confirmed
-first is 15 s later** — in this replay, all of them. The per-room override
-exists because the sensors differ: kontor's and spisebord's fallbacks never
-fired with the house empty, so for them the filter is pure latency; the
-recommended live setting is 0 there (a configuration change, not shipped
-here). The replay table is in the beta.20 PR.
+Decision (§1.1): the fallback OR counts **at once** (beta.19). An ACTIVE
+episode that has seen no confirmed evidence gets a **provisional hold**
+`min(normal hold, fallback_provisional_hold)`, default 60 s. It is
+**confirmed** — normal holds for the rest of the episode — when the primary is
+seen True in it, or a fallback spell persists `fallback_min_on` (15 s; per-room
+override, 0 = always confirmed; dropouts ≤ `FALLBACK_BRIDGE` 2 s bridged; the
+spell is judged at its falling edge, before that edge's hold is set). The blind
+path is unchanged. One aggregate spell per room rather than per entity: three
+rooms have one fallback, and kontor's two (a mmWave with a ≥ 14 s minimum spell
+and a PIR with a ≥ 75 s pulse) agree.
 
-Considered and not shipped: "on ≥ N s OR ≥ 2 rising edges within W" (edge
-bursts do not discriminate, above); a short provisional hold for unconfirmed
-fallback episodes instead of a gate (= scaling EMPTY-peak holds by
-`hold_passing_scale`; out of scope here, and the replay makes it worse: dips
-kjøkken 143 → 187, sofakrok 146 → 253 — the room flickers instead of
-lingering).
+Replay (beta.19 → draft gate → this): turn-ons delayed 0 → 443 → **0**;
+ACTIVE dips ≤ 60 s 100 → 80 → **103**; time lit by blip episodes (no primary,
+no raw spell ≥ 15 s) 311 → 0 → **212 min**; kitchen dark-time episodes (each
+an on/off of the bench strip) 133 → 125 → 136. 60 s rather than 30 s: at 30 s
+the sofakrok short dips double (the hold then ends inside the gaps of a real
+occupant's chatter). The table is in the beta.20 PR.
+
+Not shipped: "≥ 2 rising edges within W" (rising-edge bursts within 3–20 s are
+statistically identical away and home — the onset of a blip cannot be told from
+an entry, which is exactly why the turn-on must not wait).
 
 ## D32. Primary presence holds an open night-path episode (beta.20)
 
@@ -1091,7 +1091,7 @@ sofakrok presence throughout); 11-01 22:07 +12 min, 11-03 06:36 +10 min,
 was extended** (03:46 and 04:07 unchanged). Not fixed, by design: 11-01
 07:30:35 → kitchen lit by hand 07:57:19 — nobody was in a path room for the
 whole episode, and the return 20 minutes later opened no episode (no door
-edge). Holding on the persisted fallback instead (D31) changes the replay by
+edge). Holding on a confirmed (≥ 15 s) fallback spell instead (D31) changes the replay by
 seconds (+0.3 min on that episode) and is not worth the raw sensors' night
 noise.
 

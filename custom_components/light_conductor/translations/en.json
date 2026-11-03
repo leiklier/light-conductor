@@ -84,7 +84,7 @@
           "presence_primary": "Primary occupancy",
           "activity_sensor": "Activity sensor",
           "occupancy_fallback": "Fallback occupancy",
-          "fallback_min_on": "Fallback persistence (s, empty = global, 0 = off)",
+          "fallback_min_on": "Fallback confirmation (s, empty = global, 0 = always)",
           "neighbours": "Adjacent rooms",
           "wall_event_entities": "Wall controllers",
           "trigger_entities": "Triggers (door / pass-by)",

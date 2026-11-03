@@ -41,14 +41,18 @@ class Tunables:
     trigger_hold: float = 300.0  # 1.7, 1.9
     door_close_hold: float = 15.0  # 1.9
     presence_blind_hold: float = 120.0  # 1.1, 1.8
-    #: Fallback persistence (§1.1, D31): while the primary presence entity is
-    #: available, the OR of the room's fallback occupancy entities counts only
-    #: once it has been on for this long (dropouts up to FALLBACK_BRIDGE
-    #: bridged). The raw mmWave fallbacks chatter — ~132 isolated raw-only blips
-    #: (median ~9 s) minted a full ACTIVE episode each during home+awake time —
-    #: while the long stationary spells presence-conductor misses still count.
-    #: Blind primary: unchanged (raw fallback). 0 disables.
+    #: Fallback confirmation (§1.1, D31): the raw fallback sensors count at
+    #: once (they are the fast detectors), but an ACTIVE episode only ever
+    #: supported by unconfirmed raw evidence gets the provisional hold below.
+    #: It is CONFIRMED — normal hold — once presence-conductor's primary is
+    #: seen in it or a raw spell persists this long (dropouts up to
+    #: FALLBACK_BRIDGE bridged). 0 = every spell confirms (beta.19).
     fallback_min_on: float = 15.0  # 1.1
+    #: Hold of an UNCONFIRMED raw-only episode (§1.1, D31): min(normal hold,
+    #: this). The raw sensors' isolated blips (kjøkken 0.73/h, sofakrok 0.89/h
+    #: with the house empty) each lit a room for the full 120 s; 60 s keeps the
+    #: short-dip count at beta.19's level (30 s doubled sofakrok's).
+    fallback_provisional_hold: float = 60.0  # 1.1
 
     # --- §2 circadian ------------------------------------------------------
     sun_high_deg: float = 10.0  # 2.3
@@ -226,6 +230,8 @@ class Tunables:
             raise ValueError("circadian_tick must be > 0")
         if self.fallback_min_on < 0.0:
             raise ValueError("fallback_min_on must be >= 0")
+        if self.fallback_provisional_hold < 0.0:
+            raise ValueError("fallback_provisional_hold must be >= 0")
         if self.away_debounce < 0.0:
             raise ValueError("away_debounce must be >= 0")
         if not 0.0 <= self.outdoor_stale_zero_window < 175.0:
