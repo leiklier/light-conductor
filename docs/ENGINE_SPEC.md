@@ -944,7 +944,20 @@ re-checked while it stands, so a during-mode latch survives until its
 timeout), *except* in a room configured `sleep_keeps_override`, which is
 exempt from the SLEEP onset release only and whose latch therefore stands
 until one of the remaining conditions — in practice the 4 h timeout (§6.1,
-D26); master gain off/on cycle; or `override_timeout` (default 4 h).
+D26); master gain off/on cycle; or `override_timeout` (default 4 h, counted
+from the last genuine touch, §9.1). **The timeout never hands back an
+occupied room (D30, user decision):** once it has elapsed, the release is
+deferred while the room is **self-active** — occupancy True, inside its
+vacancy hold, or inside a trigger hold (and, for an outdoor room, a declared
+occupant at dusk, §1.10) — and fires at the first recompute in which it is
+not. Every way a room stops being self-active is an event (an occupancy
+change) or a scheduled hold-expiry review (§1.3), so no timer is needed; the
+elapsed timeout is no longer scheduled (it would be a busy loop). A room that
+can never be self-active — no presence and no live triggers, e.g. soverom with
+door lighting off — keeps the plain timeout. The deferral applies to the
+timeout wherever it is the release path, including a respected standing
+sleep/away hard-off; the other release paths (OFF-worthy vacancy, mode onset
+edges incl. `sleep_keeps_override`, master cycle) are unchanged.
 Release re-enters normal control with slew ramps (no jumps). A room is
 presence-capable when a presence or occupancy-fallback sensor is configured;
 in a blind room (door/corridor triggers only) OFF-decay merely means the

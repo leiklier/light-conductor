@@ -997,6 +997,33 @@ self-scheduled, both engine facts); ignoring `anyone_home` entirely (away is
 the only thing that turns the balcony to presence simulation and darkens a
 house left with a light on).
 
+## D30. The override timeout never hands back an occupied room (beta.20)
+
+User decision (2026-11-02): manual overrides must not hand back while
+someone is still in the room. Until D28 the question barely arose, because the
+4 h timeout effectively never fired on a lit lamp (every poll flip re-stamped
+it); now that it counts from the last genuine touch, a 4 h evening on the sofa
+would end with the conductor dimming the user's chosen level to its 22:00 tier
+mid-film.
+
+Decision (§9.2): an elapsed `override_timeout` is deferred while the room is
+self-active (occupancy True, vacancy hold, trigger hold — the same
+`self_active` the FSM uses for ACTIVE) and releases at the first recompute in
+which it is not, re-entering normal control with slew ramps. No new timer:
+leaving is an occupancy event and the hold expiries are already scheduled
+(§1.3); `override_review` stops returning the elapsed deadline, which would
+otherwise have asked for an immediate review on every recompute. Blind rooms
+(no presence, no live triggers) keep the plain timeout, and every other release
+path is unchanged — the off-worthy vacancy release, the sleep/away/vacation
+onset edges (incl. `sleep_keeps_override`), the master cycle.
+
+The deferral also applies under a respected standing hard-off (a latch minted
+during sleep, still occupied at its timeout): the same rule — someone is in
+the room — and the hard-off follows the moment they leave. Rejected: a longer
+timeout (it would still fire on an occupant, just later) and resetting the
+timer on occupancy (a forgotten lamp in a busy room would never be handed
+back; deferral hands it back the first time the room empties).
+
 ## Open questions — RESOLVED (user, 2026-07-25)
 
 - **Q1 (D8):** master dimmer neutral at 50 % — confirmed (boost possible).

@@ -35,7 +35,9 @@ What it does:
   lux gain and dimming curve at the room's sensor.
 - **Manual control is respected** — any wall rotary, HomeKit, or voice change
   latches a per-room override; the conductor backs off until observed vacancy,
-  a mode onset (sleep or away *engaging*), or a timeout. A change made while
+  a mode onset (sleep or away *engaging*), or a timeout (4 h after your last
+  touch — and never while someone is still in the room: it waits until the
+  room empties). A change made while
   sleep or away already stands — the 03:00 reading light — is respected
   outright until the timeout; modes win once, at their edge, and never fight
   the hand on the dial. A room may opt out of even that one edge for sleep

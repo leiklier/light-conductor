@@ -878,14 +878,19 @@ class Engine:
         # likewise governs only unlatched rooms (rule 6.2): its resolution is
         # not ``off``, so it falls to the hold branch below.
         if rs.overridden:
+            # The timeout hand-back waits while the room is occupied (rule 9.2,
+            # D30): self-active = occupancy True, inside its vacancy hold, or
+            # inside a trigger hold. Pass 1 has already stepped the FSM to now.
+            occupied = rs.self_active
             if res is not None and res.off and res.respect_override:
                 # A respected hard-off (sleep/away standing, rules 6.1/6.4,
                 # or the outdoor daylight-OFF while occupational, §6.5b):
                 # only the timeout releases. should_release's off_worthy path
                 # must not reach it — a presence-capable room would otherwise
                 # release-and-counter the press (review F4).
-                if not override.timed_out(rs, now, tun):
+                if not override.timeout_due(rs, now, tun, occupied):
                     plan.review_at(override.override_review(rs, now, tun))
+                    plan.review_at(roles.next_review(rs, now))  # deferred hand-back (D30)
                     return self._diag(room, rs, rs.role)
                 override.release(rs)
             elif res is not None and res.off:
@@ -893,7 +898,7 @@ class Engine:
                 # declared occupant — the morning descent cleans up a stray
                 # dialed level (rule 6.5b).
                 override.release(rs)
-            elif override.should_release(rs, off_worthy, room.presence_capable, now, tun):
+            elif override.should_release(rs, off_worthy, room.presence_capable, now, tun, occupied):
                 override.release(rs)
             else:
                 # Still adjusting nothing, but keep both clocks alive: the
