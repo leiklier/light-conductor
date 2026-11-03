@@ -269,13 +269,23 @@ def test_night_path_episode_and_expiry() -> None:
 # --- §6.4: away turns the house off --------------------------------------
 
 
+def _depart(eng: Engine, t) -> list:
+    """§6.4/D29: anyone_home False, held empty past the away debounce."""
+    eng.handle(HomeChanged(False), t)
+    return eng.handle(ReviewTick(), t + timedelta(seconds=eng.tun.away_debounce))
+
+
 def test_away_turns_house_off() -> None:
-    """§6.4: anyone_home False => every managed room OFF."""
+    """§6.4: an empty house (anyone_home False, no room occupied) for
+    away_debounce => every managed room OFF."""
     eng = _engine()
     eng.handle(PresenceChanged("kjokken", True), at(1, 20, 0))
     eng.handle(PresenceChanged("sofakrok", True), at(1, 20, 0))
     eng.handle(ReviewTick(), at(1, 20, 1))
-    gone = eng.handle(HomeChanged(False), at(1, 20, 2))
+    # Everyone leaves: rooms empty, then the house reads empty.
+    eng.handle(PresenceChanged("kjokken", False), at(1, 20, 2))
+    eng.handle(PresenceChanged("sofakrok", False), at(1, 20, 2))
+    gone = _depart(eng, at(1, 20, 2))
     for room in ("kjokken", "sofakrok", "gang", "spisebord"):
         assert eng.state.rooms[room].role is Role.OFF
     assert "kjokken_taklys" in offs(gone)
@@ -318,9 +328,9 @@ def test_away_keeps_outdoor_until_away_lighting_off() -> None:
     eng = _engine()
     eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))  # balkong dusk-on
     eng.handle(ReviewTick(), at(1, 22, 1))
-    eng.handle(HomeChanged(False), at(1, 22, 2))
+    _depart(eng, at(1, 22, 2))
     assert eng.state.rooms["balkong"].channels["balkong_taklys"].on  # presence sim
-    dark = eng.handle(SetAwayLighting(False), at(1, 22, 3))
+    dark = eng.handle(SetAwayLighting(False), at(1, 22, 13))
     assert "balkong_taklys" in offs(dark)
 
 
@@ -340,8 +350,12 @@ def test_override_latches_then_releases_on_away() -> None:
     assert "kontor_taklys" not in sets(quiet)  # not fighting the manual level
     assert eng.state.rooms["kontor"].channels["kontor_taklys"].commanded_b == 0.9
 
-    # Leaving home releases the override and the hard-off wins.
-    gone = eng.handle(HomeChanged(False), at(1, 20, 4))
+    # Leaving home releases the override and the hard-off wins — once the house
+    # has read empty for the away debounce (D29); the latch stands until then.
+    eng.handle(PresenceChanged("kontor", False), at(1, 20, 4))
+    eng.handle(HomeChanged(False), at(1, 20, 4))
+    assert eng.state.rooms["kontor"].overridden
+    gone = eng.handle(ReviewTick(), at(1, 20, 4) + timedelta(seconds=eng.tun.away_debounce))
     assert not eng.state.rooms["kontor"].overridden
     assert "kontor_taklys" in offs(gone)
 
@@ -432,19 +446,19 @@ def test_away_resubmit_is_not_an_onset_edge() -> None:
     adapter re-resolves on every fallback entity change) is NOT an onset edge
     — it must not release a latch minted during away."""
     eng = _engine()
-    eng.handle(HomeChanged(False), at(1, 20, 0))  # onset: house goes dark
+    _depart(eng, at(1, 20, 0))  # onset: house goes dark
 
     # Someone the radar cannot see dials the gang wall to 50 %.
-    eng.handle(ForeignChange("gang_taklys", 0.5), at(1, 20, 1))
+    eng.handle(ForeignChange("gang_taklys", 0.5), at(1, 20, 11))
     assert eng.state.rooms["gang"].overridden
 
     # A re-submit of the standing away state: no edge, no release, no counter.
-    resub = eng.handle(HomeChanged(False), at(1, 20, 2))
+    resub = eng.handle(HomeChanged(False), at(1, 20, 12))
     assert eng.state.rooms["gang"].overridden
     assert "gang_taklys" not in sets(resub) and "gang_taklys" not in offs(resub)
 
     # Coming home keeps the (blind-room) latch too — manual control stands.
-    home = eng.handle(HomeChanged(True), at(1, 20, 3))
+    home = eng.handle(HomeChanged(True), at(1, 20, 13))
     assert eng.state.rooms["gang"].overridden
     assert "gang_taklys" not in sets(home) and "gang_taklys" not in offs(home)
 
@@ -1032,7 +1046,7 @@ def test_occupational_balcony_does_not_defeat_away() -> None:
     eng = Engine(_balcony_apartment(), InitialSnapshot(sun_elevation=NIGHT_SUN))
     eng.handle(SunElevationChanged(NIGHT_SUN), at(1, 22, 0))
     eng.handle(OccupationalChanged("balkong", True), at(1, 22, 1))
-    gone = eng.handle(HomeChanged(False), at(1, 22, 2))
+    gone = _depart(eng, at(1, 22, 2))
     assert eng.state.rooms["stue"].role is Role.OFF
     assert "stue_taklys" in offs(gone)
 

@@ -256,14 +256,12 @@ class Engine:
                     s.night_hold_until = None
                     gain.relax_to_neutral(s, self.tun)  # rule 7.3 (sleep-off edge)
             case HomeChanged():
-                if event.anyone_home is False and s.anyone_home is not False:
-                    # Away ONSET edge (rule 9.2) — None fails safe as home
-                    # (rule 6.4), so None -> False is a genuine departure. A
-                    # False re-submit (the adapter re-resolves on every
-                    # fallback entity change) is NOT an edge and must not
-                    # release a latch minted during away.
-                    for rs in s.rooms.values():
-                        override.release(rs)
+                # Raw input only: the away ONSET edge (latch release, rule 9.2)
+                # fires when the debounce in _advance_away engages away mode,
+                # not here (D29). None fails safe as home (rule 6.4), so
+                # None -> False starts a window like True -> False; a False
+                # re-submit (the adapter re-resolves on every fallback entity
+                # change) changes nothing.
                 s.anyone_home = event.anyone_home
             case VacationChanged():
                 if event.active and not s.vacation:
@@ -706,9 +704,45 @@ class Engine:
             )
         return suspended
 
+    def _advance_away(self, now: datetime, plan: Plan) -> None:
+        """Debounce the away ONSET (rules 6.4/9.2, D29).
+
+        Away engages only once ``anyone_home`` has been False AND no room's
+        primary presence has been True for ``away_debounce`` — presence-
+        conductor reads the house empty for ~35 s after every HA restart and for
+        2-7 min while the untracked occupant is home alone, and each of those
+        used to turn the whole house off and release every latch. The window
+        starts at the False edge (or at boot), is cancelled by any primary
+        presence and restarts when it ends (every such moment is an event, so
+        this recompute runs at that instant), and the engine self-schedules its
+        expiry. The onset edge — every latch released — fires on engagement.
+        Any non-False ``anyone_home`` clears away at once: arrival is instant.
+        """
+        s = self.state
+        if s.anyone_home is not False:
+            s.away = False
+            s.away_pending_since = None
+            return
+        if s.away:
+            return
+        if any(rs.primary is True for rs in s.rooms.values()):
+            s.away_pending_since = None  # someone is demonstrably in: not empty yet
+            return
+        if s.away_pending_since is None:
+            s.away_pending_since = now
+        due = s.away_pending_since + timedelta(seconds=self.tun.away_debounce)
+        if now < due:
+            plan.review_at(due)
+            return
+        s.away = True
+        s.away_pending_since = None
+        for rs in s.rooms.values():  # away ONSET wins once (rule 9.2)
+            override.release(rs)
+
     def _recompute(self, now: datetime) -> list[Command]:
         s, tun = self.state, self.tun
         plan = Plan()
+        self._advance_away(now, plan)
         e = circadian.factor(s.sun_elevation, now, tun)
         evening = e >= tun.evening_cap_threshold
         g = gain.multiplier(s, tun)

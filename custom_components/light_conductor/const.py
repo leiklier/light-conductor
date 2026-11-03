@@ -353,6 +353,7 @@ EDITABLE_TUNABLES: tuple[str, ...] = (
     "night_fade",
     "sleep_fade",
     "tv_pause_grace",
+    "away_debounce",
     "outdoor_on_threshold",
     "outdoor_on_lux",
     "outdoor_full_lux",

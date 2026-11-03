@@ -126,6 +126,7 @@ _TUNABLE_UI: dict[str, tuple[float, float, float]] = {
     "daylight_full": (20, 1000, 10),
     "night_hold": (60, 1800, 30),
     "tv_pause_grace": (0, 900, 10),
+    "away_debounce": (0, 3600, 30),
     "night_fade": (0, 60, 1),
     "sleep_fade": (0, 60, 1),
     "outdoor_on_threshold": (0, 1, 0.05),

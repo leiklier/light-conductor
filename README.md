@@ -27,7 +27,10 @@ What it does:
   switched on) only *caps* it, and a pause grace means a rewind never walks the
   lights up and back down. A balcony can read a lux sensor (even one an indoor
   room already uses, e.g. at the window) and ease in as the light actually
-  goes, instead of at a sun-ramp threshold.
+  goes, instead of at a sun-ramp threshold. Away engages only after the house
+  has read empty — no one home *and* no room occupied — for `away_debounce`
+  (10 min by default, under Options → Tunables), so a presence flap or the
+  ~35 s after a restart never darkens an occupied home; coming home is instant.
 - **Calibrated photometry** — a one-button night sweep measures each lamp's
   lux gain and dimming curve at the room's sensor.
 - **Manual control is respected** — any wall rotary, HomeKit, or voice change

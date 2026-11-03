@@ -131,6 +131,13 @@ class Tunables:
     #: room lights up and back down. Cleared instantly by resume or TV-off.
     #: 0 disables the hold.
     tv_pause_grace: float = 120.0  # 6.3a
+    #: Away-onset debounce (§6.4, D29): away mode — and its onset edge (hard-off
+    #: + latch release) — engages only once ``anyone_home`` has been False AND
+    #: no room's primary presence has been True for this long. presence-
+    #: conductor's anyone_home reads off for 31-35 s after every HA restart and
+    #: flaps off for 2-7 min while the untracked occupant is home alone.
+    #: Arrival stays instant; vacation is not debounced. 0 disables.
+    away_debounce: float = 600.0  # 6.4
     outdoor_on_threshold: float = 0.7  # 6.5
     #: Measured-dusk window for an outdoor room that has a lux sensor (§6.5a).
     #: Its dusk factor ramps 0 -> 1 as N̂ falls from ``outdoor_on_lux`` to
@@ -197,6 +204,8 @@ class Tunables:
             raise ValueError("outdoor_full_lux must be >= 0 and below outdoor_on_lux")
         if not 0.0 < self.outdoor_presence_factor <= 1.0:
             raise ValueError("outdoor_presence_factor must be in (0, 1]")
+        if self.away_debounce < 0.0:
+            raise ValueError("away_debounce must be >= 0")
         if not 0.0 <= self.outdoor_stale_zero_window < 175.0:
             # The ~180 s true-state poll is the legitimate corrector for a
             # genuinely lost write; a window reaching it would swallow that

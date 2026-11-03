@@ -68,6 +68,8 @@ async def async_get_config_entry_diagnostics(
             "sun_elevation": s.sun_elevation,
             "sleep": s.sleep,
             "anyone_home": s.anyone_home,
+            "away": s.away,
+            "away_pending_since": _plain(s.away_pending_since),
             "vacation": s.vacation,
             "away_lighting": s.away_lighting,
             "tv": _plain(s.tv),

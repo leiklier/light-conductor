@@ -79,6 +79,7 @@ DOC_ROWS: dict[str, tuple[tuple[str, ...], tuple[object, ...]]] = {
         (4.0, 600.0, 10.0),
     ),
     "tv_pause_grace": (("tv_pause_grace",), (120.0,)),
+    "away_debounce": (("away_debounce",), (600.0,)),
     "outdoor_on_threshold": (("outdoor_on_threshold",), (0.7,)),
     "outdoor_on_lux / outdoor_full_lux": (("outdoor_on_lux", "outdoor_full_lux"), (15.0, 2.0)),
     "outdoor_presence_factor": (("outdoor_presence_factor",), (0.5,)),

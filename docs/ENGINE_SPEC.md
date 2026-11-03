@@ -576,17 +576,32 @@ out the grace. The engine self-schedules a review at the hold expiry (rule 0),
 so the step up happens on time in an otherwise quiet house. `tv_pause_grace`
 = 0 disables the hold.
 
-6.4 **Away.** `anyone_home is False` ⇒ every indoor room OFF. Outdoor rooms
-keep their dusk background (6.5) as presence simulation while the
-`away_lighting` switch (§10, restorable, default on) is on; switch off ⇒
-outdoor rooms go dark on away too. `None`/unavailable fails safe as home
-(consistent with sonos-conductor 1.8). Like sleep (6.1), away wins **once,
-at the onset edge** (`anyone_home` transitioning to False releases every
-latch, 9.2 — a re-submit of a standing False is not an edge); a foreign
-change while away stands latches and is respected until timeout — the radar
-can be wrong about a quiet house, and a hand on a wall dial is definitive
-presence evidence. Arrival re-evaluates immediately; no flash: normal fades
-apply.
+6.4 **Away.** Away mode ⇒ every indoor room OFF. Outdoor rooms keep their
+dusk background (6.5) as presence simulation while the `away_lighting` switch
+(§10, restorable, default on) is on; switch off ⇒ outdoor rooms go dark on
+away too. `None`/unavailable fails safe as home (consistent with
+sonos-conductor 1.8).
+
+**Onset debounce (D29).** Away mode engages only once the house has read
+empty for `away_debounce` (600 s): `anyone_home` continuously False **and** no
+room's *primary* presence (§1.1, presence-conductor — not the raw fallbacks)
+True. The window starts at the False edge (or at boot, when `anyone_home` is
+False from the first event), is cancelled by any primary presence True and
+restarts when that presence ends, and its expiry is self-scheduled by the
+engine. presence-conductor's `anyone_home` reads off for 31–35 s after every
+HA restart and for 2–7 min while the untracked occupant is home alone; each of
+those used to turn the whole house off and release every latch. During the
+window the house behaves exactly as home. **Arrival is instant**: any
+non-False `anyone_home` clears away (and any running window) at once.
+Vacation (6.6) is not debounced. Calibration's mode gate (§4.4) reads the same
+debounced flag.
+
+Like sleep (6.1), away wins **once, at the onset edge** — the moment the
+debounce engages away mode releases every latch, 9.2 (a re-submit of a
+standing False is not an edge); a foreign change while away stands latches and
+is respected until timeout — the radar can be wrong about a quiet house, and a
+hand on a wall dial is definitive presence evidence. Arrival re-evaluates
+immediately; no flash: normal fades apply.
 
 6.5 **Balkong (outdoor room).** A room may be flagged `outdoor`. It ignores
 presence and runs: ON at `E ≥ outdoor_on_threshold` (dusk) at
@@ -923,7 +938,8 @@ stray dialed level on the morning descent (6.5b).
 
 9.2 **Override release.** The override clears on: room OFF-worthy vacancy
 (hold expiry at OFF tier) — **presence-capable rooms only**; the
-sleep/away/vacation **onset edge** (the moment the mode engages — never
+sleep/away/vacation **onset edge** (the moment the mode engages — for away,
+when its §6.4 debounce engages it — never
 re-checked while it stands, so a during-mode latch survives until its
 timeout), *except* in a room configured `sleep_keeps_override`, which is
 exempt from the SLEEP onset release only and whose latch therefore stands
@@ -1050,6 +1066,7 @@ fresh install and a missed restore get).
 | ct_min_delta | 100 K | 5.4 |
 | sleep_fade / night_hold / night_fade | 4 s / 600 s / 10 s | 6.1, 6.2 |
 | tv_pause_grace | 120 s | 6.3a |
+| away_debounce | 600 s | 6.4 |
 | outdoor_on_threshold | 0.7 | 6.5 |
 | outdoor_on_lux / outdoor_full_lux | 15 lx / 2 lx | 6.5a |
 | outdoor_presence_factor | 0.5 | 1.10, 6.5a |

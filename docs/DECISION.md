@@ -963,6 +963,40 @@ room's level a second before the true level arrives; the true report then
 matches that command's echo. Before, the transient was ignored and a lamp that
 genuinely came back off stayed off until something else moved.
 
+## D29. The away onset is debounced (beta.20)
+
+The evidence. presence-conductor's `anyone_home` reads off for 31–35 s after
+every HA restart — longer than the 30 s startup grace — and flaps off for
+2–7 min while the untracked second occupant is home alone (10-25
+19:58:44 → 20:01:46; 10-26 16:34:35 → 16:36:53 and 16:40:34 → 16:47:24). Each
+flap engaged away: the whole house went dark and every latch was released.
+D28 makes it worse on restarts: the engine now *knows* the lamps are lit after
+recovery, so a 35 s phantom departure would hard-off every one of them.
+
+Decision (§6.4): away mode, and with it the onset edge (hard-off + latch
+release) and the outdoor away lighting, engages only after the house has read
+empty for `away_debounce` (default 600 s, §12, options form): `anyone_home`
+False *and* no room's primary presence True. Primary presence during the
+window cancels it and the window restarts when the room empties — someone
+demonstrably in a room is someone home, whatever the phone-based aggregate
+says. The engine self-schedules the expiry; a boot with `anyone_home` False
+counts from the first event. Arrival stays instant; vacation is not debounced
+(it is a deliberate declaration, not a sensor reading). 600 s is above every
+observed flap (max 6 min 50 s) with margin, and well below any real absence
+worth lighting for.
+
+Why primary presence and not the raw fallbacks: the raw kitchen sensor was on
+~116 times while nobody was home (D31 data); letting it cancel the window
+would keep an empty house "home" indefinitely. presence-conductor's room
+occupancy is the calibrated estimator, and is what its own `anyone_home`
+should have agreed with in the first place.
+
+Rejected: a longer startup grace (fixes restarts, not the daytime flaps);
+debouncing in the adapter (the window must be cancelled by room presence and
+self-scheduled, both engine facts); ignoring `anyone_home` entirely (away is
+the only thing that turns the balcony to presence simulation and darkens a
+house left with a light on).
+
 ## Open questions — RESOLVED (user, 2026-07-25)
 
 - **Q1 (D8):** master dimmer neutral at 50 % — confirmed (boost possible).

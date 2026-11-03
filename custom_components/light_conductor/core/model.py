@@ -332,7 +332,18 @@ class EngineState:
     sun_elevation: float | None = None
     # Modes (rule 6).
     sleep: bool = False
+    #: Raw home presence as last reported (rule 6.4). The engine acts on the
+    #: DEBOUNCED ``away`` below, never on this directly.
     anyone_home: bool | None = None
+    #: Away mode engaged (rule 6.4, D29): ``anyone_home`` has been False with no
+    #: room's primary presence True for ``away_debounce``. Cleared at once by
+    #: any non-False ``anyone_home`` (arrival is instant).
+    away: bool = False
+    #: Start of the running away-debounce window (rule 6.4, D29) — the later of
+    #: the ``anyone_home`` False edge (or boot) and the end of the last primary
+    #: presence. ``None`` when no window runs (home, already away, or a room is
+    #: occupied right now).
+    away_pending_since: datetime | None = None
     vacation: bool = False
     #: Outdoor presence-simulation while away (rule 6.4, §10 switch; default on).
     away_lighting: bool = True

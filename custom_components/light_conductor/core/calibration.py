@@ -77,7 +77,7 @@ def can_start(
         return "no_lux_sensor"
     if rs.cal is not None:
         return "already_calibrating"
-    if state.sleep or state.vacation or state.anyone_home is False:
+    if state.sleep or state.vacation or state.away:  # debounced away (§6.4, D29)
         return "mode_off"
     if state.sun_elevation is None or state.sun_elevation >= tun.night_prior_deg:
         return "sun_too_high"
@@ -154,7 +154,7 @@ def step(rs: RoomState, state: EngineState, now: datetime, plan: Plan, tun: Tuna
     # sensor going stale.
     if cal.foreign:
         return abort(rs, plan, "foreign_change", now, tun)
-    if state.sleep or state.vacation or state.anyone_home is False:
+    if state.sleep or state.vacation or state.away:  # debounced away (§6.4, D29)
         return abort(rs, plan, "mode_off", now, tun)
     est = rs.est
     if est.last_report_at is None or (now - est.last_report_at).total_seconds() > tun.lux_stale:
