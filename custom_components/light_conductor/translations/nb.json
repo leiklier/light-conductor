@@ -137,7 +137,7 @@
       }
     },
     "error": {
-      "invalid_tunables": "Ugyldig kombinasjon: sjekk at skumringsvinduet er riktig ordnet (outdoor_full_lux lavere enn outdoor_on_lux) og at solrampen er det (sun_low_deg lavere enn sun_high_deg)."
+      "invalid_tunables": "Ugyldig kombinasjon: sjekk at skumringsvinduet er riktig ordnet (outdoor_full_lux lavere enn outdoor_on_lux), at solrampen er det (sun_low_deg lavere enn sun_high_deg), og at dusk_ceiling er mellom 0 og 1."
     }
   },
   "entity": {

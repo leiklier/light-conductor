@@ -11,7 +11,7 @@ ledger (§8.3/8.4) — those are not this module's concern.
 Quantization (rule 8.3, D27) happens in COMMAND space on a grid that is dense
 at the low end: ``g_0 = dim_floor``, ``g_{k+1} = g_k + max(quant_step,
 quant_rel·g_k)``, capped by ``1.0`` — 0.01 steps up to 10 %, then 10 % relative
-steps (34 levels for the default ``dim_floor`` 0.02). The quantizer is sticky:
+steps (33 levels for the default ``dim_floor`` 0.02). The quantizer is sticky:
 a lit channel keeps its level while the goal stays within ``QUANT_HOLD`` of a
 local grid step of it, so goal jitter around a boundary emits nothing. Slew and
 ramp sizing stay in flux space (rule 4.3). CT is only rewritten when it moves
@@ -62,7 +62,14 @@ def level_grid(dim_floor: float, step: float, rel: float) -> tuple[float, ...]:
             break
         levels.append(g)
     if levels[-1] < 1.0:
-        levels.append(1.0)
+        # Full output is always a level. A last interior level within half a
+        # step of it would leave a sliver gap (0.985 -> 1.0) that a ramp skips
+        # straight over, so it is absorbed into 1.0 instead.
+        last = levels[-1]
+        if len(levels) > 1 and 1.0 - last < 0.5 * max(step, rel * last):
+            levels[-1] = 1.0
+        else:
+            levels.append(1.0)
     return tuple(levels)
 
 

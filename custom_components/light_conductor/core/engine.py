@@ -174,7 +174,12 @@ class Engine:
         return self.state.rooms[room_id]
 
     def circadian_factor(self, now: datetime) -> float:
+        """E — "it is dark" (rule 2.3)."""
         return circadian.factor(self.state.sun_elevation, now, self.tun)
+
+    def wind_down_factor(self, now: datetime) -> float:
+        """W — "it is late" (rule 2.3, D33)."""
+        return circadian.wind_down(self.state.sun_elevation, now, self.tun)
 
     # -- dispatch -----------------------------------------------------------
 
@@ -785,7 +790,13 @@ class Engine:
         s, tun = self.state, self.tun
         plan = Plan()
         self._advance_away(now, plan)
+        # Two circadian factors (rule 2.3, D33): E = "it is dark" (CT, outdoor
+        # gates, the corridor evening gate, the morning gain drift), W = "it is
+        # late" (tier interpolation, closed-loop targets, the evening cap, the
+        # boost hand-over). dusk_ceiling 1.0 makes them identical.
         e = circadian.factor(s.sun_elevation, now, tun)
+        w = circadian.wind_down(s.sun_elevation, now, tun)
+        s.last_w = w
         evening = e >= tun.evening_cap_threshold
         g = gain.multiplier(s, tun)
 
@@ -852,6 +863,7 @@ class Engine:
                     room,
                     now,
                     e,
+                    w,
                     evening,
                     g,
                     living,
@@ -865,8 +877,10 @@ class Engine:
         # Circadian self-scheduling (rule 2.3): follow the ramp with a tick, and
         # from a plateau schedule the next clock-ramp boundary so the engine can
         # start the 20:00 / 06:00 ramps itself without waiting on sun events.
+        # "In a ramp" is judged per TERM (D33): with the sun down E sits at 1
+        # while W still climbs on the clock 20:00 -> 22:30.
         if s.enabled:
-            if 0.0 < e < 1.0:
+            if circadian.ramping(s.sun_elevation, now, tun):
                 plan.review_at(now + timedelta(seconds=tun.circadian_tick))
             else:
                 plan.review_at(self._next_clock_boundary(now))
@@ -899,6 +913,7 @@ class Engine:
         room: RoomConfig,
         now: datetime,
         e: float,
+        w: float,
         evening: bool,
         g: float,
         living: bool,
@@ -1004,17 +1019,19 @@ class Engine:
                 outputs = dict(res.band_outputs or {})
                 if not res.gain_exempt:  # night path / outdoor are unscaled (7.4/7.2)
                     outputs = gain.scale(outputs, g)
-                    outputs = targets.apply_evening_cap(outputs, e, room.profile, tun)
+                    outputs = targets.apply_evening_cap(outputs, w, room.profile, tun)
             ct_override, fade = res.ct_override, res.fade
-            channel_b = photometry.allocate(room.channels, outputs, e, tun)
+            channel_b = photometry.allocate(
+                room.channels, outputs, targets.boost_weight(w, tun), tun
+            )
         elif closed:
             role = base
             channel_b, correcting, target_lux = self._closed_loop(
-                room, rs, base, prev_role, e, g, now, photo, capacity, plan, tv_ceiling, ref_d
+                room, rs, base, prev_role, w, g, now, photo, capacity, plan, tv_ceiling, ref_d
             )
         else:
             role = base
-            outputs = targets.role_outputs(room.profile, role, e, tun)
+            outputs = targets.role_outputs(room.profile, role, w, tun)
             # Daylight-aware open-loop (§4.7): the tier outputs are scaled by the
             # daylight factor D, replicating the legacy 100 - 0.5·lux daytime
             # damping. A stale/absent source falls through unscaled (D → 1),
@@ -1040,17 +1057,20 @@ class Engine:
                 rs.est.daylight_latch = d_factor
                 outputs = {b: v * d_factor for b, v in outputs.items()}
             outputs = gain.scale(outputs, g)
-            outputs = targets.apply_evening_cap(outputs, e, room.profile, tun)
-            # Evening boost output (§4.5, D26): LAST band-level word — an
-            # explicit per-room evening value for the boost band (the kitchen
-            # bench strip the user turned on at 22:04), unlocked for an ACTIVE
-            # room only. Exempt from the evening cap, but scaled by the master
-            # gain: g is 0 when the master is off, and no room may hold a band
-            # the master switch cannot extinguish (rule 7.2).
-            outputs, boost_unlocked = targets.apply_boost_evening_output(
-                outputs, e, role, room.profile, tun, g
+            outputs = targets.apply_evening_cap(outputs, w, room.profile, tun)
+            # Boost hand-over (§4.5, D26/D33): across a W window below
+            # boost_evening_max the boost band fades from its (capped) tier to
+            # its evening value — the explicit per-room boost_evening_output
+            # (the kitchen bench strip the user turned on at 22:04; ACTIVE
+            # only, exempt from the cap, scaled by the master gain: g is 0 when
+            # the master is off, rule 7.2) or 0, the lockout.
+            channel_b = photometry.allocate(
+                room.channels,
+                outputs,
+                targets.boost_weight(w, tun),
+                tun,
+                targets.boost_evening_value(role, room.profile, g),
             )
-            channel_b = photometry.allocate(room.channels, outputs, e, tun, boost_unlocked)
 
         # The TV ON ceiling is the LAST word on output (rule 6.3): applied to the
         # final per-channel values, after weight share, response mapping and the
@@ -1204,7 +1224,7 @@ class Engine:
         rs: RoomState,
         role: Role,
         prev_role: Role,
-        e: float,
+        w: float,
         g: float,
         now: datetime,
         photo: RoomPhotometry,
@@ -1232,7 +1252,7 @@ class Engine:
         broad daylight.
         """
         tun = self.tun
-        t_prime = estimator.target_lux(rs, role, room.profile, e, g, tun, capacity)
+        t_prime = estimator.target_lux(rs, role, room.profile, w, g, tun, capacity)
         if ref_d is not None:
             t_prime *= ref_d
         a_now = estimator.a_hat(rs, photo)
@@ -1269,17 +1289,35 @@ class Engine:
             rs.est.error_sustain_until = None
             correct, review = True, None
         plan.review_at(review)
+        # The evening cap is continuous in W (rule 2.4, D33) and binds on the
+        # HOLD as well as on a correction: as W climbs the cap comes down a grid
+        # step at a time over a held level, instead of waiting for the next
+        # deadband correction to land the whole difference at once.
+        cap = targets.evening_cap(w, room.profile)
         if not correct:
-            hold = {ch.channel_id: rs.channels[ch.channel_id].commanded_b for ch in room.channels}
+            hold = {
+                ch.channel_id: min(rs.channels[ch.channel_id].commanded_b, cap)
+                for ch in room.channels
+            }
             return hold, False, t_prime
-        demand = max(0.0, t_prime - n)
+        return self._closed_loop_goal(room, rs, t_prime, w, photo), True, t_prime
+
+    def _closed_loop_goal(
+        self, room: RoomConfig, rs: RoomState, t_prime: float, w: float, photo: RoomPhotometry
+    ) -> dict[str, float]:
+        """The feed-forward per-channel command for target ``t_prime`` (§3.6/§4.5).
+
+        Demand ``T' - N̂`` is band-filled (the boost band faded by its W
+        hand-over weight, D33) and inverted through the calibrated curves, then
+        clamped to the continuous evening cap ``cap(W)`` (rule 2.4).
+        """
+        tun = self.tun
+        demand = max(0.0, t_prime - rs.est.n_hat)
         channel_b = estimator.channel_outputs_for_demand(
-            room.channels, demand, e, photo, rs.est.gain_mult, tun
+            room.channels, demand, targets.boost_weight(w, tun), photo, rs.est.gain_mult, tun
         )
-        if e >= tun.evening_cap_threshold:  # evening cap on normalized output (2.4)
-            cap = room.profile.evening_output_cap
-            channel_b = {cid: min(b, cap) for cid, b in channel_b.items()}
-        return channel_b, True, t_prime
+        cap = targets.evening_cap(w, room.profile)
+        return {cid: min(b, cap) for cid, b in channel_b.items()}
 
     def _diag(
         self,

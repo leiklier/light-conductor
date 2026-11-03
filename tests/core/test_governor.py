@@ -283,7 +283,8 @@ def test_grid_is_bounded_and_spans_the_range() -> None:
         assert grid[0] == floor and grid[-1] == 1.0
         assert all(b > a for a, b in pairwise(grid))
     grid = governor.level_grid(0.02, TUN.quant_step, TUN.quant_rel)
-    assert len(grid) == 34
+    assert len(grid) == 33
+    assert grid[-2:] == (0.895433, 1.0)  # no sliver gap below full output
     assert grid[:4] == (0.02, 0.03, 0.04, 0.05)
     big = [b / a - 1.0 for a, b in pairwise(grid) if a >= 0.1 and b < 1.0]
     assert all(isclose(r, 0.1, abs_tol=1e-4) for r in big)

@@ -132,9 +132,9 @@ class RoomPhotometry:
 def allocate(
     channels: tuple[ChannelConfig, ...],
     band_outputs: dict[Band, float],
-    evening_factor: float,
+    boost_weight: float,
     tun: Tunables,
-    boost_unlocked: bool = False,
+    boost_evening: float | None = None,
 ) -> dict[str, float]:
     """Map per-band normalized outputs onto channels (rules 4.5/4.6).
 
@@ -143,28 +143,33 @@ def allocate(
     channel, so the default equal weights leave every channel at the band
     output (matching §4.6's "normalized output per band") while a lighter
     weight scales a channel down. Sharing uses ``weight``, **never** the
-    calibrated sensor gain (§3.1). The boost band is gated off once
-    ``E >= boost_evening_max`` (benkebelysning evening lockout, rule 4.5) —
-    unless ``boost_unlocked``, which the caller sets when the profile's
-    ``boost_evening_output`` has already put an explicit evening value in the
-    band (D26); the lockout must not then re-zero it.
-    The lux ``band_overlap`` crossfade is a closed-loop mechanism (estimator).
+    calibrated sensor gain (§3.1).
+
+    The BOOST band hands over from its tier output to its evening value across
+    a W window (rule 4.5, D33): its output is ``β·tier + (1 - β)·evening``
+    with ``β = boost_weight`` (:func:`~.targets.boost_weight`) and ``evening``
+    the explicit, already gain-scaled ``boost_evening`` an ACTIVE room's
+    profile may set (D26), else 0 — the evening lockout, now a fade instead of
+    the beta.19 step at ``boost_evening_max``. The lux ``band_overlap``
+    crossfade is a closed-loop mechanism (estimator).
 
     The per-channel affine RESPONSE MAPPING (rule 4.5) is the LAST step: after
-    weight sharing and the boost evening lockout the post-weight output ``out``
+    weight sharing and the boost hand-over the post-weight output ``out``
     becomes ``clamp(response_slope · out + response_offset, 0, 1)``. A zero
     ``out`` ALWAYS stays 0 (the mapping runs only when ``out > 0``) so a
     positive offset never lights an off channel and the evening lockout can
     never be resurrected. Defaults (1.0/0.0) are an exact byte-identical no-op.
     """
+    beta = max(0.0, min(1.0, boost_weight))
     max_weight: dict[Band, float] = {}
     for ch in channels:
         max_weight[ch.band] = max(max_weight.get(ch.band, 0.0), ch.weight)
     result: dict[str, float] = {}
     for ch in channels:
         out = band_outputs.get(ch.band, 0.0)
-        if ch.band is Band.BOOST and evening_factor >= tun.boost_evening_max and not boost_unlocked:
-            out = 0.0  # rule 4.5 evening lockout
+        if ch.band is Band.BOOST:
+            # rule 4.5 evening hand-over (D33): tier -> evening value (or 0)
+            out = beta * out + (1.0 - beta) * (boost_evening or 0.0)
         peak = max_weight.get(ch.band, 0.0)
         share = ch.weight / peak if peak > 0.0 else 1.0
         channel_out = max(0.0, min(1.0, out * share))

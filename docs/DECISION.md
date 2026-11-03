@@ -864,8 +864,10 @@ Decision (§8.3):
    + max(quant_step, quant_rel·g_k)`, last level 1.0. Absolute 0.01 steps
    through the dim end (a relative step would drop below Plejd's 1/255 device
    resolution there), 10 % relative steps — Weber-like — above 10 % output.
-   34 levels at the live `dim_floor` 0.02, ≤ 50 for any floor: write volume
-   stays bounded (a full sweep is ≤ 33 level changes). Command space, not flux,
+   33 levels at the live `dim_floor` 0.02, ≤ 50 for any floor: write volume
+   stays bounded (a full sweep is ≤ 32 level changes). A last interior level
+   within half a step of 1.0 is absorbed into it (no 0.985 → 1.0 sliver for a
+   ramp to skip). Command space, not flux,
    because the rendering bound is stated on the command (`|b_emitted − b_goal| ≤
    max(0.01, 0.08·b_goal)`) and must hold on every curve: a relative flux grid
    would halve the error on `b²` and double it on sofakrok's near-linear
@@ -1092,6 +1094,84 @@ whole episode, and the return 20 minutes later opened no episode (no door
 edge). Holding on the persisted fallback instead (D31) changes the replay by
 seconds (+0.3 min on that episode) and is not worth the raw sensors' night
 noise.
+
+## D33. Darkness E and wind-down W are separate factors; the evening cap and boost hand-over are continuous (beta.20)
+
+User decision (2026-11-02): split "it is dark" from "it is late". One factor
+`E = max(E_sun, E_clock)` did both, and at 59° N they are hours apart: 2 Nov
+E ≥ 0.5 from ~16:09, 21 Dec from ~14:51, and E never reaches 0 at midday
+~25 Nov–17 Jan. The house went to its bedtime tier mid-afternoon — the
+kitchen at 25 % from 16:09 — because the evening cap switched on at E ≥ 0.5
+as a cliff (kitchen 0.625 → 0.25, the other rooms ~0.65 → 0.30, every room's
+`evening_output_cap` equals its `active_evening`), and the bench strip jumped
+6 % → 18 % at the same threshold when its `boost_evening_output` took over.
+
+Decision (§2.3/§2.4/§4.5):
+
+1. **E stays darkness; new `W = max(E_clock, min(E_sun, dusk_ceiling))`.**
+   The sun alone carries the wind-down only to `dusk_ceiling` (new tunable,
+   default 1.0 ⇒ W ≡ E, i.e. beta.19 routing; planned live value 0.4); the
+   clock carries it the rest of the way.
+2. **Every consumer, assigned** (grep of `circadian.`, `e >=`/`e <`,
+   `evening_factor`, `is_evening`, `last_e`, parameters named `e`):
+   - *W* — `targets.role_outputs`/`active_outputs` (ACTIVE interpolation, and
+     ADJACENT through §1.5; BACKGROUND is a fixed table): how bright a room
+     is *for the hour*. `estimator.target_lux` (closed-loop ACTIVE/ADJACENT/
+     BACKGROUND lux targets): same tier, measured. `targets.evening_cap` on
+     all three output paths: the cap is the wind-down's ceiling.
+     `targets.boost_weight` in `photometry.allocate` (open-loop tiers and mode
+     tables) and `estimator.channel_outputs_for_demand` (closed loop), plus
+     `boost_evening_output` via the same hand-over: the bench strip is task
+     light vs a cozy *late* evening, not vs darkness — cooking at 17:00 in
+     December is cooking.
+   - *E* — `ct_policy.ct_target` (§5): warm light belongs to the dark; at
+     17:00 the kitchen is bright *and* warm. `targets.outdoor_dusk_factor` and
+     `modes._outdoor` (the `outdoor_on_threshold` gate and the E = 1 plateau
+     backstop, §6.5/6.5a), `roles.step`'s occupational-presence gate (§1.10),
+     and the §6.5b arbitration through `_outdoor_dusk`: a balcony is lit
+     because it is dark outside. The engine's `evening` flag → the corridor
+     BACKGROUND gate (§1.7): a dark hallway beside a lit living room needs its
+     glow at 17:00, not from 20:00. `last_e` → the §7.3 morning drift: left on
+     E as asked; between ~25 Nov and ~17 Jan E never reaches 0 so that edge
+     does not fire, and the daily reset rests on the sleep-off edge (verified:
+     `SleepChanged(False)` calls `relax_to_neutral` in the fold).
+     `circadian.is_evening` (tests only) and `Engine.circadian_factor` stay E;
+     `Engine.wind_down_factor` and the `last_w` diagnostic are new.
+   - *Neither* — the night-path and TV PLAYING tables (§6.2/6.3) carry no
+     factor; they meet W only through the cap and boost hand-over the funnel
+     applies to every gain-scaled table.
+3. **Continuous cap** `cap(W) = (1 − W) + W·evening_output_cap` on every
+   path, the closed-loop *hold* included (a held level above the cap follows
+   it down a grid step at a time instead of waiting for a deadband
+   correction to land the whole difference). Linear because it is the same
+   line the interpolation draws from full output to the cap: a profile whose
+   evening tier is at or below its cap is never dimmed by the cap at all, and
+   the cap only trims what rides above it (master gain, closed-loop demand).
+   `evening_cap_threshold` now only gates the §1.7 corridor (it keeps its name
+   — stored options use it).
+4. **Continuous boost hand-over**: the boost band is `β·tier + (1 − β)·evening`
+   with β falling 1 → 0 across `W ∈ [boost_evening_max − 0.2,
+   boost_evening_max]`; at and above `boost_evening_max` the band is exactly
+   beta.19's (locked out, or `boost_evening_output`). The closed loop scales
+   the boost band's capacity by β.
+5. **Self-scheduling per term**: the engine ticks while `E_sun` or `E_clock`
+   is strictly inside its ramp — with the sun down E sits at 1 while W climbs
+   20:00 → 22:30, and the beta.19 test on E alone would have slept until
+   06:00. **`circadian_tick` 300 → 60 s**: with the D27 grid's 0.01 dim-end
+   steps a 5-min tick moved the bench strip two or three levels per tick on
+   the 90-min morning ramp. A property test sweeps W through the live
+   configuration (evening and morning ramps, ACTIVE/ADJACENT/BACKGROUND,
+   open-loop, plus sofakrok's closed-loop goal at gain 1 and 2) and asserts
+   ≤ 1 grid level per tick; at 300 s it fails, at 60 s it holds. Writes are
+   bounded by levels crossed (the governor emits only on a level change), not
+   by the tick. (Also fixed for the property: D27's grid had a 0.985 → 1.0
+   sliver level that a ramp skipped over; a last level within half a step of
+   1.0 is now absorbed into it — 33 levels.)
+
+Caveat for the closed loop: the deadband (§3.6) still decides *when* a
+correction lands, so a closed-loop room moves in deadband-sized corrections as
+before; what D33 guarantees is that the level it lands on (and the capped
+hold) is continuous in W.
 
 ## Open questions — RESOLVED (user, 2026-07-25)
 

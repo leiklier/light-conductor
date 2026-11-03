@@ -57,11 +57,19 @@ class Tunables:
     evening_full_min: int = 22 * 60 + 30  # 2.3 (22:30)
     morning_start_min: int = 6 * 60  # 2.3 (06:00)
     morning_full_min: int = 7 * 60 + 30  # 2.3 (07:30)
-    circadian_tick: float = 300.0  # 2.3
+    #: Re-evaluation cadence while E or W is inside a ramp (§2.3). 60 s since
+    #: D33: the D27 grid has 0.01 steps at the dim end, and at 300 s a W ramp
+    #: moved a steep channel (the kitchen bench strip, mapped 0.8x-0.5) by two
+    #: or three grid levels per tick. Writes stay bounded by the levels crossed
+    #: — the governor only emits on a level change — not by the tick.
+    circadian_tick: float = 60.0  # 2.3
+    #: How far the SUN alone carries the wind-down factor W (§2.3, D33):
+    #: W = max(E_clock, min(E_sun, dusk_ceiling)). 1.0 ⇒ W ≡ E (beta.19).
+    dusk_ceiling: float = 1.0  # 2.3
     evening_output_cap: float = 0.3  # 2.4 (profile default: 0.3 living)
-    #: Circadian threshold at/above which the evening cap and the corridor
-    #: "evening" gate engage (rule 2.4/1.7). Not tabled in the original
-    #: §12; added there in the same PR (docs-only commit).
+    #: E (darkness) at/above which a corridor counts as "evening" for its
+    #: BACKGROUND role (rule 1.7). Before D33 it also switched the evening cap
+    #: on as a cliff; the cap is now continuous in W (§2.4).
     evening_cap_threshold: float = 0.5
 
     # --- §3 estimator (deferred; closed-loop) -----------------------------
@@ -181,7 +189,7 @@ class Tunables:
     #: channel's dim floor and advance by ``max(quant_step, quant_rel·b)`` up to
     #: 1.0 — absolute 0.01 steps through the dim end (where the old 0.03 FLUX
     #: grid rendered every goal below ~12 % as the 2 % floor), 10 % relative
-    #: steps above 10 % output. 34 levels for the default dim floor 0.02.
+    #: steps above 10 % output. 33 levels for the default dim floor 0.02.
     quant_step: float = 0.01  # 8.3
     quant_rel: float = 0.10  # 8.3
     min_write_interval: float = 1.0  # 8.3
@@ -212,6 +220,10 @@ class Tunables:
             raise ValueError("outdoor_full_lux must be >= 0 and below outdoor_on_lux")
         if not 0.0 < self.outdoor_presence_factor <= 1.0:
             raise ValueError("outdoor_presence_factor must be in (0, 1]")
+        if not 0.0 <= self.dusk_ceiling <= 1.0:
+            raise ValueError("dusk_ceiling must be in [0, 1]")
+        if self.circadian_tick <= 0.0:
+            raise ValueError("circadian_tick must be > 0")
         if self.fallback_min_on < 0.0:
             raise ValueError("fallback_min_on must be >= 0")
         if self.away_debounce < 0.0:

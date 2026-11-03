@@ -79,6 +79,7 @@ async def async_get_config_entry_diagnostics(
             "master_on": s.master_on,
             "master_pct": s.master_pct,
             "last_e": s.last_e,
+            "last_w": s.last_w,
         },
         "rooms": rooms,
     }

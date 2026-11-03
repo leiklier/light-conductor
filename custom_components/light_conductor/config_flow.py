@@ -118,6 +118,7 @@ _TUNABLE_UI: dict[str, tuple[float, float, float]] = {
     "sun_high_deg": (-10, 30, 1),
     "sun_low_deg": (-20, 10, 1),
     "circadian_tick": (30, 900, 30),
+    "dusk_ceiling": (0, 1, 0.05),
     "evening_cap_threshold": (0, 1, 0.05),
     "bootstrap_dispersion_max": (1, 10, 0.5),
     "lux_stale": (30, 600, 10),

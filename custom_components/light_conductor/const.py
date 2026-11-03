@@ -347,6 +347,7 @@ EDITABLE_TUNABLES: tuple[str, ...] = (
     "sun_high_deg",
     "sun_low_deg",
     "circadian_tick",
+    "dusk_ceiling",
     "evening_cap_threshold",
     "bootstrap_dispersion_max",
     "lux_stale",

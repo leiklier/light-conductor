@@ -1,8 +1,8 @@
 """Illuminance targets & circadian shaping (ENGINE_SPEC §2).
 
-On the open-loop path (every room this PR) a role selects per-band
-normalized outputs from the profile tables; ACTIVE interpolates the day and
-evening tables by the circadian factor E, ADJACENT scales the interpolated
+On the open-loop path a role selects per-band normalized outputs from the
+profile tables; ACTIVE interpolates the day and evening tables by the
+wind-down factor W (rule 2.3, D33), ADJACENT scales the interpolated
 ACTIVE by ``adjacent_fraction`` (rule 1.5), BACKGROUND uses the profile's
 ``out_background`` table (rule 4.6), OFF is zero.
 
@@ -20,18 +20,20 @@ from .model import BAND_ORDER, Band, BandMap, Profile, Role
 from .tunables import Tunables
 
 
-def _interp_band(day: BandMap, evening: BandMap, e: float) -> dict[Band, float]:
+def _interp_band(day: BandMap, evening: BandMap, w: float) -> dict[Band, float]:
     bands = set(day) | set(evening)
-    return {b: day.get(b, 0.0) * (1.0 - e) + evening.get(b, 0.0) * e for b in bands}
+    return {b: day.get(b, 0.0) * (1.0 - w) + evening.get(b, 0.0) * w for b in bands}
 
 
-def active_outputs(profile: Profile, e: float) -> dict[Band, float]:
-    """ACTIVE per-band outputs, interpolated day<->evening by E (rule 2.1)."""
-    return _interp_band(profile.out_active_day, profile.out_active_evening, e)
+def active_outputs(profile: Profile, w: float) -> dict[Band, float]:
+    """ACTIVE per-band outputs, interpolated day<->evening by W (rule 2.1, D33)."""
+    return _interp_band(profile.out_active_day, profile.out_active_evening, w)
 
 
-def role_outputs(profile: Profile, role: Role, e: float, tun: Tunables) -> dict[Band, float]:
+def role_outputs(profile: Profile, role: Role, w: float, tun: Tunables) -> dict[Band, float]:
     """Per-band normalized outputs for a role tier (rules 2.1, 1.5, 4.6).
+
+    Interpolated by the wind-down factor W (D33), not by darkness.
 
     The evening cap (rule 2.4) is applied by the caller in the §8 funnel so
     every path honours it; this returns the pre-cap tier outputs.
@@ -39,7 +41,7 @@ def role_outputs(profile: Profile, role: Role, e: float, tun: Tunables) -> dict[
     if role in (Role.OFF, Role.NIGHT_PATH, Role.TV):
         # NIGHT_PATH / TV outputs are mode tables, resolved in modes.py.
         return dict.fromkeys(BAND_ORDER, 0.0)
-    active = active_outputs(profile, e)
+    active = active_outputs(profile, w)
     if role is Role.ACTIVE:
         return active
     if role is Role.ADJACENT:
@@ -48,46 +50,71 @@ def role_outputs(profile: Profile, role: Role, e: float, tun: Tunables) -> dict[
     return dict(profile.out_background)
 
 
+#: Width of the W window over which the BOOST band hands over from its tier
+#: output to its evening value — ``boost_evening_output`` or 0 (rule 4.5, D33).
+#: The window ENDS at ``boost_evening_max``, so at and above it the band is
+#: exactly what beta.19 made it (locked out, or the explicit evening value);
+#: below ``boost_evening_max - BOOST_FADE`` it is the plain tier. 0.2 keeps the
+#: kitchen bench strip (0.8x - 0.5 mapping, 0.70 -> 0.85) inside one grid step
+#: per ``circadian_tick`` at the fastest W ramp. An engineering constant.
+BOOST_FADE = 0.2
+
+
+def evening_cap(w: float, profile: Profile) -> float:
+    """The evening cap at wind-down ``w`` (rule 2.4, D33).
+
+    ``cap(W) = 1 - W·(1 - evening_output_cap)``: non-binding at W = 0, the
+    profile's ``evening_output_cap`` at W = 1, linear and monotone between.
+    It is the same straight line the ACTIVE interpolation draws from "full
+    output" to the cap, so a profile whose evening tier sits at or below its
+    cap (every live room) is never dimmed BY the cap — the interpolation does
+    it, and the cap only trims what rides above (master gain > 1, closed-loop
+    demand). beta.19 switched the cap on at E >= 0.5 and the kitchen fell
+    0.625 -> 0.25 in one write.
+    """
+    w = max(0.0, min(1.0, w))
+    return (1.0 - w) + w * profile.evening_output_cap  # exact at both ends
+
+
 def apply_evening_cap(
-    outputs: dict[Band, float], e: float, profile: Profile, tun: Tunables
+    outputs: dict[Band, float], w: float, profile: Profile, tun: Tunables
 ) -> dict[Band, float]:
-    """Clamp normalized outputs to ``evening_output_cap`` once E is high (rule 2.4)."""
-    if e < tun.evening_cap_threshold:
-        return outputs
-    cap = profile.evening_output_cap
+    """Clamp normalized outputs to the continuous evening cap (rule 2.4, D33)."""
+    cap = evening_cap(w, profile)
     return {b: min(v, cap) for b, v in outputs.items()}
 
 
-def apply_boost_evening_output(
-    outputs: dict[Band, float],
-    e: float,
-    role: Role,
-    profile: Profile,
-    tun: Tunables,
-    g: float,
-) -> tuple[dict[Band, float], bool]:
-    """Drive the BOOST band at the profile's evening output (rule 4.5, D26).
+def boost_weight(w: float, tun: Tunables) -> float:
+    """How much of the BOOST band is still its tier output (rule 4.5, D33).
 
-    Returns ``(outputs, unlocked)``. Inside the evening lockout window
-    (``E >= boost_evening_max``) an **ACTIVE** room whose profile sets
-    ``boost_evening_output`` drives the boost band at that normalized value
-    instead of having it gated off; ``unlocked`` tells
-    :func:`~.photometry.allocate` not to re-zero it.
-
-    Applied after the evening cap and **exempt from it** — an explicit "this is
-    what the bench strip does in the evening" value, not a tier the cap should
-    trim — but it IS scaled by the master gain ``g``. The master switch has no
-    other mechanism: :func:`~.gain.multiplier` returns 0 when the master is off
-    (rule 7.2), so a band that ignored ``g`` would be the one light in the house
-    the master switch could not turn off. It still goes through the normal
-    weight share and affine response mapping in ``allocate``.
-
-    ADJACENT/BACKGROUND, the §6 mode tables and the closed-loop path are
-    untouched — they never call this, so their boost band stays locked out.
+    1 below ``boost_evening_max - BOOST_FADE``, 0 at and above
+    ``boost_evening_max``, linear between. The band output is
+    ``β·tier + (1 - β)·evening`` where ``evening`` is the explicit
+    ``boost_evening_output`` (ACTIVE rooms that set one) or 0 (the lockout) —
+    the hand-over is a fade across a W window, not a step at the threshold.
     """
-    if profile.boost_evening_output is None or role is not Role.ACTIVE or e < tun.boost_evening_max:
-        return outputs, False
-    return {**outputs, Band.BOOST: max(0.0, min(1.0, profile.boost_evening_output * g))}, True
+    lo = tun.boost_evening_max - BOOST_FADE
+    if w <= lo:
+        return 1.0
+    if w >= tun.boost_evening_max:
+        return 0.0
+    return (tun.boost_evening_max - w) / BOOST_FADE
+
+
+def boost_evening_value(role: Role, profile: Profile, g: float) -> float | None:
+    """The BOOST band's explicit evening output, or ``None`` (rule 4.5, D26).
+
+    Only for an **ACTIVE** room whose profile sets ``boost_evening_output``:
+    the value the band takes inside the lockout window instead of 0. Exempt
+    from the evening cap — an explicit "this is what the bench strip does in
+    the evening" value, not a tier the cap should trim — but scaled by the
+    master gain ``g`` (0 with the master off, rule 7.2: no room may hold a band
+    the master switch cannot extinguish). ADJACENT/BACKGROUND, the §6 mode
+    tables and the closed loop never get one; their boost band fades to 0.
+    """
+    if profile.boost_evening_output is None or role is not Role.ACTIVE:
+        return None
+    return max(0.0, min(1.0, profile.boost_evening_output * g))
 
 
 def daylight_factor(n_hat: float, tun: Tunables, full: float | None = None) -> float:

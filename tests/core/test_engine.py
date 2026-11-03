@@ -181,24 +181,24 @@ def test_pause_grace_holds_the_playing_level_then_steps_up() -> None:
     """§6.3a: pausing holds the playing level for tv_pause_grace, then the ON cap
     takes over — and the engine schedules the review that does it."""
     eng = _engine()
-    eng.handle(PresenceChanged("spisebord", True), at(1, 20, 0))
-    playing = eng.handle(TvChanged(TvState.PLAYING), at(1, 20, 0, 1))
+    eng.handle(PresenceChanged("spisebord", True), at(1, 18, 0))
+    playing = eng.handle(TvChanged(TvState.PLAYING), at(1, 18, 0, 1))
     assert isclose(diag(playing, "spisebord").target_output, 0.15)
 
-    paused = eng.handle(TvChanged(TvState.ON), at(1, 20, 0, 30))
+    paused = eng.handle(TvChanged(TvState.ON), at(1, 18, 0, 30))
     assert eng.state.rooms["spisebord"].role is Role.TV  # still the playing tier
     assert isclose(diag(paused, "spisebord").target_output, 0.15)
 
-    # The engine wakes itself at the expiry: once the sooner circadian tick has
-    # fired, the pause-grace review is the next thing on the calendar.
-    ticked = eng.handle(ReviewTick(), at(1, 20, 1, 0))
-    assert review(ticked) == at(1, 20, 0, 30) + timedelta(seconds=120)
+    # The engine wakes itself at the expiry: in the daytime circadian plateau
+    # (no ramp ticking) the pause-grace review is the next thing on the calendar.
+    ticked = eng.handle(ReviewTick(), at(1, 18, 1, 0))
+    assert review(ticked) == at(1, 18, 0, 30) + timedelta(seconds=120)
 
     # A rewind-length pause elapses without moving the room...
-    held = eng.handle(ReviewTick(), at(1, 20, 2, 0))
+    held = eng.handle(ReviewTick(), at(1, 18, 2, 0))
     assert isclose(diag(held, "spisebord").target_output, 0.15)
     # ...and at the grace expiry it returns to its own role, capped.
-    stepped = eng.handle(ReviewTick(), at(1, 20, 2, 31))
+    stepped = eng.handle(ReviewTick(), at(1, 18, 2, 31))
     assert eng.state.rooms["spisebord"].role is Role.ACTIVE
     assert isclose(diag(stepped, "spisebord").target_output, 0.3)
 
@@ -768,12 +768,12 @@ def test_overridden_room_schedules_vacancy_release() -> None:
     """§9.2 (F2): a held override still schedules the vacancy-hold expiry, so an
     OFF-worthy room releases at hold end with no other events (not after 4 h)."""
     eng = _engine()
-    eng.handle(PresenceChanged("kontor", True), at(1, 20, 0))  # vacancy:off room, ACTIVE
-    eng.handle(ForeignChange("kontor_taklys", 0.9), at(1, 20, 1))
+    eng.handle(PresenceChanged("kontor", True), at(1, 18, 0))  # vacancy:off room, ACTIVE
+    eng.handle(ForeignChange("kontor_taklys", 0.9), at(1, 18, 1))
     assert eng.state.rooms["kontor"].overridden
-    out = eng.handle(PresenceChanged("kontor", False), at(1, 20, 2))  # vacate: 90 s hold
+    out = eng.handle(PresenceChanged("kontor", False), at(1, 18, 2))  # vacate: 90 s hold
     rev = review(out)
-    assert rev == at(1, 20, 3, 30)  # 90 s hold from 20:02, not the 4 h timeout
+    assert rev == at(1, 18, 3, 30)  # 90 s hold from 18:02, not the 4 h timeout
     eng.handle(ReviewTick(), rev)
     assert not eng.state.rooms["kontor"].overridden  # released at hold expiry
 
@@ -801,7 +801,7 @@ def test_boundary_instant_wake_enters_ramp() -> None:
     on_boundary = day.handle(ReviewTick(), at(1, 20, 0))  # E still 0.0 here
     assert review(on_boundary) == at(1, 20, 1)  # one minute into the ramp
     in_ramp = day.handle(ReviewTick(), at(1, 20, 1))  # now 0 < E < 1
-    assert review(in_ramp) == at(1, 20, 6)  # circadian_tick (300 s) cadence
+    assert review(in_ramp) == at(1, 20, 2)  # circadian_tick (60 s) cadence
 
     night = Engine(apartment(), InitialSnapshot(sleep=True))  # E_clock rules
     night.handle(ReviewTick(), at(1, 2, 0))  # boot (grace)

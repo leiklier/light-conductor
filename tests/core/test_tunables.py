@@ -39,7 +39,8 @@ DOC_ROWS: dict[str, tuple[tuple[str, ...], tuple[object, ...]]] = {
         ("morning_start_min", "morning_full_min"),
         (6 * 60, 7 * 60 + 30),
     ),
-    "circadian_tick": (("circadian_tick",), (300.0,)),
+    "circadian_tick": (("circadian_tick",), (60.0,)),
+    "dusk_ceiling": (("dusk_ceiling",), (1.0,)),
     "evening_output_cap": (("evening_output_cap",), (0.3,)),
     "write_blank": (("write_blank",), (5.0,)),
     "tau_lux_up / tau_lux_down": (("tau_lux_up", "tau_lux_down"), (30.0, 60.0)),
@@ -115,7 +116,7 @@ def test_every_field_is_documented() -> None:
     """No stray tunable exists that §12 does not describe (evening_cap_threshold
     is the one deliberate addition, tabled in the same PR)."""
     documented = {f for _, (fields, _d) in DOC_ROWS.items() for f in fields}
-    documented.add("evening_cap_threshold")  # §2.4 gap, added to the table
+    documented.add("evening_cap_threshold")  # §1.7 corridor gate, tabled separately
     assert set(Tunables().__dataclass_fields__) == documented
 
 

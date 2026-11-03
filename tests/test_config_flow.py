@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import area_registry as ar
@@ -463,8 +464,18 @@ async def test_tunables_reject_inverted_dusk_window(hass: HomeAssistant) -> None
     assert result["step_id"] == "tunables"
     assert result["errors"] == {"base": "invalid_tunables"}
 
+    # D33: dusk_ceiling, away_debounce (D29) and fallback_min_on (D31) are
+    # editable; the selector bounds dusk_ceiling to [0, 1] (Tunables re-checks).
+    schema_keys = {str(k) for k in result["data_schema"].schema}
+    assert {"dusk_ceiling", "away_debounce", "fallback_min_on"} <= schema_keys
+    from homeassistant.data_entry_flow import InvalidData
+
+    with pytest.raises(InvalidData):
+        await configure(result["flow_id"], {"outdoor_on_lux": 25.0, "dusk_ceiling": 1.5})
+
     # A valid window is accepted and stored.
-    result = await configure(result["flow_id"], {"outdoor_on_lux": 25.0})
+    result = await configure(result["flow_id"], {"outdoor_on_lux": 25.0, "dusk_ceiling": 0.4})
     result = await configure(result["flow_id"], {"next_step_id": "finish"})
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert entry.options[CONF_TUNABLES]["outdoor_on_lux"] == 25.0
+    assert entry.options[CONF_TUNABLES]["dusk_ceiling"] == 0.4

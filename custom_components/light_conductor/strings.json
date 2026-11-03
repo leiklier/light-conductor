@@ -135,7 +135,7 @@
       }
     },
     "error": {
-      "invalid_tunables": "Invalid combination: check that the dusk window is ordered (outdoor_full_lux below outdoor_on_lux) and the sun ramp is (sun_low_deg below sun_high_deg)."
+      "invalid_tunables": "Invalid combination: check that the dusk window is ordered (outdoor_full_lux below outdoor_on_lux), the sun ramp is (sun_low_deg below sun_high_deg), and dusk_ceiling is between 0 and 1."
     }
   },
   "entity": {

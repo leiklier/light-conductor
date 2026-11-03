@@ -949,6 +949,10 @@ async def test_diagnostics_dump_reports_tv_state(hass: HomeAssistant) -> None:
     dump = await async_get_config_entry_diagnostics(hass, entry)
     assert dump["engine"]["tv"] == "on"
     assert dump["engine"]["tv_hold_until"] is None
+    # §2.3/D33: both circadian factors, the debounced away state (D29).
+    assert 0.0 <= dump["engine"]["last_w"] <= dump["engine"]["last_e"] <= 1.0
+    assert dump["engine"]["away"] is False
+    assert dump["engine"]["away_pending_since"] is None
 
 
 # --- §8.4a: a foreign change interrupts the channel's writer -----------------

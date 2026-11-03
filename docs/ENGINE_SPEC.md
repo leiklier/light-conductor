@@ -99,7 +99,8 @@ room with `vacancy: off` (kontor) demotes straight to OFF after its hold.
 
 1.7 **Corridor rooms** (no presence input, e.g. gang): role is derived —
 ADJACENT when any neighbour is ACTIVE, BACKGROUND per 1.6 during evening
-(§2.3), else OFF. Trigger entities (1.1) pulse a corridor to ACTIVE for
+(darkness `E ≥ evening_cap_threshold`, §2.3 — a dark corridor next to a lit
+living area, not a late one), else OFF. Trigger entities (1.1) pulse a corridor to ACTIVE for
 `trigger_hold` seconds.
 
 1.8 **Unknown presence.** Primary and fallbacks all unavailable ⇒ the room
@@ -144,7 +145,7 @@ still win, and §6.5's away-mode handling of the switch is unchanged.
 
 2.1 **Tiered targets.** Each room profile defines target lux per role tier:
 `lux_active_day`, `lux_active_evening`, `lux_background`. ACTIVE interpolates
-between day and evening values by the circadian factor (2.3); ADJACENT and
+between day and evening values by the wind-down factor `W` (2.3); ADJACENT and
 BACKGROUND derive from the interpolated ACTIVE target (1.5, and
 `background_fraction` with `background_cap`). An explicit nonzero
 `lux_background` acts as a floor under the derived BACKGROUND target. OFF ⇒ 0.
@@ -164,34 +165,64 @@ meaningless before calibration — so the fallback never applies to them.
 2.2 **Rooms without a lux sensor** use the same tier machinery but express
 targets directly as normalized channel output (open-loop tables, §4.6).
 
-2.3 **Circadian factor `E ∈ [0,1]`** (0 = full day, 1 = full evening):
-`E = max(E_sun, E_clock)` where `E_sun` ramps 0→1 as sun elevation falls
-from `sun_high_deg` (default +10°) to `sun_low_deg` (default −4°), and
-`E_clock` ramps 0→1 between `evening_start` (default 20:00) and
-`evening_full` (default 22:30) local time, and back to 0 at `morning_start`
-(default 06:00) → `morning_full` (07:30). The clock terms read minutes past
-**local** midnight off the event timestamp, so the adapter MUST stamp
-`handle()` with the instance's local wall clock (`dt_util.now()`), never UTC —
-a UTC stamp runs every clock ramp hours late (Oslo summer: the "06:00"
-morning ramp at 08:00 local, full-evening E all morning; the 2026-08-14
-incident, most visible in the sensor-less rooms whose level is a pure
-function of E). All other engine time arithmetic is duration-based and
-timezone-agnostic. The clock term guarantees a cozy
-ramp-down toward bedtime even in Nordic summer when the sun sets late; the
-sun term darkens winter afternoons. No hard steps: E is continuous and
-evaluated on a coarse schedule (≤ 1 change per `circadian_tick`, default
-300 s) so it never causes visible jumps by itself. The engine self-schedules
-its own re-evaluations: while E is inside a ramp it reviews every
-`circadian_tick`, and from a plateau (E = 0 or 1) it schedules the next
-clock-ramp boundary (the next local `evening_start`/`morning_start`) so it can
-start the 20:00 and 06:00 clock ramps unprompted. Entry into the *sun* ramp
-additionally relies on the adapter's `SunElevationChanged` events (push cadence
-~1–2 min); the clock term needs no external cadence.
+2.3 **Circadian factors: darkness `E` and wind-down `W` (D33).** Both in
+[0, 1] (0 = full day, 1 = full evening). **`E = max(E_sun, E_clock)`** — "it
+is dark" — where `E_sun` ramps 0→1 as sun elevation falls from `sun_high_deg`
+(default +10°) to `sun_low_deg` (default −4°), and `E_clock` ramps 0→1
+between `evening_start` (default 20:00) and `evening_full` (default 22:30)
+local time, and back to 0 at `morning_start` (default 06:00) → `morning_full`
+(07:30). **`W = max(E_clock, min(E_sun, dusk_ceiling))`** — "it is late": the
+sun alone can carry the wind-down only up to `dusk_ceiling`, the clock carries
+it the rest of the way. `dusk_ceiling` 1.0 (default) makes W ≡ E. In a Nordic
+winter the two are hours apart — 2 Nov E ≥ 0.5 from ~16:09, 21 Dec from
+~14:51, and E never reaches 0 at midday ~25 Nov–17 Jan at 59° N — and one
+factor doing both jobs put the house on its bedtime tier mid-afternoon.
 
-2.4 **Evening cap.** In addition to interpolation, `E ≥ evening_cap_threshold`
-imposes the profile's `evening_output_cap` on normalized channel output
-(legacy 30 %-after-18:00 semantics, now smooth). The cap applies in the §8
-funnel so every path (including manual-nudge reconciliation) honors it.
+Routing (each consumer justified in D33): **W** drives the ACTIVE day↔evening
+interpolation (open-loop tables §4.6, and through it ADJACENT §1.5), the
+closed-loop lux target interpolation (§2.1), the evening cap on every path
+(§2.4), and the boost hand-over (§4.5, incl. `boost_evening_output`). **E**
+keeps CT (§5), the outdoor dusk gates and fallback (§6.5/6.5a, §1.10), the
+corridor evening gate (§1.7) and the morning neutral-drift edge (§7.3).
+
+The clock terms read minutes past **local** midnight off the event timestamp,
+so the adapter MUST stamp `handle()` with the instance's local wall clock
+(`dt_util.now()`), never UTC — a UTC stamp runs every clock ramp hours late
+(Oslo summer: the "06:00" morning ramp at 08:00 local, full-evening E all
+morning; the 2026-08-14 incident, most visible in the sensor-less rooms whose
+level is a pure function of the factors). All other engine time arithmetic is
+duration-based and timezone-agnostic. The clock term guarantees a cozy
+ramp-down toward bedtime even in Nordic summer when the sun sets late; the
+sun term darkens winter afternoons. No hard steps: both factors are
+continuous and are re-evaluated every `circadian_tick` (default 60 s) while
+**either term** — `E_sun` or `E_clock` — is strictly inside its ramp (with the
+sun down E sits at 1 while W still climbs 20:00 → 22:30 on the clock; a ramp
+test on E alone would sleep until 06:00). From a plateau of both terms the
+engine schedules the next clock-ramp boundary (the next local
+`evening_start`/`morning_start`) so it can start the 20:00 and 06:00 clock
+ramps unprompted. Entry into the *sun* ramp additionally relies on the
+adapter's `SunElevationChanged` events (push cadence ~1–2 min). The 60 s tick
+(300 s before D33) keeps every channel within one §8.3 grid level per tick at
+the fastest W ramp (the 90-min morning clock ramp); writes stay bounded by the
+grid levels crossed, since the governor only emits on a level change.
+
+2.4 **Evening cap (continuous, D33).** The profile's `evening_output_cap`
+bounds normalized channel output through a cap that is continuous and
+monotone in W:
+
+    cap(W) = (1 − W) + W · evening_output_cap
+
+non-binding at W = 0, `evening_output_cap` at W = 1. It is the straight line
+the ACTIVE interpolation draws from full output to the cap, so a profile whose
+evening tier is at or below its cap (every live room) is never dimmed *by*
+the cap — the interpolation does it — and the cap only trims what rides above
+(master gain > 1, closed-loop demand, a TV table). It applies in the §8 funnel
+on every path: the open-loop tiers, the mode tables that are gain-scaled, the
+closed-loop correction **and the closed-loop hold** (a held level above
+`cap(W)` comes down with it, a grid step at a time, instead of the whole
+difference landing at the next deadband correction). Before D33 the cap
+switched on at `E ≥ evening_cap_threshold` (0.5) and the kitchen fell
+0.625 → 0.25 in one write.
 
 2.5 **Targets are what the master gain scales** (§7): `T' = T × G` before
 allocation, clamped to the room's `lux_max`.
@@ -353,13 +384,24 @@ configured `weight` (default equal) — **never** their calibrated sensor
 gains: gain is an observation model (§3.1), a function of where the sensor
 happens to sit, not of how much a channel lights the room (e.g. the kjøkken
 sensor sits next to benkebelysning; its gain dwarfs the taklys gain without
-the light being aesthetically dominant). A `boost` band additionally requires `E < boost_evening_max`
-(benkebelysning stays off in the evening, matching legacy kitchen-off
-behavior where only the accent band survives sunset).
+the light being aesthetically dominant). A `boost` band is **locked out in
+the evening** (benkebelysning off, matching legacy kitchen-off behavior where
+only the accent band survives sunset) through a **hand-over in W (D33)**: its
+band output is `β·tier + (1 − β)·evening`, where `β` falls linearly from 1 at
+`W = boost_evening_max − BOOST_FADE` (0.3) to 0 at `W = boost_evening_max`
+(0.5) and `evening` is the band's evening value — 0 (the lockout) or the
+profile's `boost_evening_output` below. At and above `boost_evening_max` the
+band is exactly what it was before D33; below the window it is the plain
+tier; across the window it fades instead of stepping (the kitchen bench strip
+went 6 % → 18 % in one write at 0.5). The closed loop scales the boost band's
+lux capacity by `β`, so its demand moves to the other bands continuously.
+`BOOST_FADE` (0.2) is an engineering constant sized so the bench strip's
+0.8x − 0.5 mapping moves at most one §8.3 grid level per tick.
 
 **Evening boost output (D26).** A profile may set `boost_evening_output`: a
 normalized band output the BOOST band takes *inside* the lockout window
-(`E ≥ boost_evening_max`) in an **ACTIVE** room, instead of being gated off.
+(`W ≥ boost_evening_max`, faded in across the hand-over window above) in an
+**ACTIVE** room, instead of being gated off.
 Blank (the default) keeps the plain lockout — the boost band is task light,
 orthogonal to a cozy evening (D6/Q4) — but the user does turn the kitchen bench
 strip on at 22:04, and no global knob can say that without unlocking every
@@ -417,7 +459,7 @@ cycle and shared by the gate and the closed loop (no duplicate formula).
 
 4.6 **Open-loop tables.** Without a usable lux sensor, role tiers map to
 normalized outputs per band: `out_active_day`, `out_active_evening`,
-`out_background` (profile), interpolated by E, scaled by master gain, floored
+`out_background` (profile), interpolated by W (§2.3), scaled by master gain, floored
 by `dim_floor`.
 
 4.7 **Daylight-aware open-loop.** A room that *has* a lux sensor but is not
@@ -492,6 +534,8 @@ consistent with its loop's `error = T' − (N̂ + Â)`.
 ## 5. Color temperature policy
 
 5.1 CT-capable channels track `ct_target = ct_day − E × (ct_day − ct_evening)`
+— darkness, not wind-down (D33): warm light belongs to the dark, so at 17:00
+in November the kitchen is bright (W = `dusk_ceiling`) *and* warm (E = 1)
 (defaults 3300 K → 2400 K), clamped to hardware range.
 
 5.2 **Blend anchoring.** In a room that mixes CT channels with fixed-CT
@@ -745,7 +789,10 @@ background and night path are exempt.)
 
 7.3 **Neutral drift.** The gain relaxes back to neutral on the morning edge
 (sleep off, or `morning_full`), tunable `gain_reset` (on/off, default on) —
-a "dimmer tonight" nudge should not permanently darken the house.
+a "dimmer tonight" nudge should not permanently darken the house. The
+`morning_full` edge is E's E>0 → E=0 transition (darkness, D33); between
+~25 Nov and ~17 Jan at 59° N E never reaches 0, and the daily reset then rests
+on the sleep-off edge, which fires every morning.
 
 7.4 Night path (6.2) and away/sleep OFF states are not scaled by gain —
 safety floors and hard-offs are absolute.
@@ -786,12 +833,15 @@ eye is sensitive and sparse where it is not:
 
     g_0 = dim_floor,   g_{k+1} = g_k + max(quant_step, quant_rel · g_k),   last level = 1.0
 
+(a last interior level within half a step of 1.0 is absorbed into it, so no
+sliver gap sits below full output)
+
 i.e. absolute `quant_step` (0.01) steps through the dim end — a relative step
 there would fall below the device's 1/255 resolution — and relative
 `quant_rel` (10 %) steps above `quant_step / quant_rel` (10 % output). The
 dim floor and full output are always levels. With the default `dim_floor`
-0.02 the grid has **34 levels** (≤ 50 for any `dim_floor` ≥ 0), which bounds
-write volume: a channel sweeping its whole range issues at most 33 level
+0.02 the grid has **33 levels** (≤ 50 for any `dim_floor` ≥ 0), which bounds
+write volume: a channel sweeping its whole range issues at most 32 level
 changes. The quantizer is **sticky**: a lit channel at level `c` (its ledger
 value — on the grid, or off it after a seed or an adopted dial) is HELD while
 the goal lies within `QUANT_HOLD · max(quant_step, quant_rel · min(goal, c))`
@@ -1084,9 +1134,10 @@ fresh install and a missed restore get).
 | sun_high_deg / sun_low_deg | +10° / −4° | 2.3 |
 | evening_start / evening_full | 20:00 / 22:30 | 2.3 |
 | morning_start / morning_full | 06:00 / 07:30 | 2.3 |
-| circadian_tick | 300 s | 2.3 |
+| circadian_tick | 60 s | 2.3 |
+| dusk_ceiling | 1.0 | 2.3 |
 | evening_output_cap | profile (0.3 living) | 2.4 |
-| evening_cap_threshold | 0.5 | 2.4 |
+| evening_cap_threshold | 0.5 | 1.7 |
 | write_blank | 5 s | 3.2 |
 | tau_lux_up / tau_lux_down | 30 s / 60 s | 3.2 |
 | night_prior_deg / tau_night_prior | −6° / 600 s | 3.3 |

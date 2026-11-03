@@ -373,6 +373,9 @@ class EngineState:
     #: edge-triggered on the E>0 -> E==0 morning transition, so booting at
     #: midday never clobbers a restored gain. ``None`` until the first review.
     last_e: float | None = None
+    #: Wind-down factor W at the previous recompute (rule 2.3, D33) —
+    #: diagnostics only (never a recorded attribute).
+    last_w: float | None = None
     started: bool = False
     start_at: datetime | None = None
     rooms: dict[str, RoomState] = field(default_factory=dict)

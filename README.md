@@ -16,7 +16,12 @@ What it does:
   sensor that actually sees the sky; each room sets the daylight level it calls
   "full".
 - **Circadian shaping** — targets and color temperature drift continuously
-  toward cozy warm evenings; no hard clock steps.
+  toward cozy warm evenings; no hard clock steps. "Dark" and "late" are
+  separate: color temperature follows the dark, brightness winds down with
+  the hour, and `dusk_ceiling` (Options → Tunables; 1.0 keeps them together)
+  sets how far sunset alone may dim the house — at 0.4 a November 17:00 is
+  warm but still bright, and the evening tier arrives on the 20:00–22:30
+  clock ramp.
 - **Follow-me with room personalities** — living-area rooms make subtle
   adjustments and never go dark while the area is in use; utility rooms turn
   fully off after vacancy. A room's fallback occupancy sensors (raw mmWave/PIR
